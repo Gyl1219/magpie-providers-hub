@@ -22,6 +22,15 @@ import { astudioChannel } from './astudio.mjs'
 const PROVIDER = 'dsh-providers-hub'
 const PROVIDER_NAME = 'DSH Providers Hub'
 
+/**
+ * loader 的占位 baseURL。
+ *
+ * ⚠️ 不能留空串：magpie 会据此判「无处可发」（`nowhere to send its requests`）。
+ *    本插件的请求全部在 `loader().fetch` 里按渠道前缀改写到各上游，这个域名不会被真正访问；
+ *    用 `.invalid` 保留域（RFC 2606）保证即使漏拦截也不会打到真实主机。
+ */
+const PLACEHOLDER_BASE = 'https://dsh-providers-hub.invalid'
+
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
 const CHANNELS = [officeaceChannel, astudioChannel]
 
@@ -62,26 +71,32 @@ function prefixed(channelId, modelId) {
   return `${channelId}/${modelId}`
 }
 
+/**
+ * 合并所有渠道的目录，模型 id 加渠道前缀。
+ *
+ * ⚠️ **按渠道分别回落**：已登录渠道拉到真实目录、未登录渠道用兜底目录。
+ *    如果只在「一个渠道都没登录」时才回落（早先的写法），会造成
+ *    「officeace 登录后，astudio 的模型从选择器里凭空消失」——
+ *    用户看到的是模型变少，而不是「astudio 未登录」。
+ */
 async function discoverModels(fallback) {
   const merged = {}
   for (const channel of CHANNELS) {
-    if (!signedIn(channel)) continue
-    try {
-      const credential = await ensure(channel)
-      const models = await channel.catalog(credential)
-      for (const [id, def] of Object.entries(models)) {
-        merged[prefixed(channel.id, id)] = def
+    let models
+    if (signedIn(channel)) {
+      try {
+        const credential = await ensure(channel)
+        models = await channel.catalog(credential)
+      } catch {
+        // 单渠道失败不影响其它渠道；退回该渠道自己的兜底目录
+        models = undefined
       }
-    } catch {
-      // 单个渠道失败不影响其它渠道
     }
-  }
-  // 一个都没登录（或一个都没拉到）→ 用兜底目录，避免选择器空掉
-  if (Object.keys(merged).length === 0) {
-    for (const channel of CHANNELS) {
-      for (const [id, def] of Object.entries(channel.fallbackModels ?? {})) {
-        merged[prefixed(channel.id, id)] = def
-      }
+    if (!models || Object.keys(models).length === 0) {
+      models = channel.fallbackModels ?? {}
+    }
+    for (const [id, def] of Object.entries(models)) {
+      merged[prefixed(channel.id, id)] = def
     }
   }
   return Object.keys(merged).length > 0 ? merged : fallback
@@ -118,20 +133,40 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
       provider: PROVIDER,
       // 每渠道一个登录入口 —— 用户按需逐个登（与 ofm 的控制台集中登录不同，
       // 各渠道登录方式不同：OAuth / 扫码 / 短信，合并不到一个按钮里）。
+      //
+      // ⚠️ 约定（对齐 ofm 的 `authorizeConsole`）：`authorize()` 必须**立刻**返回
+      //    `{ url, method, callback }` —— 不要在这里 await 用户完成登录，否则
+      //    magpie 在等 authorize 返回、用户却在等浏览器打开，双向死锁。
+      //    真正等待登录完成的是 `callback()`：magpie 打开 url 之后才调它。
+      //
+      // 渠道统一契约：`beginLogin(openBrowser)` → `{ url, result }`
+      //   - `url` 立刻可用（授权页 / 本地载体页）
+      //   - `result` 兑现最终凭据（Promise）
       methods: CHANNELS.map((channel) => ({
         type: 'oauth',
         label: `登录 ${channel.displayName}`,
         async authorize() {
-          const { credential, authorizeUrl } = await channel.login(openBrowser)
-          credentials.set(channel.id, credential)
-          saveCredential(channel.id, credential)
-          return { url: authorizeUrl, method: 'auto' }
+          const started = await channel.beginLogin(openBrowser)
+          return {
+            url: started.url,
+            method: 'auto',
+            instructions: `在打开的页面里完成 ${channel.displayName} 登录，本窗口会自动继续。`,
+            async callback() {
+              const credential = await started.result
+              credentials.set(channel.id, credential)
+              saveCredential(channel.id, credential)
+              return { type: 'success', key: channel.id, metadata: { channel: channel.id } }
+            },
+          }
         },
       })),
 
       async loader() {
         return {
-          baseURL: '',
+          // ⚠️ baseURL 不能是空串：magpie 会在发请求前据此判「无处可发」
+          //    （症状：`provider test` 报 "nowhere to send its requests"）。
+          //    这里只是占位 —— 真正的上游地址在下面的 fetch 里按渠道前缀改写。
+          baseURL: PLACEHOLDER_BASE,
           async fetch(input, init) {
             let body
             try {

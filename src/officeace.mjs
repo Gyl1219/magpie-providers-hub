@@ -101,10 +101,18 @@ function signHuaweiRequest(method, url, headers, bodyText, accessKey, secretKey)
   }
 }
 
-/** MaaS 推理域：凭据里的 modelApiUrlBase 优先，否则官方直连域。 */
+/**
+ * MaaS 推理域：凭据里的 `modelApiUrlBase` 优先，否则官方直连域。
+ *
+ * ⚠️ 实测上游返回的 `modelApiUrlBase` 是**不带协议的裸域名**
+ *    （`officeace.cn-southwest-2.huaweicloud-agentarts.com`），
+ *    直接拼 `/v2/models` 会 `Failed to parse URL`。必须补 `https://`。
+ */
 function maasBase(credential) {
-  const base = credential?.modelApiUrlBase
-  return typeof base === 'string' && base.length > 0 ? base : OFFICIAL_MAAS_BASE
+  const raw = credential?.modelApiUrlBase
+  if (typeof raw !== 'string' || raw.length === 0) return OFFICIAL_MAAS_BASE
+  const trimmed = raw.replace(/\/+$/, '')
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
 }
 
 /** MaaS 用 Basic 认证：`base64(appKey:appSecret)`。 */
@@ -229,7 +237,14 @@ async function fetchModelInfo(credential) {
   }
 }
 
-async function runLogin(openBrowser) {
+/**
+ * 启动登录：**立刻**返回 `{ url, credential }`。
+ *
+ * ⚠️ 不要在 `authorize()` 里 await 用户完成登录 —— magpie 的约定是先拿 url 打开浏览器，
+ *    再调 `callback()` 等结果；在 authorize 里死等会让双方互等。
+ *    故这里把「等」放进挂起的 `credential` promise，由 callback() await。
+ */
+async function beginLogin(openBrowser) {
   const state = await registerState()
   const codeVerifier = b64(randomBytes(32))
   const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
@@ -249,17 +264,25 @@ async function runLogin(openBrowser) {
   )}`
   if (openBrowser) openBrowser(authorizeUrl)
 
-  const deadline = Date.now() + LOGIN_TIMEOUT_MS
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
-    const code = await pollLoginCode(state)
-    if (code) {
-      const credential = await exchangeCode(code, codeVerifier, privateJwk)
-      const info = await fetchModelInfo(credential)
-      return { credential: { ...credential, ...info }, authorizeUrl }
+  // ⚠️ 后台推进：**先返回 url**，让调用方立刻拿到（否则与 magpie 死锁），
+  //    轮询结果放在 `result` 里，由 callback() await。
+  //
+  // 契约与 astudio 一致：`{ url, result }`（result 兑现凭据）。
+  const result = (async () => {
+    const deadline = Date.now() + LOGIN_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+      const code = await pollLoginCode(state)
+      if (code) {
+        const exchanged = await exchangeCode(code, codeVerifier, privateJwk)
+        const info = await fetchModelInfo(exchanged)
+        return { ...exchanged, ...info }
+      }
     }
-  }
-  throw new Error('OfficeAce 登录超时（10 分钟）')
+    throw new Error('OfficeAce 登录超时（10 分钟）')
+  })()
+
+  return { url: authorizeUrl, result }
 }
 
 async function refreshCredential(current) {
@@ -341,7 +364,8 @@ export const officeaceChannel = {
     'pangu-2.0-flash': { name: '盘古 2.0 Flash', limit: { context: 128_000, output: 8192 }, tool_call: true },
   },
 
-  login: async (openBrowser) => runLogin(openBrowser),
+  /** 返回 `{ url, credential }` —— url 立刻可用，登录结果在 credential promise 里。 */
+  beginLogin,
   refresh: refreshCredential,
   expired,
   catalog: fetchCatalog,

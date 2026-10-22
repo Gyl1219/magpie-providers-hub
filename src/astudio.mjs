@@ -353,12 +353,16 @@ export const astudioChannel = {
     'spark-x': { name: '讯飞星火 X', limit: { context: 128_000, output: 8192 }, tool_call: true },
   },
 
-  /** 开本地登录页，等用户在页面里走完短信/密码/微信。 */
-  async login(openBrowser) {
+  /**
+   * 起本地载体页并**立刻**返回 `{ url, result }`（契约与 officeace 一致）。
+   *
+   * ⚠️ 不在 authorize 里等登录：magpie 先拿 url 打开浏览器、再调 callback 等结果。
+   *    url 已就绪（本地服务已在监听），登录在 `result` 上推进。
+   */
+  async beginLogin(openBrowser) {
     const flow = await startLoginFlow()
     if (openBrowser) openBrowser(flow.loginUrl)
-    const credential = await flow.result
-    return { credential, authorizeUrl: flow.loginUrl }
+    return { url: flow.loginUrl, result: flow.result }
   },
 
   /** ⚠️ 无程序化续期：SSO 会话一年不滑动，失效即需人工重登。不假装能刷新。 */
