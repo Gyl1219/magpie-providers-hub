@@ -49,11 +49,47 @@ async function ensure(channel) {
   let current = credentialOf(channel)
   if (!current) throw notSignedIn(`未登录：请先在插件里登录 ${channel.displayName}`)
   if (channel.expired?.(current)) {
-    current = await channel.refresh(current)
-    credentials.set(channel.id, current)
-    saveCredential(channel.id, current)
+    // ⚠️ **软续期**：失败不抛错、沿用旧凭据（缺口 3 的聚合侧落点）。
+    //    理由与渠道侧一致：STS/会话续期失败 ≠ 推理凭据失效；把一次续期失败
+    //    升级成「所有请求报错」才是更糟的行为。真正确凿的失效由 401 那条路兜底。
+    current = await renew(channel, current)
   }
   return current
+}
+
+/**
+ * 某渠道的落盘器：**内存缓存 + 磁盘一次写齐**。
+ *
+ * ⚠️ 单一出口 —— `ensure()` 的软续期、`chat()` 里的 401 重发续期、magpie 显式
+ *    `refresh()` 三条路径必须共用它，否则「refresh_token 已消费后立刻落盘」
+ *    这条纪律会在某一路径上漏掉（漏掉 = 中途崩掉就丢新 token）。
+ */
+function persistFor(channel) {
+  return (credential) => {
+    credentials.set(channel.id, credential)
+    saveCredential(channel.id, credential)
+  }
+}
+
+/**
+ * 续期一次（软）。返回新凭据；**失败交回原凭据**并留痕。
+ *
+ * `persist` 让渠道在「refresh_token 已消费」的瞬间**立即落盘**（缺口 5），
+ * 不等 modelInfo —— 中途崩掉也不能丢新 token。
+ */
+async function renew(channel, current) {
+  try {
+    const persist = persistFor(channel)
+    const next = await channel.refresh(current, persist)
+    // 再落一次：doRefresh 是「STS 成功即落盘」，而 modelInfo（推理用的
+    // appKey/appSecret/网关）是在那之后才合并进来的。同引用落第一次时
+    // 那三个字段还是旧值 ⇒ 最终态必须再写一次。
+    persist(next)
+    return next
+  } catch (error) {
+    console.warn(`[${channel.id}] 续期未成功，沿用原凭据：${error.message}`)
+    return current
+  }
 }
 
 /** 已登录的渠道（登录方法是**每渠道一个**，用户按需逐个登）。 */
@@ -184,9 +220,18 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
             const credential = await ensure(hit.channel)
             // ⚠️ 发给上游的 model 必须**去掉**渠道前缀
             const upstreamBody = { ...body, model: hit.model }
+            // 注入 `renew`：让渠道自己在 401/4xx 时判断「续期一次再重发」有没有意义
+            //（缺口 4 的闭环）。判据在渠道侧，聚合层只提供续期能力。
+            // ⚠️ 这里必须传**硬**续期（让异常透出来）：渠道要靠它区分
+            //    `unreadable`（续期没成功）与 `unchanged`（续期成功但逐字节没变）——
+            //    两者的用户指引完全不同。若传软续期（吞异常、交回原凭据），指纹必然
+            //    相同 ⇒ 四态永远退化成 `unchanged`，会把「续期失败」误报成
+            //    「重登也没用，去查订阅」，把用户引向完全错误的方向。
+            //    `ensure()` 那条路（请求前的临期续期）才用软续期。
             const response = await hit.channel.chat(credential, {
               body: upstreamBody,
               signal: init?.signal,
+              renew: (current) => hit.channel.refresh(current, persistFor(hit.channel)),
             })
             // 流式（SSE）与 JSON 都原样透传
             return response
@@ -208,15 +253,18 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
         return { plan: PROVIDER_NAME, windows }
       },
 
+      // magpie 的显式「续期」入口：**硬**续期（失败如实报 failed），
+      // 与 ensure() 里的软续期分工不同，但**共用同一个闸与同一份落盘纪律**
+      // —— 判据只有一份，避免两处漂移。
       async refresh() {
         let ok = true
         for (const channel of CHANNELS) {
           if (!signedIn(channel)) continue
           try {
-            const next = await channel.refresh(credentialOf(channel))
-            credentials.set(channel.id, next)
-            saveCredential(channel.id, next)
+            const next = await channel.refresh(credentialOf(channel), persistFor(channel))
+            persistFor(channel)(next)
           } catch {
+            // ⚠️ 不静默：失败必须让调用方看到（refresh_token 一次性，丢了只能重登）
             ok = false
           }
         }

@@ -285,7 +285,16 @@ async function beginLogin(openBrowser) {
   return { url: authorizeUrl, result }
 }
 
-async function refreshCredential(current) {
+/**
+ * 续期的**纯协议**部分：STS 交换 + modelInfo。
+ *
+ * ⚠️ 落盘职责留给调用方（对齐 DSH `doRefreshCredential` 的抽法）：避免同一份凭据
+ *    被写两处、重复消费一次性 refresh_token。
+ *
+ * ⚠️ 缺口 5：**STS 一成功就落盘，不等 modelInfo**（顺序不能反）。原先等
+ *    modelInfo 一起成功才落盘，中途崩掉就把新 refresh_token 丢了。
+ */
+async function doRefresh(current, persist) {
   if (!current.refreshToken) throw new Error('凭据不支持续期，请重新登录')
   const privateKey = await importDpopPrivateKey(current.dpopPrivateJwk)
   const publicJwk = { kty: 'EC', crv: 'P-256', x: current.dpopPrivateJwk.x, y: current.dpopPrivateJwk.y }
@@ -320,6 +329,8 @@ async function refreshCredential(current) {
     expiresAt: c.expiration,
     refreshToken: token.refresh_token ?? current.refreshToken,
   }
+  // 缺口 5：STS 一成功**立即落盘**，不等 modelInfo（此刻旧 refresh_token 已作废）
+  persist?.(next)
   try {
     Object.assign(next, await fetchModelInfo(next))
   } catch {
@@ -328,10 +339,97 @@ async function refreshCredential(current) {
   return next
 }
 
+/**
+ * **并发去重闸**（缺口 1 —— 最危险的一个）。
+ *
+ * ⚠️ refresh_token 是**一次性**的：两个并发请求同时看到临期 → 各自发一次 STS 续期 →
+ *    第二次去消费已被消费的 refresh_token → 凭据**永久失效**，只能重新登录。
+ *    故同一渠道同一时刻只允许一个在途续期，其余调用方共享它的结果
+ *    （对齐 DSH 的 `refreshInFlight`）。
+ */
+const refreshInFlight = new Map()
+
+function refreshOnce(current, persist) {
+  const pending = refreshInFlight.get(PROVIDER)
+  if (pending !== undefined) return pending
+  const task = doRefresh(current, persist).finally(() => refreshInFlight.delete(PROVIDER))
+  refreshInFlight.set(PROVIDER, task)
+  return task
+}
+
+/**
+ * 临期判据：提前 **10 分钟**（缺口 2，原先只留 60 秒）。
+ *
+ * ⚠️ 60 秒在真实链路上必然踩边界：一次长对话（上游思考链超时给到 600 秒）会在中途过期。
+ * ⚠️ `expiresAt` 解析不出来时**保守判为临期**（对齐 DSH `isExpiring`）：
+ *    拿不到时间就不能假设它还有效。
+ */
+const EXPIRY_LEAD_MS = 10 * 60 * 1000
+
 const expired = (c) => {
   if (!c?.expiresAt) return false
   const t = Date.parse(c.expiresAt)
-  return Number.isFinite(t) && t < Date.now() + 60_000
+  if (!Number.isFinite(t)) return true
+  return t - Date.now() < EXPIRY_LEAD_MS
+}
+
+/**
+ * 「这次重发**有没有意义**」的指纹（缺口 4）：决定 Basic 鉴权 + 目标 host 的三个字段。
+ *
+ * ⚠️ 必须含 **host**：真实缺陷是「华为按账号下发专属网关，Basic 二元组逐字节不变、
+ *    只有网关变了」。只比 key/secret 会把「换 host 后重发有意义」误判为无意义。
+ * ⚠️ 也**不能用对象身份**判（每次解析都是新对象，`renewed !== credential` 恒为真
+ *    ⇒ 401 恒被白重发一次）。
+ */
+const basicAuthFingerprint = (c) =>
+  `${c.modelAppKey}\u0000${c.modelAppSecret}\u0000${maasBase(c)}`
+
+/**
+ * 什么算「这对 Basic 凭据被拒」（缺口 4 的判据，逐字对齐 DSH）。
+ *
+ * | 状态 | 认定 | 理由 |
+ * |---|---|---|
+ * | **4xx** | ✅ | 客户端错误类；报文点名了这对凭据 ⇒ 就是它被拒 |
+ * | **2xx** | ❌ | 成功响应的 body 是**模型输出** —— 用户正在排查的就是这句报文，模型完全可能原样复述 ⇒ 若认可，一次**成功的回答**会把整个渠道误判成凭据失效 |
+ * | **5xx** | ❌ | 基础设施抖动、形状未知 ⇒ 宁可多撞一次，不可误伤渠道 |
+ *
+ * ⚠️ 边界画在**状态类**（4xx）而非枚举具体码：华为文档把 APIG.1009 定义为 400、
+ *    真机回 401，再冒出 403 包装层也不该漏。**两条腿都要**（码腿 + 措辞腿）：
+ *    码是权威，但网关包装层可能改码；措辞来自真机报文原文。
+ */
+const isBasicCredentialRejection = (status, body) => {
+  if (!(status >= 400 && status < 500)) return false
+  return /APIG\.1009/i.test(body) || /AppKey or AppSecret/i.test(body)
+}
+
+/**
+ * 4xx/401 时「续期这一次到底发生了什么」的**四态**（刻意不是布尔）。
+ *   'not-attempted' | 'unchanged' | 'changed' | 'unreadable'
+ *
+ * ⚠️ `unreadable`（续期后拿不到凭据）与 `unchanged`（拿到了但逐字节没变）指向
+ *    **完全不同的下一步动作**，混成布尔必然给错指引。
+ */
+
+/** 按形状给出可读归因。⚠️ 顺序必须是**先判形状、再判状态码**。 */
+function diagnose(status, body, renewal) {
+  if (isBasicCredentialRejection(status, body)) {
+    if (renewal === 'unchanged') {
+      return '已续期，但 AppKey/AppSecret 与网关**一个字节都没变** ⇒ 重新登录改变不了这个拒绝，'
+        + '请到华为云控制台核对该账号的订阅/权限（反复重登无效）'
+    }
+    if (renewal === 'changed') {
+      return '凭据刚续期且已变化仍被拒 ⇒ 权限/订阅面问题（新凭据同样不被 MaaS 认可）'
+    }
+    if (renewal === 'unreadable') {
+      return '续期后取不到凭据 ⇒ 请重新登录'
+    }
+    return '华为 APIG.1009：MaaS 侧不认这对 AppKey/AppSecret（本次未尝试续期）'
+  }
+  if (status === 401) {
+    return 'HTTP 401，但报文不是已知的「AppKey/AppSecret 无效」形状 —— '
+      + '可能是网关/代理层抖动，请核对出口 IP 与 endpoint，不必急着重登'
+  }
+  return `HTTP ${status}`
 }
 
 /**
@@ -340,11 +438,11 @@ const expired = (c) => {
  * 聚合层按这个形状调用：
  *   - `id` / `displayName`：渠道标识
  *   - `fallbackModels`：未登录时的兜底目录
- *   - `login(openBrowser)` → `{ credential, authorizeUrl }`
- *   - `refresh(credential)` → 新凭据（失败抛错并留痕）
- *   - `expired(credential)` → 是否临期
+ *   - `beginLogin(openBrowser)` → `{ url, result }`（url 立刻可用，不 await 登录）
+ *   - `refresh(credential, persist?)` → 新凭据；`persist` 负责立即落盘
+ *   - `expired(credential)` → 是否临期（提前 10 分钟）
  *   - `catalog(credential)` → `{ [modelId]: modelDef }`
- *   - `chat(credential, { model, body, signal })` → Response
+ *   - `chat(credential, { body, signal, renew? })` → Response
  */
 export const officeaceChannel = {
   id: PROVIDER,
@@ -364,24 +462,98 @@ export const officeaceChannel = {
     'pangu-2.0-flash': { name: '盘古 2.0 Flash', limit: { context: 128_000, output: 8192 }, tool_call: true },
   },
 
-  /** 返回 `{ url, credential }` —— url 立刻可用，登录结果在 credential promise 里。 */
+  /** 返回 `{ url, result }` —— url 立刻可用，登录结果在 result promise 里。 */
   beginLogin,
-  refresh: refreshCredential,
+  // ⚠️ 必须绑 **refreshOnce**（带去重闸 + 接 persist），不能绑 doRefresh：
+  //    绑错的话缺口 1 的并发闸就是死代码 —— 并发续期会各自消费一次性
+  //    refresh_token，直接把凭据打死。
+  refresh: refreshOnce,
   expired,
   catalog: fetchCatalog,
 
-  /** 发一次对话请求；`model` 已去掉渠道前缀。 */
-  async chat(credential, { body, signal }) {
+  /**
+   * 发一次对话请求；`model` 已去掉渠道前缀。
+   *
+   * ## 缺口 4：非 2xx 时「续期一次再重发」有没有意义
+   *
+   * 闸门必须是**超集**：`401` 照旧一律尝试续期（形状未知的网关 401 也可能是凭据
+   * 陈旧，旧行为能救回来的不能丢），**另外**把「4xx + 报文点名这对 Basic 凭据」
+   * 也算进来（APIG.1009 文档 400／真机 401，只认 401 会漏掉文档那一侧）。
+   *
+   * 重发与否**只认指纹**（key+secret+host），不认对象身份 —— 指纹没变 ⇒ 重发注定
+   * 得到同一个拒绝，不如把这句话原样告诉用户（省去一次无效重登）。
+   */
+  async chat(credential, { body, signal, renew }) {
     const url = `${maasBase(credential)}${CHAT_PATH}`
-    return fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        // ⚠️ MaaS 用 **Basic**（appKey:appSecret base64），不是 Bearer。
-        authorization: basicAuthorization(credential),
-      },
-      body: JSON.stringify(body),
-      signal,
+    const headers = {
+      'content-type': 'application/json',
+      // ⚠️ MaaS 用 **Basic**（appKey:appSecret base64），不是 Bearer。
+      authorization: basicAuthorization(credential),
+    }
+    const response = await fetch(url, {
+      method: 'POST', headers, body: JSON.stringify(body), signal,
     })
+    if (response.ok) return response
+
+    const text = await response.text().catch(() => '')
+    let finalStatus = response.status
+    let finalText = text
+    // 产生**最终**那次拒绝的凭据。
+    // ⚠️ 续期真的换掉 Basic 三元组时，下一轮用的是**新**那份 ⇒ 归因必须落在它身上，
+    //    否则永远追不上实际在用的凭据，每轮仍白撞一次。
+    let rejected = credential
+    let renewal = 'not-attempted' // 四态，不是布尔
+
+    if ((finalStatus === 401 || isBasicCredentialRejection(finalStatus, finalText)) && renew) {
+      const before = basicAuthFingerprint(credential)
+      let renewed
+      try {
+        // 聚合层注入的是**硬**续期：失败会抛，才能与「续期成功但没变化」区分开
+        renewed = await renew(credential)
+      } catch {
+        renewed = undefined
+      }
+      if (!renewed) {
+        renewal = 'unreadable'
+      } else if (basicAuthFingerprint(renewed) !== before) {
+        renewal = 'changed'
+        rejected = renewed
+        const retry = await fetch(`${maasBase(renewed)}${CHAT_PATH}`, {
+          method: 'POST',
+          headers: { ...headers, authorization: basicAuthorization(renewed) },
+          body: JSON.stringify(body),
+          signal,
+        })
+        if (retry.ok) return retry
+        finalStatus = retry.status
+        finalText = await retry.text().catch(() => '')
+      } else {
+        // 续期跑了，但决定鉴权与网关的三个字段逐字节没变 ⇒ 重发没有意义
+        renewal = 'unchanged'
+      }
+    }
+
+    return Response.json({
+      error: {
+        type: 'provider_error',
+        message: `OfficeAce（华为 MaaS）返回 HTTP ${finalStatus}：`
+          + `${finalText.slice(0, 200)}（${diagnose(finalStatus, finalText, renewal)}）`,
+        // 透传给上层做熔断/重试判定的原始状态码（不用被拒绝的凭据参与）
+        provider_status: finalStatus,
+        credential_rejected: isBasicCredentialRejection(finalStatus, finalText),
+        renewal_outcome: renewal,
+        rejected_fingerprint: basicAuthFingerprint(rejected),
+      },
+    }, { status: finalStatus >= 400 ? finalStatus : 502 })
   },
+}
+
+// 供测试与聚合层复用的判据（**唯一一份实现**，避免两处漂移）
+export {
+  expired,
+  basicAuthFingerprint,
+  isBasicCredentialRejection,
+  diagnose,
+  refreshOnce,
+  EXPIRY_LEAD_MS,
 }
