@@ -1,6 +1,6 @@
 // magpie / OpenCode 插件 — DSH Providers Hub 渠道的独立实现。
 //
-// 原项目：https://github.com/iJetLi/dsh-providers-hub ｜ 作者：JetLi
+// 原项目：https://github.com/iJetLi/dsh-providers-hub ｜ 作者：JetLi（https://github.com/iJetLi）
 // 本仓库是它的**第三方 Magpie 适配版本**，不是原项目官方发布。
 //   来自原项目：账号渠道、EAC 授权流程、本地服务与管理界面。
 //   本仓库新增：Magpie 供应商接口、自动服务管理、浏览器管理入口、兼容测试。

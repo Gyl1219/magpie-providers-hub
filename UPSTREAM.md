@@ -1,6 +1,6 @@
 # 与原项目的关系
 
-**原项目：** https://github.com/iJetLi/dsh-providers-hub ｜ **作者：JetLi**
+**原项目：** [iJetLi/dsh-providers-hub](https://github.com/iJetLi/dsh-providers-hub) ｜ **作者：** [JetLi](https://github.com/iJetLi)
 
 **本仓库是原项目的第三方 Magpie 适配版本，不是原项目官方发布。**
 

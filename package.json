@@ -1,7 +1,7 @@
 {
-  "name": "magpie-dsh-providers-hub",
+  "name": "magpie-providers-hub",
   "version": "0.1.0",
-  "description": "Third-party Magpie adapter for dsh-providers-hub (by JetLi): independent Magpie provider for channels neither Magpie nor Our Free Model cover (OfficeAce, AStudio)",
+  "description": "Third-party Magpie adapter for dsh-providers-hub by JetLi (https://github.com/iJetLi): independent Magpie provider for channels neither Magpie nor Our Free Model cover (OfficeAce, AStudio)",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -24,15 +24,15 @@
     "officeace",
     "astudio"
   ],
-  "author": "JetLi (original dsh-providers-hub) — third-party Magpie adapter",
+  "author": "JetLi (原项目 https://github.com/iJetLi/dsh-providers-hub) — 本仓库为第三方 Magpie 适配",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mu-zi-lee/magpie-dsh-providers-hub.git"
+    "url": "git+https://github.com/Gyl1219/magpie-providers-hub.git"
   },
-  "homepage": "https://github.com/mu-zi-lee/magpie-dsh-providers-hub#readme",
+  "homepage": "https://github.com/Gyl1219/magpie-providers-hub#readme",
   "bugs": {
-    "url": "https://github.com/mu-zi-lee/magpie-dsh-providers-hub/issues"
+    "url": "https://github.com/Gyl1219/magpie-providers-hub/issues"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

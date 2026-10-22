@@ -1,6 +1,6 @@
-# magpie-dsh-providers-hub
+# magpie-providers-hub
 
-> **原项目：** https://github.com/iJetLi/dsh-providers-hub ｜ **作者：JetLi**
+> **原项目：** [iJetLi/dsh-providers-hub](https://github.com/iJetLi/dsh-providers-hub) ｜ **作者：** [JetLi](https://github.com/iJetLi)
 >
 > **本仓库是原项目的第三方 Magpie 适配版本，不是原项目官方发布。**
 > 账号渠道、EAC 授权流程、本地服务与管理界面来自原项目，这些功能的主要实现归
@@ -56,7 +56,7 @@ GET  /v1/claw/client-permission-validate     → modelInfo（推理端点 + appK
 ## 安装与使用
 
 ```bash
-magpie plugin add <本仓库路径或 github:mu-zi-lee/magpie-dsh-providers-hub>
+magpie plugin add <本仓库路径或 github:Gyl1219/magpie-providers-hub>
 magpie plugin login dsh-providers-hub     # 选渠道登录
 ```
 
