@@ -116,7 +116,7 @@ async function completeLogin(identity) {
 }
 
 /** 页面 HTML：极验 + 短信。交互照抄 DSH 载体页（bind 模式、单次消费、可重试）。 */
-function renderLoginPage() {
+export function renderLoginPage() {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>登录 AStudio</title>
@@ -266,7 +266,6 @@ document.getElementById('send').onclick = async () => {
     captchaBtn.textContent = '点击进行安全验证';
   }
 };
-};
 document.getElementById('go').onclick = async () => {
   const mobile = document.getElementById('mobile').value.trim();
   const verifyCode = document.getElementById('code').value.trim();
@@ -279,7 +278,6 @@ document.getElementById('go').onclick = async () => {
     msg(j.ok ? (j.message || '登录成功') : (j.message || '登录失败'));
   } catch (e) { msg('登录失败：' + e.message) }
 };
-loadGee();
 </script></body></html>`
 }
 
