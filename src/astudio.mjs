@@ -385,4 +385,128 @@ export const astudioChannel = {
       signal,
     })
   },
+
+  /**
+   * 每日签到 + 福利礼包领取（移植 astudio-credits.ts 的 claimDaily）。
+   *
+   * 流程：GET /client-popups/pending 查可领弹窗 → 逐个 POST /client-popups/complete。
+   * ⚠️ 真实字段是 **`componentType`** 而不是 `type`（2026-10-20 真机取证）——
+   * 读错字段会一个可领弹窗都识别不出来，界面显示「今天已领取」而积分一动不动
+   * （用户报障的原话）。仍兼容 `type`，但优先 `componentType`。
+   * ⚠️ code 80000 = SSO 会话失效（终态，需人工重登）。
+   */
+  async checkin(credential) {
+    const cookie = cookieHeader(credential)
+    if (cookie.length === 0) {
+      return { outcome: 'failed', message: '未登录 AStudio（缺少登录会话 Cookie），请重新登录' }
+    }
+    const headers = {
+      Accept: 'application/json',
+      Cookie: cookie,
+      clientType: '21',
+      studioVersion: '3.5.2',
+    }
+    const CLAIMABLE = ['DAILY_REWARD_DIALOG', 'NEW_USER_DIALOG']
+    const popupTypeOf = (record) => String(record.componentType ?? record.type ?? '')
+    /** 积分解析：数字 / 字符串 / JSON 串 / {points|credit|rewardPoints|reward_points}。 */
+    const pointsOf = (payload) => {
+      if (typeof payload === 'number') return Number.isFinite(payload) && payload >= 0 ? Math.floor(payload) : 0
+      if (typeof payload === 'string') {
+        const trimmed = payload.trim()
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try { return pointsOf(JSON.parse(trimmed)) } catch { /* 回退 */ }
+        }
+        const parsed = parseInt(trimmed, 10)
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+      }
+      if (typeof payload === 'object' && payload !== null) {
+        for (const key of ['points', 'credit', 'rewardPoints', 'reward_points']) {
+          if (key in payload) return pointsOf(payload[key])
+        }
+      }
+      return 0
+    }
+    const payloadOf = (record) => {
+      if (typeof record?.payload === 'object' && record.payload !== null) return record.payload
+      if (typeof record?.content === 'object' && record.content !== null) return record.content
+      if (typeof record?.content === 'string') {
+        try {
+          const parsed = JSON.parse(record.content)
+          if (typeof parsed === 'object' && parsed !== null) return parsed
+        } catch { /* 忽略非 JSON */ }
+      }
+      return undefined
+    }
+    const deadSession = (code, message) => code === 80000
+      || (typeof message === 'string' && message.includes('登录异常，请重新登录'))
+
+    let pending
+    try {
+      const response = await fetch(`${AUTH_BASE}/client-popups/pending`, {
+        method: 'GET', headers, signal: AbortSignal.timeout(15_000),
+      })
+      const text = await response.text()
+      if (!response.ok) return { outcome: 'failed', message: `签到查询失败（HTTP ${response.status}）` }
+      pending = JSON.parse(text)
+    } catch (error) {
+      return { outcome: 'failed', message: `签到查询失败（网络异常）：${error.message}` }
+    }
+    const code = typeof pending?.code === 'number' ? pending.code : parseInt(String(pending?.code ?? ''), 10)
+    const message = typeof pending?.message === 'string' ? pending.message : String(pending?.desc ?? '')
+    if (deadSession(code, message)) {
+      return { outcome: 'failed', message: 'AStudio 登录会话已失效，需人工重新登录' }
+    }
+    if (Number.isFinite(code) && code !== 0) {
+      return { outcome: 'failed', message: `签到查询失败：${message || `code=${code}`}` }
+    }
+    const rows = Array.isArray(pending?.data) ? pending.data : []
+    const popups = []
+    const seen = new Set()
+    for (const record of rows) {
+      if (typeof record !== 'object' || record === null) continue
+      const type = popupTypeOf(record)
+      if (!CLAIMABLE.includes(type)) continue
+      const popupId = typeof record.popupId === 'number' ? record.popupId : parseInt(String(record.popupId), 10)
+      if (!Number.isFinite(popupId) || seen.has(popupId)) continue
+      seen.add(popupId)
+      popups.push({ popupId, instanceKey: typeof record.instanceKey === 'string' ? record.instanceKey : '', payload: payloadOf(record) })
+    }
+    // ⚠️ pending 为空 / 无可领弹窗 = 今日已领（实测已领取时返回 code=0 data=[]）
+    if (popups.length === 0) {
+      return { outcome: 'done', message: '今天已领取每日签到奖励及福利礼包' }
+    }
+    let totalCredit = 0
+    for (const popup of popups) {
+      let complete
+      try {
+        const response = await fetch(`${AUTH_BASE}/client-popups/complete`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ popupId: popup.popupId, instanceKey: popup.instanceKey }),
+          signal: AbortSignal.timeout(15_000),
+        })
+        const text = await response.text()
+        if (!response.ok) return { outcome: 'failed', message: `领取失败（HTTP ${response.status}）` }
+        complete = JSON.parse(text)
+      } catch (error) {
+        return { outcome: 'failed', message: `领取失败（网络异常）：${error.message}` }
+      }
+      const completeCode = typeof complete?.code === 'number' ? complete.code : parseInt(String(complete?.code ?? ''), 10)
+      const completeMsg = typeof complete?.message === 'string' ? complete.message : String(complete?.desc ?? '')
+      if (deadSession(completeCode, completeMsg)) {
+        return { outcome: 'failed', message: 'AStudio 登录会话已失效，需人工重新登录' }
+      }
+      if (Number.isFinite(completeCode) && completeCode !== 0) {
+        return { outcome: 'failed', message: `领取失败：${completeMsg || `code=${completeCode}`}` }
+      }
+      // 积分优先取 complete 响应，取不到再回退弹窗 payload
+      const credit = pointsOf(complete?.data) > 0 ? pointsOf(complete?.data) : pointsOf(popup.payload)
+      totalCredit += credit
+    }
+    return {
+      outcome: 'claimed',
+      credit: totalCredit > 0 ? totalCredit : undefined,
+      message: popups.length > 1 ? `已领取 ${popups.length} 项福利` : undefined,
+    }
+  },
 }

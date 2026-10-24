@@ -307,6 +307,50 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
         }
         return { type: ok ? 'success' : 'failed' }
       },
+
+      /**
+       * 每日签到（magpie 的 checkin 钩子）：**按渠道分发**，汇总成一份结果。
+       *
+       * 返回形状对齐社区插件的词汇表（magpie 把它落到用量卡上）：
+       * `outcome ∈ claimed / done / inactive / ineligible / failed`，
+       * 另附 `channels[]` 保留逐渠道明细（多渠供应商只有我们能给）。
+       * 汇总规则：任一 claimed ⇒ claimed（credit 求和）；否则全部 done ⇒ done；
+       * 任一 failed ⇒ failed；否则 inactive。officeace / accio 没有签到端点，
+       * 直接跳过（不占「失败」名额）。
+       */
+      async checkin() {
+        const channels = []
+        let creditSum = 0
+        let hasCredit = false
+        let claimed = 0
+        let done = 0
+        let failed = 0
+        for (const channel of CHANNELS) {
+          if (typeof channel.checkin !== 'function') continue // 无签到端点的渠道
+          if (!signedIn(channel)) continue // 未登录的渠道不签（ magpie 会在登录后次日自动补）
+          try {
+            const outcome = await channel.checkin(credentialOf(channel), { xff: minimaxXff })
+            channels.push({ channel: channel.displayName, ...outcome })
+            if (outcome.outcome === 'claimed') { claimed += 1; if (Number.isFinite(outcome.credit)) { creditSum += outcome.credit; hasCredit = true } }
+            else if (outcome.outcome === 'done') done += 1
+            else if (outcome.outcome === 'failed') failed += 1
+          } catch (error) {
+            failed += 1
+            channels.push({ channel: channel.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
+          }
+        }
+        const parts = channels.map((c) => `${c.channel}：${c.message ?? (c.outcome === 'claimed' ? `已领 ${c.credit ?? ''}` : c.outcome)}`)
+        const outcome = claimed > 0 ? 'claimed'
+          : failed > 0 ? 'failed'
+            : done > 0 && done === channels.length ? 'done'
+              : channels.length > 0 ? 'done' : 'inactive'
+        return {
+          outcome,
+          ...(hasCredit ? { credit: creditSum } : {}),
+          ...(parts.length > 0 ? { message: parts.join('；') } : {}),
+          channels,
+        }
+      },
     },
 
     provider: {

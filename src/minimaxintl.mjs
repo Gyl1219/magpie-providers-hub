@@ -43,6 +43,7 @@ const MODELS_PATH = '/mavis/api/v1/models'
 const INFER_PATH = '/mavis/api/v1/llm/v1/messages'
 
 const OAUTH_TIMEOUT_MS = 20_000
+const REQUEST_TIMEOUT_MS = 30_000
 /** 临期提前量（对齐本插件 officeace 与 magpie refreshLead 的 10 分钟口径）。 */
 const EXPIRY_LEAD_MS = 10 * 60 * 1000
 /** 设备码没给 expires_in 时的登录等待上限。 */
@@ -451,6 +452,156 @@ async function chat(credential, { body, signal, renew, xff }) {
   return Response.json(anthropicJsonToOpenAi(json, { model: body?.model }))
 }
 
+// ── 签到（移植 minimax-credits.ts 的实测口径）────────────────────────────
+
+const SIGNIN_STATUS_PATH = '/minimax-cloud/api/v1/signin/status'
+const SIGNIN_CLAIM_PATH = '/minimax-cloud/api/v1/signin/claim'
+/** 面板状态：1 未开始 / 2 可领 / 3 已领 / 4 不适用。 */
+const DAY_STATUS = { Upcoming: 1, Claimable: 2, Claimed: 3, Disabled: 4 }
+
+/** 本机 IANA 时区名（客户端同款）。⚠️ timezone_id 是 **query** 参数：放请求头无效。 */
+const timezoneId = () => {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return typeof zone === 'string' && zone.trim() !== '' ? zone.trim() : 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
+const finiteNumber = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+
+/**
+ * 解析签到面板（**完整复刻**官方客户端 `validateSigninPanel` 的硬约束，
+ * 不满足即 undefined 不编造）：恰好 7 天、day_no 1..7 无重复、
+ * 最多 1 条可领、最多 1 条今日、status ∈ {1,2,3,4}、scene ∈ {0..4}。
+ */
+export function parseSigninPanel(data) {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return undefined
+  const scene = finiteNumber(data.scene)
+  if (scene === undefined || scene < 0 || scene > 4) return undefined
+  if (!Array.isArray(data.days) || data.days.length !== 7) return undefined
+  const days = []
+  const seen = new Set()
+  let claimable = 0
+  let today = 0
+  for (const raw of data.days) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+    const dayNo = finiteNumber(raw.day_no)
+    const points = finiteNumber(raw.points)
+    const status = finiteNumber(raw.status)
+    const bonusRaw = raw.bonus_points
+    const bonusPoints = bonusRaw === undefined ? 0 : finiteNumber(bonusRaw)
+    if (dayNo === undefined || !Number.isInteger(dayNo) || dayNo < 1 || dayNo > 7) return undefined
+    if (seen.has(dayNo)) return undefined
+    if (points === undefined || points < 0) return undefined
+    if (bonusPoints === undefined || bonusPoints < 0) return undefined
+    if (typeof raw.is_today !== 'boolean') return undefined
+    if (status === undefined || status < 1 || status > 4) return undefined
+    seen.add(dayNo)
+    if (status === DAY_STATUS.Claimable) claimable += 1
+    if (raw.is_today) today += 1
+    days.push({ dayNo, points, bonusPoints, status, isToday: raw.is_today })
+  }
+  if (claimable > 1 || today > 1) return undefined
+  return { scene, days }
+}
+
+/** 面板 → 连续签到天数（从今日起向前数连续 Claimed；今日未领则从前一天起）。 */
+function streakDaysOf(days) {
+  const sorted = [...days].sort((a, b) => a.dayNo - b.dayNo)
+  const todayIndex = sorted.findIndex((d) => d.isToday)
+  if (todayIndex < 0) return 0
+  const start = sorted[todayIndex].status === DAY_STATUS.Claimed
+    ? todayIndex
+    : sorted[todayIndex].status === DAY_STATUS.Claimable ? todayIndex - 1 : -1
+  let streak = 0
+  for (let i = start; i >= 0 && sorted[i].status === DAY_STATUS.Claimed; i -= 1) streak += 1
+  return streak
+}
+
+/**
+ * 签到信封请求。⚠️ 业务码在 `base_resp.status_code`（HTTP 恒 200，
+ * `invalid timezone_id` 也是 200）；走 minimaxFetch（重定向保凭据 + XFF）。
+ */
+async function signinEnvelope(path, credential, method, xff) {
+  const url = new URL(`${API_HOST}${path}`)
+  url.searchParams.set('timezone_id', timezoneId())
+  const response = await minimaxFetch(url.toString(), () => ({
+    method,
+    headers: Object.fromEntries(apiHeaders(credential, xff).entries()),
+    ...(method === 'POST' ? { body: '{}' } : {}),
+  }), { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+  const text = await response.text().catch(() => '')
+  let payload
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    throw new Error(`MiniMax 签到响应不是 JSON（HTTP ${response.status}）：${text.slice(0, 200)}`)
+  }
+  const baseResp = typeof payload?.base_resp === 'object' && payload.base_resp !== null ? payload.base_resp : {}
+  const statusCode = finiteNumber(baseResp.status_code)
+  if (statusCode !== undefined && statusCode !== 0) {
+    const message = typeof baseResp.status_msg === 'string' ? baseResp.status_msg : `status_code=${statusCode}`
+    const error = new Error(`MiniMax 签到失败：${message}`)
+    // ⚠️ 如实区分：invalid access token 要重登；invalid signature 是网关/重定向
+    error.signedOut = statusCode === 401 || /invalid access token/i.test(message)
+    throw error
+  }
+  if (response.status === 401 || response.status === 403) {
+    const error = new Error(`MiniMax 签到失败：凭据已失效（HTTP ${response.status}）`)
+    error.signedOut = true
+    throw error
+  }
+  return payload
+}
+
+/**
+ * 每日签到：读面板 → 今日可领则 claim。
+ *
+ * 返回 magpie 的 checkin 词汇表：`{outcome, credit?, streak?, message?}`，
+ * outcome ∈ claimed / done / inactive / ineligible / failed。
+ * ⚠️ 幂等判据是 `claim_result`（1=本次真领取，2=已领过），**不是 HTTP 状态码**
+ * （重复领取同样 200）。
+ */
+export async function checkin(credential, { xff } = {}) {
+  let panel
+  try {
+    const statusPayload = await signinEnvelope(SIGNIN_STATUS_PATH, credential, 'GET', xff)
+    panel = parseSigninPanel(statusPayload?.data)
+  } catch (error) {
+    return { outcome: 'failed', message: error.message, ...(error.signedOut ? { signIn: 'expired' } : {}) }
+  }
+  if (panel === undefined) {
+    return { outcome: 'failed', message: '签到面板响应形状不符合预期（服务端可能改版）' }
+  }
+  const sorted = [...panel.days].sort((a, b) => a.dayNo - b.dayNo)
+  const todays = sorted.filter((d) => d.isToday)
+  const today = todays[0]
+  const streakBefore = streakDaysOf(panel.days)
+  if (today === undefined) return { outcome: 'inactive', message: '签到面板里没有今日条目' }
+  if (today.status === DAY_STATUS.Claimed) {
+    return { outcome: 'done', credit: today.points, streak: streakBefore, message: '今日已签到' }
+  }
+  if (today.status === DAY_STATUS.Disabled) return { outcome: 'ineligible', message: '今日签到不可用' }
+  if (today.status !== DAY_STATUS.Claimable) return { outcome: 'inactive', message: '今日签到还没开始' }
+  let claimPayload
+  try {
+    claimPayload = await signinEnvelope(SIGNIN_CLAIM_PATH, credential, 'POST', xff)
+  } catch (error) {
+    return { outcome: 'failed', message: error.message, ...(error.signedOut ? { signIn: 'expired' } : {}) }
+  }
+  const claimData = typeof claimPayload?.data === 'object' && claimPayload.data !== null ? claimPayload.data : {}
+  const claimResult = finiteNumber(claimData.claim_result)
+  // credit 取 points（总数，已含 bonus_points）；连续天数以**领取后**回传的面板为准
+  const claimedPanel = parseSigninPanel(claimData.panel)
+  const streak = claimedPanel !== undefined ? streakDaysOf(claimedPanel.days) : streakBefore + 1
+  const credit = finiteNumber(claimData.points)
+  if (claimResult === 1) return { outcome: 'claimed', ...(credit !== undefined ? { credit } : {}), streak }
+  if (claimResult === 2) return { outcome: 'done', ...(credit !== undefined ? { credit } : {}), streak, message: '今日已签到' }
+  return { outcome: 'failed', message: `签到响应缺少有效的 claim_result（${JSON.stringify(claimData.claim_result ?? null)}）` }
+}
+
 // ── 渠道对象（聚合层契约）────────────────────────────────────────────────
 
 export const minimaxintlChannel = {
@@ -483,4 +634,6 @@ export const minimaxintlChannel = {
   expired,
   catalog,
   chat,
+  /** 每日签到（magpie 的 auth.checkin 钩子分发到这里）。 */
+  checkin,
 }
