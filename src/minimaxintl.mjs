@@ -620,6 +620,84 @@ export async function checkin(credential, { xff } = {}) {
   return { outcome: 'failed', message: `签到响应缺少有效的 claim_result（${JSON.stringify(claimData.claim_result ?? null)}）` }
 }
 
+// ── 额度分桶（credit/details 逐行一桶；DSH 压平成 total，我们保留桶）────
+
+const CREDIT_DETAILS_PATH = '/minimax-cloud/api/v1/credit/details'
+
+/**
+ * `remaining_amount` 是**字符串**（"800.00"，上游用字符串规避浮点）——
+ * 只认 number 会把 800 静默算成 0（DSH 修过的真实缺陷）。空串返回 undefined
+ * （`Number('')` 是 0，会把「空」误读成「0 积分」）。
+ */
+function looseAmount(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (trimmed === '') return undefined
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+/**
+ * 额度分桶 → magpie usage windows。
+ *
+ * `details[]` 每行 = 一桶（`remaining_amount` + `expire_at_ms` 毫秒）。
+ * 已过期的桶跳过（那些额度服务端仍会返回但不可用 —— 显示出来是误导）。
+ * ⚠️ 响应是**平铺**的（`total_count` 与 `base_resp` 同级），没有 `data` 信封
+ * —— 与签到端点不同形，不能复用同一个解包（DSH 实测注释明确记录）。
+ */
+async function usage(credential, { xff } = {}) {
+  let geoRouted = false
+  const response = await minimaxFetch(`${API_HOST}${CREDIT_DETAILS_PATH}`, () => ({
+    method: 'GET',
+    headers: Object.fromEntries(apiHeaders(credential, xff).entries()),
+  }), {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    onGeoRoute: () => { geoRouted = true },
+  })
+  const text = await response.text().catch(() => '')
+  let payload
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    throw new Error(`MiniMax 余额查询响应不是 JSON：${geoRouted ? describeGeoRoute(`HTTP ${response.status}`) : `HTTP ${response.status}：${text.slice(0, 150)}`}`)
+  }
+  const baseResp = typeof payload?.base_resp === 'object' && payload.base_resp !== null ? payload.base_resp : {}
+  const statusCode = finiteNumber(baseResp.status_code)
+  if (statusCode !== undefined && statusCode !== 0) {
+    const message = typeof baseResp.status_msg === 'string' ? baseResp.status_msg : `status_code=${statusCode}`
+    if (geoRouted) throw new Error(`MiniMax 余额查询失败：${describeGeoRoute(message)}`)
+    const error = new Error(`MiniMax 余额查询失败：${message}`)
+    error.signedOut = statusCode === 401 || /invalid access token/i.test(message)
+    throw error
+  }
+  if (response.status === 401 || response.status === 403) {
+    if (geoRouted) throw new Error(`MiniMax 余额查询失败：${describeGeoRoute(`HTTP ${response.status}`)}`)
+    const error = new Error(`MiniMax 余额查询失败：凭据已失效（HTTP ${response.status}）`)
+    error.signedOut = true
+    throw error
+  }
+  const now = Date.now()
+  const windows = []
+  const rows = Array.isArray(payload?.details) ? payload.details : []
+  for (const row of rows) {
+    const remaining = looseAmount(row?.remaining_amount)
+    const expireAt = finiteNumber(row?.expire_at_ms)
+    if (remaining === undefined) continue
+    if (expireAt !== undefined && expireAt <= now) continue // 已过期桶不可用，不显示
+    const expiryText = expireAt !== undefined
+      ? `${new Date(expireAt).getMonth() + 1}-${String(new Date(expireAt).getDate()).padStart(2, '0')} 到期`
+      : '长期有效'
+    windows.push({
+      name: `${remaining} 积分 · ${expiryText}`,
+      used: 0,
+      ...(expireAt !== undefined ? { resetsAt: new Date(expireAt).toISOString() } : {}),
+      display: `剩余 ${remaining}`,
+    })
+  }
+  return windows.length > 0 ? windows : [{ name: DISPLAY_NAME, used: 0, display: '无积分明细' }]
+}
+
 // ── 渠道对象（聚合层契约）────────────────────────────────────────────────
 
 export const minimaxintlChannel = {
@@ -654,4 +732,6 @@ export const minimaxintlChannel = {
   chat,
   /** 每日签到（magpie 的 auth.checkin 钩子分发到这里）。 */
   checkin,
+  /** 额度分桶（聚合层 usage 分发到这里）。 */
+  usage,
 }

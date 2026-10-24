@@ -981,6 +981,104 @@ async function chat(credential, { body: openaiBody, signal, renew }) {
   })
 }
 
+// ── 额度分桶（移植 accio-credits.ts）────────────────────────────────────
+
+const SUBSCRIPTION_PATH = '/api/entitlement/currentSubscription'
+const QUOTA_PATH = '/api/entitlement/quota'
+
+/**
+ * 三类桶的**固定顺序**与展示名。
+ * ⚠️ 顺序固定（daily → monthly → referral）而不是按响应键序 —— 键序由服务端
+ * 决定，同一账号两次读数可能不同，面板会「跳行」。
+ * ⚠️ 值为 0 的桶**保留**（用户要看到「还有 0」）；缺席的桶不产出
+ * （不是产出一条 0 —— 那会把「没有这个桶」说成「桶是空的」）。
+ */
+const CREDIT_BUCKETS = [
+  { key: 'daily', label: '每日积分' },
+  { key: 'monthly', label: '每月积分' },
+  { key: 'referral', label: '推荐积分' },
+]
+
+/** 余额端点信封请求。⚠️ token 在 **query**（`?accessToken=…`，缺它 400）。 */
+async function entitlementGet(path, credential) {
+  const url = `${GATEWAY}${path}?accessToken=${encodeURIComponent(credential.access_token)}`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  const text = await response.text().catch(() => '')
+  let payload
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    throw new Error(`accio 余额查询响应不是 JSON（HTTP ${response.status}）：${text.slice(0, 150)}`)
+  }
+  // ⚠️ 未登录的实测形态是 HTTP 200 + body {success:false, code:'401', message:'NOT_LOGIN'}，
+  // 只看 HTTP 状态码会漏判；code 必须按标量归一（官方客户端 String(e.code)==='401'，
+  // 说明它可能不是字符串）。
+  const code = String(payload?.code ?? '')
+  if (!response.ok || payload?.success === false) {
+    if (code === '401' || /NOT_LOGIN/i.test(String(payload?.message ?? ''))) {
+      const error = new Error('未登录或登录已过期（NOT_LOGIN），请重新登录 Accio 账号')
+      error.signedOut = true
+      throw error
+    }
+    throw new Error(`accio 余额查询失败（HTTP ${response.status} ${String(payload?.message ?? payload?.error ?? '')}）`.trim())
+  }
+  return payload?.data
+}
+
+/**
+ * 额度分桶 → magpie usage windows。
+ *
+ * 桶行：`{ name: 'Accio · 每日积分', used: 百分比, resetsAt?, display: '剩余 N' }`。
+ * `resetsAt` 只有 daily 桶有（quota 端点的 `refreshCountdownSeconds` 现算）——
+ * ⚠️ 它是「额度何时**刷新**」，不是「积分何时**作废**」（Accio 未下发作废时间，
+ * 未实测为同一时刻就不写 —— 写了就是编造）。
+ */
+async function usage(credential) {
+  const data = await entitlementGet(SUBSCRIPTION_PATH, credential)
+  const entitlement = typeof data?.entitlement === 'object' && data.entitlement !== null
+    ? data.entitlement
+    : undefined
+  const windows = []
+  if (entitlement === undefined) {
+    // 服务端给了响应但既无桶也无总余额：明说，不退化成 0
+    if (typeof data?.remaining !== 'number') {
+      return [{ name: DISPLAY_NAME, used: 0, display: '响应未包含余额字段' }]
+    }
+    return [{ name: DISPLAY_NAME, used: 0, display: `剩余 ${data.remaining}` }]
+  }
+  // quota 端点失败可容忍（只影响 daily 的刷新时刻）
+  let dailyResetIso
+  try {
+    const quota = await entitlementGet(QUOTA_PATH, credential)
+    const seconds = Number(quota?.refreshCountdownSeconds)
+    if (Number.isFinite(seconds) && seconds > 0) {
+      dailyResetIso = new Date(Date.now() + seconds * 1000).toISOString()
+    }
+  } catch { /* 倒计时缺席就留空 */ }
+  for (const bucket of CREDIT_BUCKETS) {
+    const value = entitlement[bucket.key]
+    if (typeof value !== 'object' || value === null) continue
+    const remaining = Number(value.remaining)
+    if (!Number.isFinite(remaining)) continue // 桶在但读不到 remaining = 数据不足，跳过
+    const used = Number(value.used)
+    const total = Number(value.total)
+    const percent = Number.isFinite(total) && total > 0
+      ? Math.max(0, Math.min(100, Math.round(((Number.isFinite(used) ? used : total - remaining) / total) * 100)))
+      : (remaining <= 0 ? 100 : 0)
+    windows.push({
+      name: `Accio · ${bucket.label}`,
+      used: percent,
+      ...(bucket.key === 'daily' && dailyResetIso !== undefined ? { resetsAt: dailyResetIso } : {}),
+      display: `剩余 ${remaining}`,
+    })
+  }
+  return windows.length > 0 ? windows : [{ name: DISPLAY_NAME, used: 0, display: '已登录' }]
+}
+
 // ── 渠道对象 ────────────────────────────────────────────────────────────
 
 const fallbackModels = Object.fromEntries(FALLBACK_MODELS.map((m) => [slugOf(m.name) || m.id, {
@@ -998,4 +1096,6 @@ export const accioChannel = {
   expired,
   catalog,
   chat,
+  /** 额度分桶（聚合层 usage 分发到这里）。 */
+  usage,
 }

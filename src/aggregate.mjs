@@ -277,11 +277,34 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
         }
       },
 
+      /**
+       * 用量卡（magpie 的 usage 钩子）：**到期分桶**进 windows。
+       *
+       * 渠道有 `usage()` 的（accio / minimaxintl）→ 每个额度桶一根条
+       * （name 带到期日、resetsAt 带时刻）；没有的（officeace / astudio）
+       * → 一根登录状态条。查询失败**不吞**：带原因显示，不退化成「已登录」。
+       */
       async usage() {
         const windows = []
         for (const channel of CHANNELS) {
           if (!signedIn(channel)) continue
           const credential = credentialOf(channel)
+          if (typeof channel.usage === 'function') {
+            try {
+              const rows = await channel.usage(credential, { xff: minimaxXff })
+              if (Array.isArray(rows) && rows.length > 0) {
+                windows.push(...rows)
+                continue
+              }
+            } catch (error) {
+              windows.push({
+                name: channel.displayName,
+                used: 0,
+                display: `额度查询失败：${error instanceof Error ? error.message : String(error)}`,
+              })
+              continue
+            }
+          }
           windows.push({
             name: channel.displayName,
             used: 0,
