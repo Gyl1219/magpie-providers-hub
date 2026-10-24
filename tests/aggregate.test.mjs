@@ -31,6 +31,7 @@ test('目录里的模型 id 带渠道前缀（渠道/模型）', async () => {
   const channels = new Set(ids.map((id) => id.split('/')[0]))
   assert.ok(channels.has('officeace'))
   assert.ok(channels.has('astudio'))
+  assert.ok(channels.has('minimaxintl'))
 })
 
 test('未登录也不返回空目录（回落兜底，选择器不会空掉）', async () => {
@@ -42,9 +43,10 @@ test('未登录也不返回空目录（回落兜底，选择器不会空掉）',
 test('登录入口每渠道一个（不是每渠道一个供应商）', async () => {
   const { plugin } = await build()
   const labels = plugin.auth.methods.map((m) => m.label)
-  assert.equal(labels.length, 2)
+  assert.equal(labels.length, 3)
   assert.ok(labels.some((l) => l.includes('OfficeAce')))
   assert.ok(labels.some((l) => l.includes('AStudio')))
+  assert.ok(labels.some((l) => l.includes('MiniMax')))
 })
 
 test('无法识别的 model 返回 404 而不是抛异常炸掉会话', async () => {

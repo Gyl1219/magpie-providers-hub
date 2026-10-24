@@ -21,12 +21,17 @@ process.env.HOME = sandbox
 
 const { officeaceChannel } = await import('../src/officeace.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
+const { minimaxintlChannel } = await import('../src/minimaxintl.mjs')
+const { REGISTERED_CHANNELS } = await import('../src/aggregate.mjs')
 const { DshProvidersHubPlugin } = await import('../index.mjs')
 
 const FAKE = { fake: true }
 const stubBeginLogin = async () => ({ url: 'https://example.com/authorize', result: Promise.resolve(FAKE) })
-officeaceChannel.beginLogin = stubBeginLogin
-astudioChannel.beginLogin = stubBeginLogin
+// ⚠️ 必须覆盖**每一个**注册渠道：漏掉的那个会在 authorize 里真发网络请求
+//（设备码申请），把测试卡到登录超时。按 REGISTERED_CHANNELS 遍历，新渠道自动覆盖。
+for (const channel of REGISTERED_CHANNELS) {
+  channel.beginLogin = stubBeginLogin
+}
 
 const build = async () => {
   const plugin = await DshProvidersHubPlugin({}, {})
@@ -35,9 +40,14 @@ const build = async () => {
   return plugin
 }
 
-test('两个渠道都实现了 beginLogin', async () => {
-  for (const channel of [officeaceChannel, astudioChannel]) {
+test('每个注册渠道都实现了 beginLogin', async () => {
+  assert.ok(REGISTERED_CHANNELS.length >= 3, `渠道数异常：${REGISTERED_CHANNELS.length}`)
+  for (const channel of REGISTERED_CHANNELS) {
     assert.equal(typeof channel.beginLogin, 'function', `${channel.id} 缺少 beginLogin`)
+  }
+  // 引用一致性：测试 stub 的对象必须是聚合层实际持有的那几个
+  for (const channel of [officeaceChannel, astudioChannel, minimaxintlChannel]) {
+    assert.ok(REGISTERED_CHANNELS.includes(channel), `${channel.id} 未注册进聚合层`)
   }
 })
 

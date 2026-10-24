@@ -18,6 +18,7 @@
 import { loadCredential, saveCredential, notSignedIn } from './shared.mjs'
 import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
+import { minimaxintlChannel } from './minimaxintl.mjs'
 
 const PROVIDER = 'dsh-providers-hub'
 const PROVIDER_NAME = 'DSH Providers Hub'
@@ -32,7 +33,10 @@ const PROVIDER_NAME = 'DSH Providers Hub'
 const PLACEHOLDER_BASE = 'https://dsh-providers-hub.invalid'
 
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
-const CHANNELS = [officeaceChannel, astudioChannel]
+const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel]
+
+// 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
+export { CHANNELS as REGISTERED_CHANNELS }
 
 // ── 凭据：每渠道一份文件，内存里各留一份 ──────────────────────────────────
 
@@ -79,17 +83,37 @@ function persistFor(channel) {
  */
 async function renew(channel, current) {
   try {
-    const persist = persistFor(channel)
-    const next = await channel.refresh(current, persist)
-    // 再落一次：doRefresh 是「STS 成功即落盘」，而 modelInfo（推理用的
-    // appKey/appSecret/网关）是在那之后才合并进来的。同引用落第一次时
-    // 那三个字段还是旧值 ⇒ 最终态必须再写一次。
-    persist(next)
+    const next = await gatedRenew(channel, current)
     return next
   } catch (error) {
     console.warn(`[${channel.id}] 续期未成功，沿用原凭据：${error.message}`)
     return current
   }
+}
+
+/**
+ * **聚合层级的续期去重闸**：同一渠道同一时刻只允许一个在途续期。
+ *
+ * ⚠️ 渠道各自的闸（如 officeace 的 refreshOnce）只罩住自己；而 MiniMax 这类
+ * **refresh_token 会轮换**的标准 OAuth 渠道，两个并发续期里第二个会拿着
+ * 已被作废的 token 去换 → 失败。并发入口有三处（ensure 软续期、chat 401
+ * 路径的硬续期、magpie 显式 refresh），在聚合层统一闸一次，全部受益。
+ * 在途的调用方共享同一个 promise（失败也一样 —— 这是硬语义，调用方自行决定吞不吞）。
+ */
+const renewInFlight = new Map()
+
+function gatedRenew(channel, current) {
+  const pending = renewInFlight.get(channel.id)
+  if (pending !== undefined) return pending
+  const persist = persistFor(channel)
+  const task = channel.refresh(current, persist)
+    .then((next) => {
+      persist(next)
+      return next
+    })
+    .finally(() => renewInFlight.delete(channel.id))
+  renewInFlight.set(channel.id, task)
+  return task
 }
 
 /** 已登录的渠道（登录方法是**每渠道一个**，用户按需逐个登）。 */
@@ -142,6 +166,14 @@ async function discoverModels(fallback) {
 
 export const DshProvidersHubPlugin = async (_input, options = {}) => {
   const openBrowser = typeof options.openBrowser === 'function' ? options.openBrowser : undefined
+  /**
+   * MiniMax 国际版的可选绕行 IP（`magpie plugin options dsh-providers-hub
+   * '{"minimaxXff":"<海外IP>"}'` 设置）。
+   *
+   * ⚠️ 默认关闭：伪造 XFF 只该在用户明确知道自己在做什么时用（DSH 同款纪律）。
+   * 每次请求现读，不缓存 —— 用户随时可能改设置。
+   */
+  const minimaxXff = typeof options.minimaxXff === 'string' ? options.minimaxXff : undefined
 
   /** 请求体里的 model 是 `dsh-hub/<channel>/<model>`；拆出渠道。 */
   const resolve = (modelId) => {
@@ -231,7 +263,12 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
             const response = await hit.channel.chat(credential, {
               body: upstreamBody,
               signal: init?.signal,
-              renew: (current) => hit.channel.refresh(current, persistFor(hit.channel)),
+              // ⚠️ **硬**续期（异常透传）：渠道要靠它区分「续期没成功」与
+              //    「续期成功但没变化」。走聚合层的去重闸（gatedRenew）——
+              //    并发 401 时共享同一个在途续期，不重复消费 refresh_token。
+              renew: (current) => gatedRenew(hit.channel, current),
+              // MiniMax 国际版的可选绕行 IP（其余渠道忽略该字段）
+              xff: minimaxXff,
             })
             // 流式（SSE）与 JSON 都原样透传
             return response
@@ -254,15 +291,14 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
       },
 
       // magpie 的显式「续期」入口：**硬**续期（失败如实报 failed），
-      // 与 ensure() 里的软续期分工不同，但**共用同一个闸与同一份落盘纪律**
+      // 与 ensure() 里的软续期分工不同，但**共用同一个去重闸与同一份落盘纪律**
       // —— 判据只有一份，避免两处漂移。
       async refresh() {
         let ok = true
         for (const channel of CHANNELS) {
           if (!signedIn(channel)) continue
           try {
-            const next = await channel.refresh(credentialOf(channel), persistFor(channel))
-            persistFor(channel)(next)
+            await gatedRenew(channel, credentialOf(channel))
           } catch {
             // ⚠️ 不静默：失败必须让调用方看到（refresh_token 一次性，丢了只能重登）
             ok = false

@@ -30,6 +30,7 @@ astudio/spark-x
 |---|---|---|---|---|
 | `officeace` | 华为云 AgentArts | 华为云 OAuth（PKCE + DPoP + 云侧轮询） | `/v2/models` | ✅ STS（⚠️ refresh_token 一次性） |
 | `astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `/api/v1/model-manager/models` | ❌ 不支持（会话一年，不滑动） |
+| `minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（浏览器确认 user_code） | `/mavis/api/v1/models?region=en` | ✅ 标准 refresh_token 轮换 |
 
 ### officeace
 
@@ -53,6 +54,22 @@ GET  /v1/claw/client-permission-validate     → modelInfo（推理端点 + appK
 - `/model-gateway/v1/models` 恒 **404**；目录在 `/api/v1/model-manager/models`（两个基址不共用前缀）
 - 推理端只认**裸 slug**；发 `builtin/<base64>` 会 502（`builtin/` 是 acode 内核内部别名）
 
+### minimaxintl
+
+MiniMax Code **国际版**（`account.minimax.io` / `agent.minimax.io`）。登录是官方客户端
+同款的 **OAuth 设备码 + PKCE**（client `mcode-public`）：插件给出验证码，你在浏览器确认，
+无需本地回调端口。推理端说 **Anthropic Messages** 协议，本插件内置 OpenAI↔Anthropic
+翻译桥（system/tools/tool_calls/图片/思考档位/SSE 全量双向翻译）。
+
+⚠️ 三个实测坑（都来自 DSH 的真机记录）：
+- `agent.minimax.io` 恒 **307 → 中国站**（Akamai 按出口 IP 分流），而 fetch 跨域跟随会
+  **剥掉 Authorization** ⇒ 插件手动逐跳跟随并**每跳重附头**（不跟就 401，且与
+  「凭据失效」逐字同形）。中国大陆出口会被分流；可用
+  `magpie plugin options dsh-providers-hub '{"minimaxXff":"<海外IP>"}'` 绕行（默认关）。
+- `access_token` **不是 JWT**（`mmoat_` 前缀）⇒ 过期时间只能来自 `expires_in` 自算。
+- 思考档位错发就是 400 或假关闭：M3.1 系**永不发** `disabled`（硬 400）；
+  M2.7 系不发 thinking 字段；只有 M3 可真开关。
+
 ## 安装与使用
 
 ```bash
@@ -67,10 +84,13 @@ magpie plugin off "<目录>"
 magpie plugin on  "<目录>"
 ```
 
-## 为什么只做这几个
+## 为什么做这些
 
 ofm 已覆盖 13 个渠道（CodeArts、WorkBuddy 国内/国际、LobsterAI、Qoder 国内/国际、TRAE、
-Cline、Loomy、Raccoon、MiniMax Code、ZCode、Gemini）⇒ **这些不做**，重复实现没有价值。
+Cline、Loomy、Raccoon、MiniMax Code 国内、ZCode、Gemini）⇒ **这些不做**，重复实现没有价值。
+MiniMax **国际版**是例外：ofm 渠道包只有国内站（`account.minimax.cn`），magpie 社区插件的
+国际版登录则卡在上游 307 丢 Authorization 的坑里（见上节）——而 DSH 已把这两个坑都
+真机修通过，故移植其实现。
 
 ⚠️ hub 的 `aggregate` / `jet-hub-auto` 是**池路由**（hub 内部把请求分派给其它渠道），不是真实
 渠道，独立实现等于重写整个调度层 ⇒ **不在范围内**，那部分仍需依赖 DSH Hub 网关的桥接插件。
@@ -97,18 +117,23 @@ Cline、Loomy、Raccoon、MiniMax Code、ZCode、Gemini）⇒ **这些不做**�
 npm test
 ```
 
-覆盖签名三处坑、前缀分派、未登录回落、单渠道失败隔离、无续期声明。
+覆盖签名三处坑、前缀分派、未登录回落、单渠道失败隔离、无续期声明、
+OfficeAce 续期五缺口、MiniMax 传输（307 保凭据/白名单/地理路由）、
+OpenAI↔Anthropic 翻译、目录口径、设备码认证。
 
 ## 结构
 
 ```
-index.mjs              导出插件函数
-src/aggregate.mjs      聚合层：一个供应商，按前缀分派
-src/officeace.mjs      华为云渠道
-src/astudio.mjs        讯飞渠道
-src/shared.mjs         凭据存取、信封解析
-tests/                 node --test
-NOTICE.md              协议来源与边界声明
+index.mjs                  导出插件函数
+src/aggregate.mjs          聚合层：一个供应商，按前缀分派（含聚合级续期去重闸）
+src/officeace.mjs          华为云渠道
+src/astudio.mjs            讯飞渠道
+src/minimaxintl.mjs        MiniMax 国际版渠道（设备码 + PKCE）
+src/minimax-transport.mjs  MiniMax 传输层（307 保凭据跟随、传输重试、地理路由）
+src/minimax-bridge.mjs     OpenAI↔Anthropic 翻译桥（含 SSE）
+src/shared.mjs             凭据存取、信封解析
+tests/                     node --test
+NOTICE.md                  协议来源与边界声明
 ```
 
 ## 归属

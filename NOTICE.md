@@ -28,6 +28,11 @@ Magpie 配置目录下（`~/.config/magpie/<channel>-credential.json`），每�
 |---|---|---|---|
 | `officeace` | 华为云 AgentArts | 华为云 OAuth（PKCE + DPoP + 云侧轮询） | `{maas}/v2/chat/completions`（Basic） |
 | `astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `{maas}/model-gateway/v1/chat/completions`（Bearer） |
+| `minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（官方客户端同款，client `mcode-public`） | `{api}/mavis/api/v1/llm/v1/messages`（Anthropic，Bearer） |
+
+MiniMax 渠道的协议事实（端点、OAuth 常量、设备码形态、307 地理分流行为、思考档位语义）
+来自官方开源客户端 `MiniMax-AI/minimax-code` 与公开端点的真机实测对照（与 DSH 上游
+`iJetLi/dsh-providers-hub` 的记录一致）。
 
 各渠道的商标与产品名称归各自权利人所有。本插件只是让用户在 Magpie 里使用
 **自己的账号**访问这些服务 —— 不绕过任何付费墙、不共享任何账号、不代理他人流量。
