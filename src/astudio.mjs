@@ -115,7 +115,7 @@ async function completeLogin(identity) {
   }
 }
 
-/** 页面 HTML：极验 + 短信。（微信扫码/密码登录留给后续：需要 SSO 轮询与二维码渲染） */
+/** 页面 HTML：极验 + 短信。交互照抄 DSH 载体页（bind 模式、单次消费、可重试）。 */
 function renderLoginPage() {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -129,13 +129,16 @@ input{width:100%;padding:10px;box-sizing:border-box;border:1px solid #333;border
 button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:6px;background:#3b82f6;
        color:#fff;font-size:15px;cursor:pointer}
 button:disabled{background:#444;cursor:not-allowed}
+button.secondary{background:#374151}
 #msg{margin-top:14px;font-size:13px;min-height:20px;color:#9ca3af}
-#gee{margin:14px 0}
+#captchaBox{margin-top:8px;font-size:13px;color:#9ca3af;min-height:18px}
+.ok{color:#34d399}
 </style></head><body>
 <h2>登录 AStudio</h2>
-<p style="font-size:13px;color:#9ca3af">手机短信验证码登录。先点「获取验证码」（需完成滑块验证），再填入短信里的验证码。</p>
-<div id="gee"></div>
+<p style="font-size:13px;color:#9ca3af">手机短信验证码登录：先完成安全验证，再获取短信验证码。</p>
 <label>手机号</label><input id="mobile" placeholder="13800138000" autocomplete="tel">
+<button id="captcha" class="secondary">点击进行安全验证</button>
+<div id="captchaBox">未验证</div>
 <div style="display:flex;gap:8px">
   <div style="flex:1"><label>验证码</label><input id="code" placeholder="6 位数字"></div>
   <div style="flex:1"><label>&nbsp;</label><button id="send">获取验证码</button></div>
@@ -143,40 +146,126 @@ button:disabled{background:#444;cursor:not-allowed}
 <button id="go">登录</button>
 <div id="msg"></div>
 <script>
-// 极验：载入官方 gt.js 并渲染。滑块结果由 geetest 回调给出，
-// 我们不破解它 —— 只把 {challenge, validate, seccode} 原样交给后端。
-let gee = null;
+// 极验交互照抄 DSH 载体页（astudio-oauth.ts 的 setupCaptcha/triggerGeetestCaptcha）：
+//  - product:'bind' + onReady 里程序化 verify()（不是 popup 常驻）；
+//  - **每次点「安全验证」新起一个实例**（新 challenge），完成/失败/超时后 destroy()；
+//  - validate 是**一次性**的：send 消费后必须重新验证（旧值置空），
+//    重发用已消费的 validate 必失败 —— 这是上一版「无法获取验证码」的根因。
+let captchaResult = null;
 const msg = (t) => { document.getElementById('msg').textContent = t };
-async function loadGee() {
-  const r = await fetch('/gee-captcha'); const j = await r.json();
-  if (!j.ok) throw new Error(j.message || '极验配置获取失败');
-  const cfg = j.data;
-  return new Promise((resolve) => {
+
+var gtScriptPromise = null;
+function ensureGeetestSdk() {
+  if (typeof window.initGeetest === 'function') return Promise.resolve();
+  if (gtScriptPromise) return gtScriptPromise;
+  gtScriptPromise = new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = 'https://static.geetest.com/static/js/gt.0.4.9.js';
-    s.onload = () => window.initGeetest({
-      gt: cfg.gt, challenge: cfg.challenge, new_captcha: cfg.new_captcha,
-      product: 'popup', width: '100%'
-    }, (o) => {
-      o.appendTo('#gee');
-      o.onSuccess = () => { gee = o.getValidate(); msg('滑块验证通过'); resolve() };
-      o.onReady = () => resolve();
-    });
-    s.onerror = () => { msg('极验脚本加载失败，请检查网络'); resolve() };
+    s.src = 'https://static.geetest.com/static/tools/gt.js';
+    s.async = true;
+    s.addEventListener('load', () => resolve(), { once: true });
+    s.addEventListener('error', () => { s.remove(); gtScriptPromise = null;
+      reject(new Error('安全验证组件加载失败，请检查网络后重试。')) }, { once: true });
     document.head.appendChild(s);
   });
+  return gtScriptPromise;
 }
+
+async function triggerCaptcha() {
+  await ensureGeetestSdk();
+  const r = await fetch('/gee-captcha');
+  const j = await r.json();
+  if (!j.ok || !j.data) throw new Error(j.message || '获取验证码配置失败');
+  const config = j.data;
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    let instance = null;
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { if (instance && typeof instance.destroy === 'function') instance.destroy(); } catch (_) {}
+      'payload' in result ? resolve(result.payload) : reject(result.error);
+    };
+    const timer = setTimeout(() => finish({ error: new Error('安全验证超时，请重试。') }), 30000);
+    try {
+      window.initGeetest(Object.assign({}, config, {
+        https: true, offline: !config.success, product: 'bind', width: '100%',
+      }), (o) => {
+        instance = o;
+        o.onReady(() => { try { o.verify(); } catch (e) { finish({ error: new Error('安全验证启动失败，请重试。') }) } });
+        o.onError(() => finish({ error: new Error('安全验证网络异常，请稍后重试。') }));
+        if (typeof o.onClose === 'function') o.onClose(() => finish({ error: new Error('安全验证已取消。') }));
+        o.onSuccess(() => {
+          const val = o.getValidate();
+          if (!val || !val.geetest_challenge || !val.geetest_validate || !val.geetest_seccode) {
+            finish({ error: new Error('安全验证结果无效，请重试。') });
+            return;
+          }
+          finish({ payload: {
+            geetestChallenge: val.geetest_challenge,
+            geetestValidate: val.geetest_validate,
+            geetestSeccode: val.geetest_seccode,
+          } });
+        });
+      });
+    } catch (e) {
+      finish({ error: e instanceof Error ? e : new Error(String(e)) });
+    }
+  });
+}
+
+const captchaBtn = document.getElementById('captcha');
+const captchaBox = document.getElementById('captchaBox');
+captchaBtn.onclick = async () => {
+  captchaBtn.disabled = true;
+  captchaBtn.textContent = '正在拉起验证…';
+  try {
+    captchaResult = await triggerCaptcha();
+    captchaBox.textContent = '✓ 已完成安全验证';
+    captchaBox.className = 'ok';
+    captchaBtn.textContent = '重新验证';
+  } catch (e) {
+    captchaResult = null;
+    captchaBox.textContent = '未验证';
+    captchaBox.className = '';
+    captchaBtn.textContent = '验证失败，重试';
+    msg(e.message || '安全验证失败');
+  }
+  captchaBtn.disabled = false;
+};
+
+let sendCooldown = 0;
 document.getElementById('send').onclick = async () => {
   const mobile = document.getElementById('mobile').value.trim();
   if (!mobile) return msg('请填手机号');
-  if (!gee) { await loadGee(); if (!gee) return msg('请先完成滑块验证') }
+  if (!captchaResult) return msg('请先点击上方按钮完成安全验证');
+  if (sendCooldown > 0) return;
+  msg('正在发送验证码…');
   try {
     const r = await fetch('/sms/send', { method: 'POST', headers: {'content-type':'application/json'},
-      body: JSON.stringify({ mobile, geetestChallenge: gee.geetest_challenge,
-        geetestValidate: gee.geetest_validate, geetestSeccode: gee.geetest_seccode }) });
+      body: JSON.stringify({ mobile, geetestChallenge: captchaResult.geetestChallenge,
+        geetestValidate: captchaResult.geetestValidate, geetestSeccode: captchaResult.geetestSeccode }) });
     const j = await r.json();
-    msg(j.ok ? (j.message || '验证码已发送') : (j.message || '发送失败'));
+    if (j.ok) {
+      msg(j.message || '验证码已发送');
+      sendCooldown = 60;
+      const t = setInterval(() => {
+        sendCooldown -= 1;
+        document.getElementById('send').textContent = sendCooldown > 0 ? sendCooldown + 's' : '获取验证码';
+        if (sendCooldown <= 0) clearInterval(t);
+      }, 1000);
+    } else {
+      msg(j.message || '发送失败');
+    }
   } catch (e) { msg('发送失败：' + e.message) }
+  finally {
+    // ⚠️ validate 一次性：无论成败都作废，要求重新滑一次（重发用旧值必失败）
+    captchaResult = null;
+    captchaBox.textContent = '需重新验证';
+    captchaBox.className = '';
+    captchaBtn.textContent = '点击进行安全验证';
+  }
+};
 };
 document.getElementById('go').onclick = async () => {
   const mobile = document.getElementById('mobile').value.trim();
@@ -257,8 +346,14 @@ async function startLoginFlow() {
         const r = await fetch(`${AUTH_BASE}${SEND_SMS_PATH}`, {
           method: 'POST', body: form, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
-        const j = await r.json()
-        return sendJson(res, 200, { ok: j.code === 0, message: j.desc ?? j.message ?? j.msg ?? '' })
+        const j = await r.json().catch(() => ({}))
+        // ⚠️ 成功判据对齐 DSH sendAstudioSmsCode：code 为 0 / '0'（字符串）/
+        //    undefined（信封没有 code 键）都算成功 —— 只认 === 0 会把上游
+        //    字符串形态误判成「发送失败」，且 desc 为空时页面无任何提示。
+        const code = j?.code
+        const ok = code === 0 || code === '0' || code === undefined
+        const message = j?.desc ?? j?.message ?? j?.msg ?? (ok ? '短信验证码已发送' : `code=${String(code)}`)
+        return sendJson(res, 200, { ok, message })
       }
       if (pathname === '/sms/login') {
         const body = await readBody(req)
