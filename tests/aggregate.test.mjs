@@ -11,14 +11,14 @@ const build = async (options = {}) => {
   const plugin = await DshProvidersHubPlugin({}, options)
   const cfg = {}
   await plugin.config(cfg)
-  return { plugin, provider: cfg.provider['dsh-providers-hub'] }
+  return { plugin, provider: cfg.provider['providers-hub'] }
 }
 
-test('一个插件只注册一个供应商：dsh-providers-hub', async () => {
+test('一个插件只注册一个供应商：providers-hub', async () => {
   const plugin = await DshProvidersHubPlugin({}, {})
   const cfg = {}
   await plugin.config(cfg)
-  assert.deepEqual(Object.keys(cfg.provider), ['dsh-providers-hub'])
+  assert.deepEqual(Object.keys(cfg.provider), ['providers-hub'])
 })
 
 test('目录里的模型 id 带渠道前缀（渠道/模型）', async () => {

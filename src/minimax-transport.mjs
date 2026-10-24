@@ -115,7 +115,7 @@ export function describeGeoRoute(detail) {
   const base = 'MiniMax 国际站按**出口 IP 所在区域**分流：当前出口 IP 被判成中国区'
     + '（内网或无法解析的地址也会被判成中国区），请求已被重定向到中国站 —— '
     + '这不是凭据问题。建议先确认本机出口 IP（例如浏览器打开 ifconfig.me），然后二选一：'
-    + '① 给本插件设置一个海外 IP（magpie plugin options dsh-providers-hub '
+    + '① 给本插件设置一个海外 IP（magpie plugin options providers-hub '
     + '\'{"minimaxXff":"<海外IP>"}\'）；② 用代理把出口 IP 改到海外。'
   const trimmed = typeof detail === 'string' ? detail.trim() : ''
   if (trimmed.length === 0) return base

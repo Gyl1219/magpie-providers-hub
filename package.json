@@ -20,7 +20,7 @@
     "magpie",
     "magpie-plugin",
     "provider",
-    "dsh-providers-hub",
+    "providers-hub",
     "officeace",
     "astudio"
   ],

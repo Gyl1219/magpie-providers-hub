@@ -20,8 +20,8 @@ import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
 
-const PROVIDER = 'dsh-providers-hub'
-const PROVIDER_NAME = 'DSH Providers Hub'
+const PROVIDER = 'providers-hub'
+const PROVIDER_NAME = 'Providers Hub'
 
 /**
  * loader 的占位 baseURL。
@@ -30,7 +30,7 @@ const PROVIDER_NAME = 'DSH Providers Hub'
  *    本插件的请求全部在 `loader().fetch` 里按渠道前缀改写到各上游，这个域名不会被真正访问；
  *    用 `.invalid` 保留域（RFC 2606）保证即使漏拦截也不会打到真实主机。
  */
-const PLACEHOLDER_BASE = 'https://dsh-providers-hub.invalid'
+const PLACEHOLDER_BASE = 'https://providers-hub.invalid'
 
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
 const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel]
@@ -125,7 +125,7 @@ const signedIn = (channel) => Boolean(credentialOf(channel))
  * 目录里的模型 id 只带**渠道**前缀：`officeace/glm-5.3`
  * （与 jethub 同形态：那里 `loomy/GLM-5.3-Flash` 的 `loomy` 也是渠道）。
  * magpie 展示/选择时会自动补供应商名前缀，呈现为
- * `dsh-providers-hub/officeace/glm-5.3`。
+ * `providers-hub/officeace/glm-5.3`。
  */
 function prefixed(channelId, modelId) {
   return `${channelId}/${modelId}`
@@ -167,7 +167,7 @@ async function discoverModels(fallback) {
 export const DshProvidersHubPlugin = async (_input, options = {}) => {
   const openBrowser = typeof options.openBrowser === 'function' ? options.openBrowser : undefined
   /**
-   * MiniMax 国际版的可选绕行 IP（`magpie plugin options dsh-providers-hub
+   * MiniMax 国际版的可选绕行 IP（`magpie plugin options providers-hub
    * '{"minimaxXff":"<海外IP>"}'` 设置）。
    *
    * ⚠️ 默认关闭：伪造 XFF 只该在用户明确知道自己在做什么时用（DSH 同款纪律）。

@@ -14,7 +14,7 @@ Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里 Magpie 社�
 
 ## 形态：一个供应商，内部聚合多个渠道
 
-与 ofm 同款 —— **Magpie 的供应商列表里只有 `dsh-providers-hub` 一个条目**，而不是每个渠道
+与 ofm 同款 —— **Magpie 的供应商列表里只有 `providers-hub` 一个条目**，而不是每个渠道
 一个条目。模型 id 带渠道前缀：
 
 ```
@@ -65,7 +65,7 @@ MiniMax Code **国际版**（`account.minimax.io` / `agent.minimax.io`）。登�
 - `agent.minimax.io` 恒 **307 → 中国站**（Akamai 按出口 IP 分流），而 fetch 跨域跟随会
   **剥掉 Authorization** ⇒ 插件手动逐跳跟随并**每跳重附头**（不跟就 401，且与
   「凭据失效」逐字同形）。中国大陆出口会被分流；可用
-  `magpie plugin options dsh-providers-hub '{"minimaxXff":"<海外IP>"}'` 绕行（默认关）。
+  `magpie plugin options providers-hub '{"minimaxXff":"<海外IP>"}'` 绕行（默认关）。
 - `access_token` **不是 JWT**（`mmoat_` 前缀）⇒ 过期时间只能来自 `expires_in` 自算。
 - 思考档位错发就是 400 或假关闭：M3.1 系**永不发** `disabled`（硬 400）；
   M2.7 系不发 thinking 字段；只有 M3 可真开关。
@@ -74,7 +74,7 @@ MiniMax Code **国际版**（`account.minimax.io` / `agent.minimax.io`）。登�
 
 ```bash
 magpie plugin add <本仓库路径或 github:Gyl1219/magpie-providers-hub>
-magpie plugin login dsh-providers-hub     # 选渠道登录
+magpie plugin login providers-hub     # 选渠道登录
 ```
 
 改代码后重载（终端每次按文件夹当前内容加载；应用里需关掉再打开）：

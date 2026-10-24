@@ -8,7 +8,7 @@
 // **一个供应商，内部聚合多个渠道**（与 ofm 同款形态）。
 //
 // 模型 id 带渠道前缀（渠道/模型），例：`officeace/glm-5.3`；
-// magpie 展示时会补供应商名，呈现为 `dsh-providers-hub/officeace/glm-5.3`。
+// magpie 展示时会补供应商名，呈现为 `providers-hub/officeace/glm-5.3`。
 // 请求进来时按前缀分派到对应渠道，发给上游时去掉前缀。
 //
 // 全部**独立实现**：登录、续期、转发都在本插件里，不依赖 DSH，不依赖 DSH 桌面版。
