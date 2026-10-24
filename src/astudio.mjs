@@ -602,4 +602,74 @@ export const astudioChannel = {
       message: popups.length > 1 ? `已领取 ${popups.length} 项福利` : undefined,
     }
   },
+
+  /**
+   * 额度分桶（移植 astudio-credits.ts 的 buildAstudioBalance）。
+   *
+   * `GET /points/balance`（只认 Cookie 的 ssoSessionId）。按**来源四分法**分桶：
+   * 会员/购买/赠送积分（主池，total 取上游权威 `totalBalance` 而非逐包求和）
+   * + 星火积分（**独立池**，缺席则不产出）。每池带 `*NextExpireTime` 到期时间 ——
+   * ⚠️ 是**不带时区的本地时间串**（DSH 纪律：原样透出、不 Date.parse、不做比较），
+   * 所以只拼进 name，不写 resetsAt（resetsAt 是 ISO 时刻，拼错时区会误导）。
+   */
+  async usage(credential) {
+    const cookie = cookieHeader(credential)
+    if (cookie.length === 0) {
+      return [{ name: DISPLAY, used: 0, display: '未登录（缺少会话 Cookie）' }]
+    }
+    let body
+    try {
+      const response = await fetch(`${AUTH_BASE}/points/balance`, {
+        method: 'GET',
+        headers: { Accept: 'application/json', Cookie: cookie },
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (!response.ok) {
+        return [{ name: DISPLAY, used: 0, display: `额度服务不可用（HTTP ${response.status}）` }]
+      }
+      body = JSON.parse(await response.text())
+    } catch (error) {
+      return [{ name: DISPLAY, used: 0, display: `额度服务不可用（网络异常）：${error.message}` }]
+    }
+    const code = typeof body?.code === 'number' ? body.code : parseInt(String(body?.code ?? ''), 10)
+    const message = typeof body?.message === 'string' ? body.message : String(body?.desc ?? '')
+    if (code === 80000 || (typeof message === 'string' && message.includes('登录异常，请重新登录'))) {
+      return [{ name: DISPLAY, used: 0, display: '登录会话已失效，需重新登录' }]
+    }
+    if (Number.isFinite(code) && code !== 0) {
+      return [{ name: DISPLAY, used: 0, display: `积分查询失败：${message || `code=${code}`}` }]
+    }
+    const data = typeof body?.data === 'object' && body.data !== null ? body.data : {}
+    const int = (key) => {
+      const v = data[key]
+      return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+    }
+    const str = (key) => (typeof data[key] === 'string' ? data[key] : '')
+    const total = int('totalBalance')
+    if (total === undefined) {
+      return [{ name: DISPLAY, used: 0, display: '响应未包含余额字段' }]
+    }
+    const windows = []
+    const pushPool = (label, totalKey, balanceKey, expireKey) => {
+      const remaining = int(balanceKey)
+      if (remaining === undefined) return // 该池不下发 ⇒ 不臆造条目
+      const poolTotal = int(totalKey) ?? remaining
+      const expire = str(expireKey)
+      const usedPercent = poolTotal > 0 ? Math.max(0, Math.min(100, Math.round(((poolTotal - remaining) / poolTotal) * 100))) : (remaining > 0 ? 0 : 100)
+      windows.push({
+        name: `AStudio · ${label}${expire !== '' ? ` · ${expire} 到期` : ''}`,
+        used: usedPercent,
+        display: `剩余 ${remaining}`,
+      })
+    }
+    pushPool('会员积分', 'memberTotal', 'memberBalance', 'memberNextExpireTime')
+    pushPool('购买积分', 'buyTotal', 'buyBalance', 'buyNextExpireTime')
+    pushPool('赠送积分', 'activityTotal', 'activityBalance', 'activityNextExpireTime')
+    pushPool('星火积分（独立池）', 'sparkTotalAmount', 'sparkTotalBalance', 'sparkNextExpireTime')
+    if (windows.length === 0) {
+      // 上游只给合计、一个池都没下发：补一条让总额可见（与 DSH 同取舍）
+      windows.push({ name: 'AStudio · 可用积分', used: 0, display: `剩余 ${total}` })
+    }
+    return windows
+  },
 }
