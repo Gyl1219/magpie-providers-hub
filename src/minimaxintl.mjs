@@ -524,33 +524,51 @@ function streakDaysOf(days) {
  * 签到信封请求。⚠️ 业务码在 `base_resp.status_code`（HTTP 恒 200，
  * `invalid timezone_id` 也是 200）；走 minimaxFetch（重定向保凭据 + XFF）。
  */
+/**
+ * 签到信封请求。⚠️ 业务码在 `base_resp.status_code`（HTTP 恒 200，
+ * `invalid timezone_id` 也是 200）；走 minimaxFetch（重定向保凭据 + XFF）。
+ *
+ * ⚠️ 必须挂 onGeoRoute：中国大陆直连出口会被 307 到中国站，国际站 token
+ * 打到中国站 = 401「invalid access token」，与「凭据真失效」逐字同形 ——
+ * 不判就是「登录成功却签到 401」这种最具误导性的形态（真因是出口 IP）。
+ */
 async function signinEnvelope(path, credential, method, xff) {
   const url = new URL(`${API_HOST}${path}`)
   url.searchParams.set('timezone_id', timezoneId())
+  let geoRouted = false
   const response = await minimaxFetch(url.toString(), () => ({
     method,
     headers: Object.fromEntries(apiHeaders(credential, xff).entries()),
     ...(method === 'POST' ? { body: '{}' } : {}),
-  }), { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+  }), {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    onGeoRoute: () => { geoRouted = true },
+  })
   const text = await response.text().catch(() => '')
   let payload
   try {
     payload = JSON.parse(text)
   } catch {
-    throw new Error(`MiniMax 签到响应不是 JSON（HTTP ${response.status}）：${text.slice(0, 200)}`)
+    const detail = `HTTP ${response.status}：${text.slice(0, 200)}`
+    throw new Error(`MiniMax 签到响应不是 JSON：${geoRouted ? describeGeoRoute(detail) : detail}`)
   }
   const baseResp = typeof payload?.base_resp === 'object' && payload.base_resp !== null ? payload.base_resp : {}
   const statusCode = finiteNumber(baseResp.status_code)
   if (statusCode !== undefined && statusCode !== 0) {
     const message = typeof baseResp.status_msg === 'string' ? baseResp.status_msg : `status_code=${statusCode}`
-    const error = new Error(`MiniMax 签到失败：${message}`)
+    const error = new Error(
+      `MiniMax 签到失败：${geoRouted ? describeGeoRoute(`${statusCode} ${message}`) : message}`,
+    )
     // ⚠️ 如实区分：invalid access token 要重登；invalid signature 是网关/重定向
-    error.signedOut = statusCode === 401 || /invalid access token/i.test(message)
+    error.signedOut = !geoRouted && (statusCode === 401 || /invalid access token/i.test(message))
     throw error
   }
   if (response.status === 401 || response.status === 403) {
-    const error = new Error(`MiniMax 签到失败：凭据已失效（HTTP ${response.status}）`)
-    error.signedOut = true
+    // ⚠️ 经历过地理路由时，业务错误原文放前面（DSH 纪律：「去重登」不能顶掉「换出口」）
+    const error = new Error(
+      `MiniMax 签到失败：${geoRouted ? describeGeoRoute(`HTTP ${response.status}`) : `凭据已失效（HTTP ${response.status}）`}`,
+    )
+    error.signedOut = !geoRouted
     throw error
   }
   return payload

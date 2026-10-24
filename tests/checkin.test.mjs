@@ -156,6 +156,23 @@ test('签到：业务码在 base_resp.status_code（HTTP 200 + invalid timezone_
   }
 })
 
+test('签到：地理分流（307→中国站）后的 401 必须报「出口 IP」而不是「凭据失效」', async () => {
+  // 中国大陆直连出口的真实形态：agent.minimax.io 恒 307 → agent.minimaxi.com，
+  // 国际站 token 打到中国站 = 401 invalid access token（与凭据真失效逐字同形）。
+  const stub = stubFetch([
+    { match: 'agent.minimax.io', respond: () => new Response(null, { status: 307, headers: { location: 'https://agent.minimaxi.com/minimax-cloud/api/v1/signin/status' } }) },
+    { match: 'agent.minimaxi.com', respond: () => new Response('{"error":"invalid access token"}', { status: 401 }) },
+  ])
+  try {
+    const outcome = await minimaxCheckin(CRED)
+    assert.equal(outcome.outcome, 'failed')
+    assert.match(outcome.message, /出口 IP|分流/, '必须指向真实原因（换出口/XFF），误导成重登会白烧一次登录')
+    assert.doesNotMatch(outcome.message, /凭据已失效/)
+  } finally {
+    stub.restore()
+  }
+})
+
 test('渠道对象挂了 checkin；officeace/accio 没有签到端点（跳过不占失败名额）', async () => {
   assert.equal(typeof minimaxintlChannel.checkin, 'function')
   assert.equal(typeof astudioChannel.checkin, 'function')
