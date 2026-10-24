@@ -13,6 +13,7 @@ process.env.HOME = sandbox
 
 const { minimaxintlChannel } = await import('../src/minimaxintl.mjs')
 const { accioChannel } = await import('../src/accio.mjs')
+const { astudioChannel } = await import('../src/astudio.mjs')
 const { DshProvidersHubPlugin } = await import('../index.mjs')
 
 test.after = () => {
@@ -160,6 +161,40 @@ test('minimaxintl：地理分流后的失败指向出口 IP 而不是凭据', as
       () => minimaxintlChannel.usage(MM_CRED),
       /出口 IP|分流/,
     )
+  } finally {
+    stub.restore()
+  }
+})
+
+// ── astudio 分桶（托盘面板适配：resetsAt + aside）────────────────────────
+
+const AS_CRED = { accessToken: 'b', ssoSessionId: 's', accountId: 'a', token: 't' }
+
+test('astudio：到期串按 +08:00 解析进 resetsAt（面板才有「重置于 …」）；剩 0 的桶 aside', async () => {
+  const stub = stubFetch([
+    {
+      match: '/points/balance',
+      respond: () => json({
+        code: 0,
+        data: {
+          totalBalance: 7000, totalAmount: 7000,
+          memberBalance: 0, memberTotal: 100,
+          buyBalance: 0, buyTotal: 50,
+          activityBalance: 7000, activityTotal: 7000, activityNextExpireTime: '2026-11-01T04:45:48',
+        },
+      }),
+    },
+  ])
+  try {
+    const windows = await astudioChannel.usage(AS_CRED)
+    const member = windows.find((w) => w.name.includes('会员积分'))
+    assert.equal(member.aside, true, '剩 0 的桶收进折叠区（否则 0% 死环挤掉有值的主环）')
+    assert.equal(member.resetsAt, undefined, '无到期串不写 resetsAt')
+    const activity = windows.find((w) => w.name.includes('赠送积分'))
+    assert.equal(activity.used, 0)
+    assert.equal(activity.aside, undefined, '有值的桶留在主环')
+    assert.equal(activity.resetsAt, '2026-11-01T04:45:48+08:00' === '' ? '' : new Date('2026-11-01T04:45:48+08:00').toISOString())
+    assert.match(activity.name, /2026-11-01T04:45:48 到期/, '桶名保留原文（解析失败也不丢信息）')
   } finally {
     stub.restore()
   }

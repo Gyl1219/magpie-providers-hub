@@ -650,15 +650,33 @@ export const astudioChannel = {
       return [{ name: DISPLAY, used: 0, display: '响应未包含余额字段' }]
     }
     const windows = []
+    /**
+     * 到期本地时间串 → ISO（按 +08:00 解析）。
+     *
+     * ⚠️ 上游给的是**不带时区的本地时间串**（DSH 侧按纪律原样透出）。但讯飞是
+     * 国内服务，其「本地」就是 Asia/Shanghai —— 按东八区解析进 resetsAt 后，
+     * magpie 的托盘面板才能像 ZCODE 那样显示「重置于 …」。形状不认就留空
+     * （桶名里仍保留原文，信息不丢）。
+     */
+    const expiryIso = (text) => {
+      const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?$/.exec(String(text ?? ''))
+      if (m === null) return undefined
+      return new Date(`${m[1]}T${m[2]}:${m[3] ?? '00'}+08:00`).toISOString()
+    }
     const pushPool = (label, totalKey, balanceKey, expireKey) => {
       const remaining = int(balanceKey)
       if (remaining === undefined) return // 该池不下发 ⇒ 不臆造条目
       const poolTotal = int(totalKey) ?? remaining
       const expire = str(expireKey)
+      const resetsAt = expiryIso(expire)
       const usedPercent = poolTotal > 0 ? Math.max(0, Math.min(100, Math.round(((poolTotal - remaining) / poolTotal) * 100))) : (remaining > 0 ? 0 : 100)
       windows.push({
         name: `AStudio · ${label}${expire !== '' ? ` · ${expire} 到期` : ''}`,
         used: usedPercent,
+        ...(resetsAt !== undefined ? { resetsAt } : {}),
+        // 剩 0 的桶收进折叠区（aside）：主环位留给有值的桶 ——
+        // 否则面板上两三个 0% 死环把「剩余 7000/60000」的好桶全挤掉
+        ...(remaining <= 0 ? { aside: true } : {}),
         display: `剩余 ${remaining}`,
       })
     }

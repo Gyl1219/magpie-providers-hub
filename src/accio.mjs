@@ -1073,6 +1073,8 @@ async function usage(credential) {
       name: `Accio · ${bucket.label}`,
       used: percent,
       ...(bucket.key === 'daily' && dailyResetIso !== undefined ? { resetsAt: dailyResetIso } : {}),
+      // 剩 0 的桶收进折叠区（aside）：主环位留给有值的桶（与 astudio 同口径）
+      ...(remaining <= 0 ? { aside: true } : {}),
       display: `剩余 ${remaining}`,
     })
   }
