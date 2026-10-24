@@ -39,6 +39,19 @@ test('script 里调用的顶层函数都有定义（loadGee 残留调用的门�
   for (const m of script.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)) defined.add(m[1])
   for (const m of script.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g)) defined.add(m[1])
   for (const m of script.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?:=|;|,|\))/g)) defined.add(m[1])
+  // 函数参数（resolve/reject/finish 这类回调参数也是已定义名）
+  for (const m of script.matchAll(/\(([^()]*)\)\s*=>/g)) {
+    for (const p of m[1].split(',')) {
+      const name = p.trim().split('=')[0].trim()
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) defined.add(name)
+    }
+  }
+  for (const m of script.matchAll(/function\s*\(([^()]*)\)/g)) {
+    for (const p of m[1].split(',')) {
+      const name = p.trim()
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) defined.add(name)
+    }
+  }
   for (const m of script.matchAll(/([A-Za-z_$][\w$]*)\s*\(/g)) {
     const name = m[1]
     if (['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'new', 'async', 'typeof'].includes(name)) continue
