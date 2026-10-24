@@ -123,6 +123,65 @@ export function describeGeoRoute(detail) {
   return `上游还返回了：${clipped}。另外：${base}`
 }
 
+/**
+ * 归一化 MiniMax 国际站绕分流用的 `X-Forwarded-For` 值 —— 逐字移植 DSH 的
+ * `sanitizeMinimaxXff`（DSH 用它管面板设置；我们用它管 plugin options）。
+ *
+ * ## ⚠️ 为什么必须校验，而不是「用户填什么就发什么」
+ *
+ * 这个值会被原样拼进 HTTP 请求头。不校验的话，填入
+ * `1.2.3.4\r\nX-Evil: 1` 就能向上游注入任意请求头（CRLF 头注入）。
+ * 故判据必须是**白名单字符集**，不是「挡掉已知坏字符」。
+ *
+ * ## 取值口径（DSH 实测定的）
+ *
+ * - 只接受 **IP 字面量**：IPv4（四段 0-255）与 IPv6（`::` 压缩最多一次、
+ *   组数 ≤8、组内 1~4 位十六进制；`%zone` 允许且不参与段数计算）；
+ * - 主机名、XFF 链（`1.2.3.4, 5.6.7.8`）⇒ `undefined`；
+ * - **空串/仅空白 ⇒ `undefined`**（= 不附头；绝不能变成空值头 —— 空值在
+ *   Akamai 侧被当非法并回退真实 IP，行为同不附头但污染上游日志）；
+ * - 超长（>128）⇒ `undefined`（最长合法 IPv6 只有 45 字符）。
+ *
+ * ⚠️ 只做 trim，不改大小写不改缩写：值是用户从自己代理/VPN 抄来的，
+ * 改写只会让「为什么填对了却不生效」更难查。
+ */
+export function sanitizeXff(raw) {
+  if (typeof raw !== 'string') return undefined
+  // ⚠️ 必须在 trim 之前查 CR/LF：'1.2.3.4\r' 被 trim 后变合法 IPv4 并通过校验
+  // —— 那个 \r 就会被拼进请求头（DSH 初版栽过的地方）。
+  if (/[\r\n]/.test(raw)) return undefined
+  const value = raw.trim()
+  if (value.length === 0 || value.length > 128) return undefined
+  // 白名单字符集；仅当存在 %（IPv6 zone）时才放行字母（纯字母如 localhost 拒绝）
+  const hasZone = value.includes('%')
+  const allowed = hasZone ? /^[0-9A-Za-z.:%-]+$/ : /^[0-9A-Fa-f.:]+$/
+  if (!allowed.test(value)) return undefined
+  // IPv4：四段十进制，每段 0-255
+  const parts = value.split('.')
+  if (parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)) {
+    return value
+  }
+  // IPv6：段数合法性（:: 压缩最多一次；有压缩则显式组数 <8，无压缩则恰好 8 组）
+  if (value.includes(':')) {
+    if (/:::/.test(value)) return undefined
+    if (value.startsWith(':') && !value.startsWith('::')) return undefined
+    if (value.endsWith(':') && !value.endsWith('::')) return undefined
+    const addressPart = value.split('%')[0] ?? ''
+    if (addressPart.length === 0) return undefined
+    const hasCompression = addressPart.includes('::')
+    if (hasCompression && addressPart.split('::').length > 2) return undefined
+    const groups = addressPart.split(':').filter((g) => g.length > 0)
+    if (!groups.every((g) => /^[0-9A-Fa-f]{1,4}$/.test(g))) return undefined
+    if (hasCompression) {
+      if (groups.length >= 8) return undefined
+    } else if (groups.length !== 8) {
+      return undefined
+    }
+    return value
+  }
+  return undefined
+}
+
 /** 附用户设置的 XFF（若有）。⚠️ 先查 CR/LF 再 trim（防头注入）。 */
 function withXff(headers, xff) {
   if (typeof xff !== 'string') return headers

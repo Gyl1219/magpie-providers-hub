@@ -20,6 +20,7 @@ import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
 import { accioChannel } from './accio.mjs'
+import { sanitizeXff } from './minimax-transport.mjs'
 
 const PROVIDER = 'providers-hub'
 const PROVIDER_NAME = 'Providers Hub'
@@ -171,10 +172,13 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
    * MiniMax 国际版的可选绕行 IP（`magpie plugin options providers-hub
    * '{"minimaxXff":"<海外IP>"}'` 设置）。
    *
-   * ⚠️ 默认关闭：伪造 XFF 只该在用户明确知道自己在做什么时用（DSH 同款纪律）。
-   * 每次请求现读，不缓存 —— 用户随时可能改设置。
+   * ⚠️ 默认关闭（与 DSH 同款：无默认值，用户显式填才生效）。
+   * ⚠️ 读取时过 `sanitizeXff`（DSH `sanitizeMinimaxXff` 逐字移植）：
+   * 只接受 IP 字面量 —— 这个值会拼进请求头，白名单校验防 CRLF 头注入；
+   * 非法值静默不附头（不崩 —— 填错的用户体验是「仍被分流」，
+   * 报错文案在 describeGeoRoute 里教他核对）。
    */
-  const minimaxXff = typeof options.minimaxXff === 'string' ? options.minimaxXff : undefined
+  const minimaxXff = sanitizeXff(options.minimaxXff)
 
   /** 请求体里的 model 是 `dsh-hub/<channel>/<model>`；拆出渠道。 */
   const resolve = (modelId) => {
