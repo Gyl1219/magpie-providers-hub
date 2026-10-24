@@ -22,6 +22,7 @@ process.env.HOME = sandbox
 const { officeaceChannel } = await import('../src/officeace.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
 const { minimaxintlChannel } = await import('../src/minimaxintl.mjs')
+const { accioChannel } = await import('../src/accio.mjs')
 const { REGISTERED_CHANNELS } = await import('../src/aggregate.mjs')
 const { DshProvidersHubPlugin } = await import('../index.mjs')
 
@@ -41,12 +42,12 @@ const build = async () => {
 }
 
 test('每个注册渠道都实现了 beginLogin', async () => {
-  assert.ok(REGISTERED_CHANNELS.length >= 3, `渠道数异常：${REGISTERED_CHANNELS.length}`)
+  assert.ok(REGISTERED_CHANNELS.length >= 4, `渠道数异常：${REGISTERED_CHANNELS.length}`)
   for (const channel of REGISTERED_CHANNELS) {
     assert.equal(typeof channel.beginLogin, 'function', `${channel.id} 缺少 beginLogin`)
   }
   // 引用一致性：测试 stub 的对象必须是聚合层实际持有的那几个
-  for (const channel of [officeaceChannel, astudioChannel, minimaxintlChannel]) {
+  for (const channel of [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel]) {
     assert.ok(REGISTERED_CHANNELS.includes(channel), `${channel.id} 未注册进聚合层`)
   }
 })

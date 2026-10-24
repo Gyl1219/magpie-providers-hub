@@ -29,6 +29,7 @@ Magpie 配置目录下（`~/.config/magpie/<channel>-credential.json`），每�
 | `officeace` | 华为云 AgentArts | 华为云 OAuth（PKCE + DPoP + 云侧轮询） | `{maas}/v2/chat/completions`（Basic） |
 | `astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `{maas}/model-gateway/v1/chat/completions`（Bearer） |
 | `minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（官方客户端同款，client `mcode-public`） | `{api}/mavis/api/v1/llm/v1/messages`（Anthropic，Bearer） |
+| `accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调（client `accio-work`，公开客户端无 secret） | `{gateway}/api/adk/llm/generateContent`（Gemini 风格，token 在 body） |
 
 MiniMax 渠道的协议事实（端点、OAuth 常量、设备码形态、307 地理分流行为、思考档位语义）
 来自官方开源客户端 `MiniMax-AI/minimax-code` 与公开端点的真机实测对照（与 DSH 上游

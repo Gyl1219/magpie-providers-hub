@@ -31,6 +31,7 @@ astudio/spark-x
 | `officeace` | 华为云 AgentArts | 华为云 OAuth（PKCE + DPoP + 云侧轮询） | `/v2/models` | ✅ STS（⚠️ refresh_token 一次性） |
 | `astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `/api/v1/model-manager/models` | ❌ 不支持（会话一年，不滑动） |
 | `minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（浏览器确认 user_code） | `/mavis/api/v1/models?region=en` | ✅ 标准 refresh_token 轮换 |
+| `accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调 | `POST /api/llm/config/v2` | ✅ refresh（⚠️ 轮换 refresh_token，已串行化） |
 
 ### officeace
 
@@ -69,6 +70,27 @@ MiniMax Code **国际版**（`account.minimax.io` / `agent.minimax.io`）。登�
 - `access_token` **不是 JWT**（`mmoat_` 前缀）⇒ 过期时间只能来自 `expires_in` 自算。
 - 思考档位错发就是 400 或假关闭：M3.1 系**永不发** `disabled`（硬 400）；
   M2.7 系不发 thinking 字段；只有 M3 可真开关。
+
+### accio
+
+Accio Work（阿里）—— **协议与其它渠道都不同：Gemini 风格信封**
+（`contents`/`parts`，键 snake_case），不是 OpenAI 也不是 Anthropic。登录是
+PKCE + **本地 loopback 回调**（Accio 对 `return_url` 无白名单校验，故回调端口
+由插件自起自管），目录按**计费倍率升序**（跨度 0.013~2.8 倍，是选型最重要的信号，
+已拼进展示名）。
+
+⚠️ 四个实测坑（都来自 DSH 的真机记录）：
+- **token 必须放 body 的 `token` 字段** —— 放 `Authorization` 头恒流内 402
+  （且错误以 `HTTP 200 + {"error_code":"402"}` 帧下发，不识别会误报「模型不回复」）；
+- **`agent` 侧 HTTP 200 也可能是风控拦截页**（缺 utdid 时阿里网关回 200 +
+  `text/html` 跳转脚本）⇒ 插件按 content-type 判别并把原文带进错误；
+- **上行必须用 `modelCode`**（`1Drift-…` 非人类可读的内部代号），发 slug 会
+  请求打空；对外 id 是展示名的 slug（`qwen-3-8-flash`）；
+- **工具调用分片到达**（首帧只有 id/name，后续帧重复全量参数）⇒ 按 id 缓冲、
+  `mergeToolArgs` 合并成一次调用（重放会重复执行工具）。
+
+另：`system_instruction` 必须是**字符串**（照 Gemini 包成对象恒 400）；思考档位
+仅作展示（上游无任何受控字段，实测四类字段全部无效）。
 
 ## 安装与使用
 
@@ -131,6 +153,7 @@ src/astudio.mjs            讯飞渠道
 src/minimaxintl.mjs        MiniMax 国际版渠道（设备码 + PKCE）
 src/minimax-transport.mjs  MiniMax 传输层（307 保凭据跟随、传输重试、地理路由）
 src/minimax-bridge.mjs     OpenAI↔Anthropic 翻译桥（含 SSE）
+src/accio.mjs              Accio（阿里）渠道（Gemini 风格信封 + 工具分片合并）
 src/shared.mjs             凭据存取、信封解析
 tests/                     node --test
 NOTICE.md                  协议来源与边界声明
