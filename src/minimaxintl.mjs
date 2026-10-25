@@ -688,9 +688,27 @@ async function usage(credential, { xff } = {}) {
     const expiryText = expireAt !== undefined
       ? `${new Date(expireAt).getMonth() + 1}-${String(new Date(expireAt).getDate()).padStart(2, '0')} 到期`
       : '长期有效'
+    /**
+     * 「重置前提醒」适配（magpie 设置里那个 提前 12/24/48 小时 通知）：
+     * - `span`（秒）让 magpie 把桶识别为周期窗口（MiniMax 积分 ≈ 月度）——
+     *   「每周或每月窗口用量不到 85% 即将重置」的触发就靠它分类；
+     * - `used` 用 consumed/granted 的真实百分比（非 0），85% 阈值才有意义。
+     * 两个字段都来自同一行响应（DSH 取证：`granted_at_ms` / `consumed_amount`
+     * / `granted_amount` 与 `remaining_amount` 同级），缺哪个就省哪个，不编造。
+     */
+    const grantedAt = finiteNumber(row?.granted_at_ms)
+    const span = grantedAt !== undefined && expireAt !== undefined && expireAt > grantedAt
+      ? Math.round((expireAt - grantedAt) / 1000)
+      : undefined
+    const consumed = looseAmount(row?.consumed_amount)
+    const grantedAmount = looseAmount(row?.granted_amount)
+    const usedPercent = consumed !== undefined && grantedAmount !== undefined && grantedAmount > 0
+      ? Math.max(0, Math.min(100, Math.round((consumed / grantedAmount) * 100)))
+      : 0
     windows.push({
       name: `${remaining} 积分 · ${expiryText}`,
-      used: 0,
+      used: usedPercent,
+      ...(span !== undefined ? { span } : {}),
       ...(expireAt !== undefined ? { resetsAt: new Date(expireAt).toISOString() } : {}),
       display: `剩余 ${remaining}`,
     })
