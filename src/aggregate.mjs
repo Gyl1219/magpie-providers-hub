@@ -249,8 +249,9 @@ export function tierSummarize(rows) {
     out.push({
       ...pointer,
       name: `临期 · 剩 ${pointer.amount}`,
-      // ⚠️ 倒计时拼进**亮色主文本**：「将于 X 过期」辅助行是浅灰看不清（用户报障）
-      display: `剩 ${pointer.amount}${untilText(expiry) !== undefined ? ` · ${untilText(expiry)}` : ''}`,
+      // ⚠️ display 只放倒计时 —— 剩余量已在 name 里（重复了用户会看到两遍）；
+      //    倒计时必须进**亮色主文本**：「将于 X 过期」辅助行浅灰看不清（用户报障）
+      display: untilText(expiry) ?? `剩 ${pointer.amount}`,
       runsOutAt: expiry,
       runsOut: pointer.amount,
     })
@@ -265,7 +266,7 @@ export function tierSummarize(rows) {
       ...earliest,
       name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
       amount,
-      display: `剩 ${amount} · ${longTerm.length} 批${untilText(expiry) !== undefined ? ` · 最早 ${untilText(expiry)}` : ''}`,
+      display: untilText(expiry) !== undefined ? `最早 ${untilText(expiry)}` : `剩 ${amount} · ${longTerm.length} 批`,
       runsOutAt: expiry,
       // ⚠️ runsOut 必须是**那一批**的量（最早时刻真正作废的）——
       //    写成合计会把「6 批不同时刻作废」说成「一次全没」
