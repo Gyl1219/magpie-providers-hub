@@ -534,6 +534,13 @@ const dataUrlOf = (url) => {
  * ⚠️ 工具结果下发为 `{role:'user',parts:[{functionResponse}]}`（Gemini 风格），
  * **按 name 配对**（OpenAI 的 tool 消息不带 name ⇒ 需从 assistant 的 tool_calls
  * 建 id→name 映射回填，漏了映射工具结果就全字段丢失）。
+ *
+ * ⚠️⚠️ **跨消息配对纪律**（上游 61bfe25 修的真实缺陷，trae 4027 同约束的第二入口）：
+ * `functionResponse` **必须紧密相邻** —— 中间插任何东西（含图片 user 消息）都会
+ * 断开配对。故本函数把「工具结果内嵌的图片」先收集、**全部 functionResponse
+ * 之后**才追加一条独立 user 消息（带说明文字 + inlineData）。
+ * 同时 `responseJson` 只装文本 —— 把含图的数组整体 stringify 会把巨大 base64
+ * 塞进 JSON 串（图片既没真正给模型，还撑爆请求体）。
  */
 export function serializeMessages(messages) {
   const contents = []
@@ -548,6 +555,28 @@ export function serializeMessages(messages) {
       }
     }
   }
+  /** 工具结果内嵌图片（data URL → inlineData），配对批完成后统一追加。 */
+  const pendingImages = []
+  const collectToolImages = (content) => {
+    if (!Array.isArray(content)) return
+    for (const part of content) {
+      if (part?.type === 'image_url') {
+        const inline = dataUrlOf(part?.image_url?.url)
+        if (inline !== undefined) pendingImages.push(inline)
+      }
+    }
+  }
+  const flushPendingImages = () => {
+    if (pendingImages.length === 0) return
+    contents.push({
+      role: 'user',
+      parts: [
+        { text: 'Attached image(s) from tool result:' },
+        ...pendingImages.map((inline) => ({ inlineData: inline })),
+      ],
+    })
+    pendingImages.length = 0
+  }
   for (const message of messages) {
     const role = message?.role
     if (role === 'system' || role === 'developer') {
@@ -557,19 +586,29 @@ export function serializeMessages(messages) {
     }
     if (role === 'tool') {
       const id = typeof message.tool_call_id === 'string' ? message.tool_call_id : ''
+      collectToolImages(message.content)
+      // ⚠️ responseJson 只装文本：含图数组整体 stringify 会把巨大 base64 塞进 JSON
+      const text = typeof message.content === 'string'
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content.filter((p) => typeof p?.text === 'string').map((p) => p.text).join('')
+          : JSON.stringify(message.content ?? {})
       contents.push({
         role: 'user',
         parts: [{
           functionResponse: {
             id,
             name: toolNames.get(id) ?? '',
-            responseJson: typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? {}),
+            responseJson: text,
           },
         }],
       })
       continue
     }
     if (role === 'assistant') {
+      // ⚠️ 跨 assistant 边界前必须先把上一批工具图片落盘（配对纪律）：
+      // 进入下一条 model 消息之前，functionResponse 批必须已闭合。
+      flushPendingImages()
       const parts = []
       const text = textOf(message.content)
       if (text !== '') parts.push({ text })
@@ -611,6 +650,8 @@ export function serializeMessages(messages) {
     const text = textOf(message.content)
     if (text !== '') contents.push({ role: 'user', parts: [{ text }] })
   }
+  // ⚠️ 收尾：末尾一批工具结果的内嵌图片也要落盘（否则永远不发）
+  flushPendingImages()
   return { contents, systemInstruction: system.join('\n\n') }
 }
 

@@ -162,6 +162,48 @@ test('消息序列化：system 抽出、tool 结果按 name 配对回填 functio
   })
 })
 
+test('跨消息配对纪律（上游 61bfe25）：≥2 个 tool_call 且「非最后一个」结果带图时，图片必须排在全部 functionResponse 之后', () => {
+  // ⚠️ 这正是上游初版抓不到的形态：单 tool_call 夹具下无条件 flush 恰好安全。
+  // 缺陷形态：图片 user 消息插进两条 functionResponse 之间 ⇒ 配对断裂（4027 级）。
+  const { contents } = serializeMessages([
+    { role: 'user', content: '读两张图' },
+    { role: 'assistant', content: null, tool_calls: [
+      { id: 'c1', type: 'function', function: { name: 'shot1', arguments: '{}' } },
+      { id: 'c2', type: 'function', function: { name: 'shot2', arguments: '{}' } },
+    ] },
+    // 非最后一个结果内嵌图片
+    { role: 'tool', tool_call_id: 'c1', content: [
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJD' } },
+      { type: 'text', text: '截图1' },
+    ] },
+    { role: 'tool', tool_call_id: 'c2', content: '截图2 的文本' },
+  ])
+  const roles = contents.map((c) => c.role + ':' + (c.parts?.[0]?.functionResponse?.name ?? c.parts?.[0]?.functionCall?.name ?? c.parts?.[0]?.text ?? c.parts?.[0]?.inlineData?.mimeType ?? '?'))
+  // 形态必须是：model[双 call] → user[fr c1] → user[fr c2] → user[图片+说明]
+  assert.deepEqual(roles, [
+    'user:读两张图',
+    'model:shot1',
+    'user:shot1',
+    'user:shot2',
+    'user:Attached image(s) from tool result:',
+  ], `functionResponse 必须紧密相邻（got ${JSON.stringify(roles)}）`)
+  // 图片在最后一条 user 里（inline_data），且 responseJson 不含 base64
+  const imgMsg = contents.at(-1)
+  assert.equal(imgMsg.parts[1].inlineData.mimeType, 'image/png')
+  assert.equal(imgMsg.parts[1].inlineData.data, 'QUJD')
+  const fr = contents.find((c) => c.parts?.[0]?.functionResponse?.name === 'shot1')
+  assert.ok(!fr.parts[0].functionResponse.responseJson.includes('QUJD'),
+    'responseJson 只装文本 —— 含图数组整体 stringify 会把巨大 base64 塞进 JSON')
+  // 全局不变量：任何 functionResponse 之后紧跟的都只能是 functionResponse 或图片说明
+  for (let i = 0; i < contents.length; i++) {
+    if (contents[i].parts?.[0]?.functionResponse && contents[i + 1]) {
+      const next = contents[i + 1].parts?.[0]
+      assert.ok(next?.functionResponse || next?.text === 'Attached image(s) from tool result:',
+        `contents[${i + 1}] 插进了 functionResponse 配对之间（4027 级断裂）`)
+    }
+  }
+})
+
 // ── SSE ─────────────────────────────────────────────────────────────────
 
 const sse = (frames) => new Response(
