@@ -119,6 +119,26 @@ MiniMax **国际版**是例外：ofm 渠道包只有国内站（`account.minimax
 
 ## 已知边界
 
+### 聚合形态的两个取舍（有意为之，但要知道）
+
+一个 provider id 意味着 magpie 把四个渠道当成**一个**供应商，由此有两点与
+「每渠道一个独立包」的形态不同（[#1](https://github.com/Gyl1219/magpie-providers-hub/issues/1)
+里由 [@MYCF711](https://github.com/MYCF711) 指出，属实）：
+
+- **故障转移不跨渠道**：magpie 的 failover（换账号/换模型）按 provider 粒度运作 ——
+  OfficeAce 被限流时不会自动切到 AStudio，而是原样返回该渠道的错误。
+- **设置按 provider 粒度**：关掉一个渠道 = 关掉整个 `providers-hub`；
+  fallback / preset 也无法只针对单渠道。
+
+对应的补偿：渠道级的配额冷却/轮换在**聚合层内部**按渠道区分（`gatedRenew` 去重闸、
+单渠道失败不拖垮其它渠道的目录与转发）；需要跨渠道转移会话时，在模型选择器里
+换 `providers-hub/<另一个渠道>/…` 即可。
+
+如果你更需要「单渠道独立开关 + 原生 failover」，社区有独立包可选
+（如 [@MYCF711/magpie-officeace](https://github.com/MYCF711/magpie-officeace)，
+它在本插件 officeace 实现的基础上补了 V11 签名订阅 API 与 bonus 签到）。
+两条路线 provider id 不同，可以共存。
+
 - **officeace 需先开通 ModelArts MaaS**：未开通时 `permission-validate` 不返回
   `model_app_key`，插件会明确提示去华为云控制台开通。
 - **`refresh_token` 一次性**（华为云 STS5.1806）：续期一旦失败即永久失效，必须重新登录。
