@@ -219,6 +219,57 @@ async function discoverModels(fallback) {
 
 // ── 插件 ─────────────────────────────────────────────────────────────────
 
+/**
+ * 桶过多时按「指针方案」三档汇总（方案 A）。
+ *
+ * - 只动**可求和**的桶（amount 为数字）；状态条/失败条原样透传。
+ * - 可求和的桶 ≤ 3 时**原样返回**（小组数渠道保留原始命名，信息更足）。
+ * - 临期 = 最早到期的**那一批**（amount 只算它自己 —— 指针桶数字必须如实）；
+ *   长期 = 其余有到期批次合计（resetsAt = 其中最早 —— 烧桶一死自动转正）；
+ *   永久 = 无到期批次合计。
+ */
+export function tierSummarize(rows) {
+  const summable = rows.filter((r) => typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0)
+  if (summable.length <= 3) return rows
+  const rest = rows.filter((r) => !(typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0))
+  const permanent = summable.filter((r) => r.resetsAt === undefined)
+  const expiring = summable
+    .filter((r) => r.resetsAt !== undefined)
+    .sort((a, b) => Date.parse(a.resetsAt) - Date.parse(b.resetsAt))
+  const out = []
+  if (expiring.length > 0) {
+    const pointer = expiring[0]
+    out.push({
+      name: `临期 · 剩 ${pointer.amount}`,
+      used: 0,
+      amount: pointer.amount,
+      display: `剩 ${pointer.amount}`,
+      resetsAt: pointer.resetsAt,
+    })
+  }
+  const longTerm = expiring.slice(1)
+  if (longTerm.length > 0) {
+    const amount = longTerm.reduce((s, r) => s + r.amount, 0)
+    out.push({
+      name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
+      used: 0,
+      amount,
+      display: `剩 ${amount} · ${longTerm.length} 批`,
+      resetsAt: longTerm[0].resetsAt,
+    })
+  }
+  if (permanent.length > 0) {
+    const amount = permanent.reduce((s, r) => s + r.amount, 0)
+    out.push({
+      name: permanent.length === 1 && typeof permanent[0].name === 'string' ? permanent[0].name : `永久 · 剩 ${amount}`,
+      used: 0,
+      amount,
+      display: `剩 ${amount}`,
+    })
+  }
+  return [...out, ...rest]
+}
+
 export const DshProvidersHubPlugin = async (input, options = {}) => {
   const openBrowser = typeof options.openBrowser === 'function' ? options.openBrowser : undefined
   /**
@@ -445,6 +496,15 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
    *
    * ⚠️ **所有桶的 name 统一加渠道前缀**：一张卡平铺全部渠道的桶，
    *   没前缀时「每日签到 ×7」与别的渠道的桶混在一起无法归属（用户真机报障）。
+   * ⚠️ **桶过多时按「指针方案」汇总成三档**（用户定的方案 A，不用上游
+   *   15 天窗口口径）：
+   *   - 临期 = **当前最早到期的那一批**（指针桶，resetsAt 即真实倒计时，
+   *     200 天的桶轮到它也标真实天数 —— 自解释，无假警报）；
+   *   - 长期 = 其余有到期批次的合计，resetsAt 指向其中最早 —— 指针桶一死
+   *     它自动转正（12 天桶在 3 天桶烧完前显示长期，转正时还剩 9 天，
+   *     来得及看到）；
+   *   - 永久 = 无到期批次合计。
+   *   AutoClaw 的流水批次一次能出 8+ 条，逐条平铺把卡片刷满（用户报障）。
    */
   async function usageWindowsOf(channel, credential) {
     // 已带本渠道前缀的不叠双前缀（防御旧形态旁路/测试夹具）
@@ -453,8 +513,9 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       : `${channel.displayName} · ${name}`
     if (typeof channel.usage === 'function') {
       try {
-        const rows = await channel.usage(credential, { xff: minimaxXff, proxy: minimaxProxy })
+        let rows = await channel.usage(credential, { xff: minimaxXff, proxy: minimaxProxy })
         if (Array.isArray(rows) && rows.length > 0) {
+          rows = tierSummarize(rows)
           return rows.map((row) => ({ ...row, name: withPrefix(typeof row?.name === 'string' ? row.name : '') }))
         }
       } catch (error) {
