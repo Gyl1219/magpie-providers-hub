@@ -948,7 +948,8 @@ export const astudioChannel = {
         ? bucket.expireRaw.replace(/^(\d{4})-(\d{2})-(\d{2}).*/, '$2-$3')
         : undefined
       windows.push({
-        name: `AStudio · ${bucket.label} · ${bucket.band}`,
+        // 渠道前缀由聚合层统一加（usageWindowsOf）—— 这里只写桶本身的语义
+        name: `${bucket.label} · ${bucket.band}`,
         used: usedPercent,
         ...(resetsAt !== undefined ? { resetsAt } : {}),
         // 剩 0 的桶收进折叠区（aside）：主环位留给有值的桶
@@ -958,7 +959,7 @@ export const astudioChannel = {
     }
     if (windows.length === 0) {
       // 上游只给合计、一个池都没下发：补一条让总额可见（与 DSH 同取舍）
-      windows.push({ name: 'AStudio · 可用积分', used: 0, display: `剩余 ${total}` })
+      windows.push({ name: '可用积分', used: 0, display: `剩余 ${total}` })
     }
     return windows
   },

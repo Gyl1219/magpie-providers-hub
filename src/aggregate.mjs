@@ -440,12 +440,23 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
     },
   }
 
-  /** 单渠道的用量窗口（有 usage() 出分桶，没有出登录状态条；失败带原因）。 */
+  /**
+   * 单渠道的用量窗口（有 usage() 出分桶，没有出登录状态条；失败带原因）。
+   *
+   * ⚠️ **所有桶的 name 统一加渠道前缀**：一张卡平铺全部渠道的桶，
+   *   没前缀时「每日签到 ×7」与别的渠道的桶混在一起无法归属（用户真机报障）。
+   */
   async function usageWindowsOf(channel, credential) {
+    // 已带本渠道前缀的不叠双前缀（防御旧形态旁路/测试夹具）
+    const withPrefix = (name) => name.startsWith(`${channel.displayName} · `)
+      ? name
+      : `${channel.displayName} · ${name}`
     if (typeof channel.usage === 'function') {
       try {
         const rows = await channel.usage(credential, { xff: minimaxXff, proxy: minimaxProxy })
-        if (Array.isArray(rows) && rows.length > 0) return rows
+        if (Array.isArray(rows) && rows.length > 0) {
+          return rows.map((row) => ({ ...row, name: withPrefix(typeof row?.name === 'string' ? row.name : '') }))
+        }
       } catch (error) {
         return [{
           name: channel.displayName,
