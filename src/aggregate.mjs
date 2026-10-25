@@ -275,7 +275,8 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         type: 'oauth',
         label: `登录 ${channel.displayName}`,
         async authorize() {
-          const started = await channel.beginLogin(openBrowser)
+          // xff 只对 minimaxintl 有意义，其余渠道忽略该参数
+          const started = await channel.beginLogin(openBrowser, { xff: minimaxXff })
           return {
             url: started.url,
             method: 'auto',
@@ -284,13 +285,17 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
             async callback() {
               const credential = await started.result
               const expires = expiresMsOf(credential)
-              // 双写：账号槽（主，magpie 按 auth.channel 归属这个账号）+ 旁路（兜底）
+              // 双写：账号槽（主，magpie 按 auth.channel 归属这个账号）+ 旁路（兜底）。
+              // accountId 优先用渠道带回的账号名（minimaxintl 登录时查真名）——
+              // 多账号时卡片显示真名而不是同一个渠道名。
               const auth = {
                 type: 'success',
                 channel: channel.id,
                 ...credential,
                 ...(expires !== undefined ? { expires } : {}),
-                accountId: channel.displayName,
+                accountId: typeof credential?.nickname === 'string' && credential.nickname !== ''
+                  ? credential.nickname
+                  : channel.displayName,
               }
               writeSidecar(channel, { type: 'oauth', channel: channel.id, ...credential })
               await saveAuth(auth)

@@ -223,6 +223,68 @@ export function expired(credential) {
   return at - Date.now() < EXPIRY_LEAD_MS
 }
 
+// ── 账号身份（移植 minimax-identity.ts，上游 Gitee IKP8UA 修法）───────────
+
+const USERINFO_PATH = '/v1/api/user/info'
+/**
+ * ⚠️ 两个 query 参数**一个都不能少**（上游 12 组消融实测）：
+ * - 缺 `device_platform=web` → 400 code=2；
+ * - 缺 `biz_id=3` → 国际站仍 200 code=0 但 **name 为空**（数据是错的）。
+ *   只需 Bearer —— 不需要官方客户端的 yy/x-signature 签名头。
+ */
+const USERINFO_QUERY = '?device_platform=web&biz_id=3'
+
+/**
+ * 解析身份响应（两站实测矩阵的判据，缺一不可）：
+ * ① `statusInfo`/`base_resp` 非零 code → 失败（国内站缺 biz_id 的形态）；
+ * ② 身份块先 `data.userInfo` 再顶层 `userInfo`（两站/两种信封都见过）；
+ * ③ **name 非空**是核心判据 —— 国际站缺 biz_id 时 code=0 但 name 空，
+ *    只有这一条能拦住（显示空白比显示内部 id 更糟）。
+ */
+export function parseUserIdentity(payload) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const root = payload
+  const status = [root.statusInfo, root.base_resp, root.baseResp].find(
+    (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+  )
+  if (status !== undefined) {
+    const code = status.code ?? status.status_code
+    if (typeof code === 'number' && code !== 0) return undefined
+    if (typeof code === 'string' && code.trim() !== '' && code.trim() !== '0') return undefined
+  }
+  const data = typeof root.data === 'object' && root.data !== null && !Array.isArray(root.data) ? root.data : undefined
+  const userInfo = [data?.userInfo, root.userInfo].find(
+    (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+  )
+  if (userInfo === undefined) return undefined
+  const name = nonEmpty(userInfo.name)
+  if (name === undefined) return undefined
+  const userId = nonEmpty(userInfo.userID)
+  return userId === undefined ? { name } : { name, userId }
+}
+
+/**
+ * 读一次账号身份。**任何失败都返回 undefined（不抛）** —— 昵称是展示信息，
+ * 拿不到就退回渠道显示名（阻塞登录才是更糟的行为）。
+ *
+ * ⚠️ 必须走 minimaxFetch（保凭据跟随 307 + 传输重试）+ apiHeaders（附 XFF）：
+ * 大陆直连出口恒 307 到中国站 → 401（与凭据失效同形）；XFF/代理出海才能读到。
+ */
+export async function fetchUserIdentity(credential, { xff } = {}) {
+  const url = `${API_HOST}${USERINFO_PATH}${USERINFO_QUERY}`
+  try {
+    const response = await minimaxFetch(url, () => ({
+      method: 'GET',
+      headers: Object.fromEntries(apiHeaders(credential, xff).entries()),
+      signal: AbortSignal.timeout(8_000),
+    }))
+    if (!response.ok) return undefined
+    return parseUserIdentity(JSON.parse(await response.text()))
+  } catch {
+    return undefined
+  }
+}
+
 // ── 目录（移植 normalizeMinimaxModel 的口径）─────────────────────────────
 
 /**
@@ -732,13 +794,21 @@ export const minimaxintlChannel = {
   /**
    * 设备码登录：**立刻**返回 url（verification_uri_complete，用户点开即带上
    * 预填的 user_code），登录在 `result` 上推进 —— 对齐 beginLogin 契约。
+   *
+   * 登录成功后顺带查一次**账号真名**（`/v1/api/user/info`，上游 IKP8UA 修法）：
+   * 拿到就作为 `result` 凭据的 `nickname` —— 多账号时账号卡显示真名而不是
+   * 内部 id。查不到不阻塞（token 不是 JWT、登录响应不含身份，真名只有这个
+   * 端点给；大陆出口 307 时它静默失败，属预期）。
    */
-  async beginLogin(openBrowser) {
+  async beginLogin(openBrowser, { xff } = {}) {
     const started = await startDeviceFlow()
     if (openBrowser) openBrowser(started.url)
     return {
       url: started.url,
-      result: started.result,
+      result: started.result.then(async (credential) => {
+        const identity = await fetchUserIdentity(credential, { xff })
+        return identity !== undefined ? { ...credential, nickname: identity.name } : credential
+      }),
       instructions: `在打开的页面里登录 MiniMax 并确认代码 ${started.userCode}，完成后本窗口自动继续。`,
     }
   },

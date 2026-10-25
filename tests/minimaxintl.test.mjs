@@ -24,6 +24,8 @@ import {
   parseModelsPayload,
   normalizeModel,
   minimaxintlChannel,
+  parseUserIdentity,
+  fetchUserIdentity,
 } from '../src/minimaxintl.mjs'
 
 /** 按 URL/状态路由的 stub fetch，记录每次调用的头。 */
@@ -400,4 +402,74 @@ test('临期判据：提前 10 分钟；秒/毫秒兼容；无过期信息保守
   assert.equal(expired({ expires_at: String(Math.floor((Date.now() + 5 * 60_000) / 1000)) }), true)
   assert.equal(expired({}), false)
   assert.equal(expired(undefined), false)
+})
+
+// ── 账号真名（上游 IKP8UA：token 非 JWT、登录响应无身份，唯一来源是 user/info）──
+
+test('身份解析：两站判据缺一不可（statusInfo 非零码拦国内站、name 非空拦国际站）', () => {
+  // 正常形态：data.userInfo.name 非空
+  assert.deepEqual(parseUserIdentity({ statusInfo: { code: 0 }, data: { userInfo: { name: '8fsmz', userID: 'u1' } } }), { name: '8fsmz', userId: 'u1' })
+  // 顶层 userInfo 形态（两站/两种信封都见过）
+  assert.deepEqual(parseUserIdentity({ userInfo: { name: 'MiniMax909127' } }), { name: 'MiniMax909127' })
+  // ① 国内站缺 biz_id 的形态：code=1200019 → 失败（statusInfo 非零码拦住）
+  assert.equal(parseUserIdentity({ statusInfo: { code: 1200019 } }), undefined)
+  // ② 国际站缺 biz_id 的形态：code=0 但 name 空 → 失败（只有 name 非空拦得住）
+  assert.equal(parseUserIdentity({ statusInfo: { code: 0 }, data: { userInfo: { name: '', userID: 'x', realUserID: '0' } } }), undefined,
+    'code=0 但 name 空 = 数据是错的；显示空白比显示内部 id 更糟')
+  // 字符串 code（"0" 成功 / 非零失败）
+  assert.deepEqual(parseUserIdentity({ base_resp: { status_code: '0' }, data: { userInfo: { name: 'n' } } }), { name: 'n' })
+  assert.equal(parseUserIdentity({ base_resp: { status_code: '401' }, data: { userInfo: { name: 'n' } } }), undefined)
+  assert.equal(parseUserIdentity(null), undefined)
+})
+
+test('身份查询：走 minimaxFetch（307 保凭据）+ 两个 query 参数一个不能少；失败不抛', async () => {
+  const stub = stubFetch([
+    { match: 'agent.minimax.io', respond: () => redirect('https://agent.minimaxi.com/v1/api/user/info?device_platform=web&biz_id=3') },
+    { match: 'agent.minimaxi.com', respond: ({ url }) => {
+      // 参数消融断言：缺 device_platform → 400 code=2；缺 biz_id → 数据错
+      assert.ok(url.includes('device_platform=web'), '缺 device_platform=web → 400 code=2')
+      assert.ok(url.includes('biz_id=3'), '缺 biz_id=3 → 国际站回 code=0 但 name 空（坏数据）')
+      return new Response(JSON.stringify({ statusInfo: { code: 0 }, data: { userInfo: { name: '8fsmz' } } }), { status: 200 })
+    } },
+  ])
+  try {
+    const identity = await fetchUserIdentity({ access_token: 'mmoat_t' })
+    assert.deepEqual(identity, { name: '8fsmz' }, '307 后第二跳带凭据拿到真名')
+  } finally {
+    stub.restore()
+  }
+  // 失败（非 JSON / 网络）→ undefined，绝不抛（昵称是展示信息，不阻塞登录）
+  {
+    const stub2 = stubFetch([{ match: 'x', respond: () => new Response('<html>gateway</html>', { status: 200 }) }])
+    try {
+      assert.equal(await fetchUserIdentity({ access_token: 't' }), undefined)
+    } finally {
+      stub2.restore()
+    }
+  }
+})
+
+test('beginLogin：登录成功后凭据带 nickname（真名进账号槽 accountId）', async () => {
+  // beginLogin 的 result 在真名查询后被包装：查到 → credential.nickname
+  const stub = stubFetch([
+    { match: 'oauth2/device/code', respond: () => new Response(JSON.stringify({
+      device_code: 'dc', user_code: 'UC-CODE', verification_uri: 'https://v.example',
+      verification_uri_complete: 'https://v.example?uc=UC-CODE', expires_in: 600, interval: 5,
+    }), { status: 200 }) },
+    { match: 'oauth2/token', respond: () => new Response(JSON.stringify({
+      access_token: 'mmoat_new', refresh_token: 'mmort_new', token_type: 'Bearer',
+      expires_in: 3600, scope: 'agent.default',
+    }), { status: 200 }) },
+    { match: 'v1/api/user/info', respond: () => new Response(JSON.stringify({
+      statusInfo: { code: 0 }, data: { userInfo: { name: '真名用户' } },
+    }), { status: 200 }) },
+  ])
+  try {
+    const started = await minimaxintlChannel.beginLogin(undefined, {})
+    const credential = await started.result
+    assert.equal(credential.access_token, 'mmoat_new')
+    assert.equal(credential.nickname, '真名用户', '真名挂在凭据上（聚合层用它做 accountId）')
+  } finally {
+    stub.restore()
+  }
 })
