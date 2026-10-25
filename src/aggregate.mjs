@@ -22,7 +22,7 @@
 // 续期结果（拿到别人的凭据）。按 `channel + refresh_token`（或 access）键控：
 // 同一凭据并发共享一个在途请求，不同凭据各走各的。
 
-import { loadCredential, saveCredential, notSignedIn } from './shared.mjs'
+import { loadCredential, saveCredential, notSignedIn, untilText } from './shared.mjs'
 import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
@@ -245,10 +245,13 @@ export function tierSummarize(rows) {
   const out = []
   if (expiring.length > 0) {
     const pointer = expiring[0]
+    const expiry = expiryOf(pointer)
     out.push({
       ...pointer,
       name: `临期 · 剩 ${pointer.amount}`,
-      runsOutAt: expiryOf(pointer),
+      // ⚠️ 倒计时拼进**亮色主文本**：「将于 X 过期」辅助行是浅灰看不清（用户报障）
+      display: `剩 ${pointer.amount}${untilText(expiry) !== undefined ? ` · ${untilText(expiry)}` : ''}`,
+      runsOutAt: expiry,
       runsOut: pointer.amount,
     })
     delete out[out.length - 1].resetsAt
@@ -257,12 +260,13 @@ export function tierSummarize(rows) {
   if (longTerm.length > 0) {
     const earliest = longTerm[0]
     const amount = longTerm.reduce((s, r) => s + r.amount, 0)
+    const expiry = expiryOf(earliest)
     out.push({
       ...earliest,
       name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
       amount,
-      display: `剩 ${amount} · ${longTerm.length} 批`,
-      runsOutAt: expiryOf(earliest),
+      display: `剩 ${amount} · ${longTerm.length} 批${untilText(expiry) !== undefined ? ` · 最早 ${untilText(expiry)}` : ''}`,
+      runsOutAt: expiry,
       // ⚠️ runsOut 必须是**那一批**的量（最早时刻真正作废的）——
       //    写成合计会把「6 批不同时刻作废」说成「一次全没」
       runsOut: earliest.amount,

@@ -26,7 +26,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createServer } from 'node:http'
-import { loadCredential, saveCredential } from './shared.mjs'
+import { loadCredential, saveCredential, untilText } from './shared.mjs'
 
 const REQUEST_TIMEOUT_MS = 60_000
 const CREDITS_TIMEOUT_MS = 15_000
@@ -661,14 +661,17 @@ async function usage(product, credential) {
     : wallets.map((w) => ({ name: w.name ?? WALLET_TYPE_LABELS[w.type] ?? `${w.type}积分`, remaining: w.balance, expiresAtMs: undefined }))
   for (const b of source) {
     if (b.remaining <= 0) continue
+    const iso = b.expiresAtMs !== undefined ? new Date(b.expiresAtMs).toISOString() : undefined
+    const until = iso !== undefined ? untilText(iso) : undefined
     windows.push({
       name: b.name,
       used: 0,
       amount: b.remaining,
-      display: `${Math.round(b.remaining * 100) / 100}`,
+      // ⚠️ 倒计时拼进亮色主文本（「将于 X 过期」辅助行浅灰看不清 —— 用户报障）
+      display: `${Math.round(b.remaining * 100) / 100}${until !== undefined ? ` · ${until}` : ''}`,
       // ⚠️ 批次是**作废**语义（过期即没了，不会回满）—— 挂 runsOutAt/runsOut
       //（magpie 渲染「N 积分 将于 X 过期」紧急条），不挂 resetsAt（「重置于」误导）
-      ...(b.expiresAtMs !== undefined ? { runsOutAt: new Date(b.expiresAtMs).toISOString(), runsOut: b.remaining } : {}),
+      ...(iso !== undefined ? { runsOutAt: iso, runsOut: b.remaining } : {}),
     })
   }
   if (windows.length === 0 && total > 0) {

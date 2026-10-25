@@ -58,6 +58,24 @@ export function notSignedIn(message) {
   return Object.assign(new Error(message), { signIn: 'expired' })
 }
 
+/** 「N 分钟 / N 小时 / N 天」的人类可读倒计时；非法/过去时刻给 undefined。 */
+export function humanUntil(iso, nowMs = Date.now()) {
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return undefined
+  const mins = Math.round((t - nowMs) / 60000)
+  if (mins < 0) return undefined
+  if (mins < 60) return `${mins} 分钟`
+  const hours = Math.round(mins / 60)
+  if (hours < 48) return `${hours} 小时`
+  return `${Math.round(hours / 24)} 天`
+}
+
+/** 「X 后作废」拼进亮色主文本用（'过期'辅助行太浅看不清 —— 用户报障）。 */
+export function untilText(iso, nowMs = Date.now()) {
+  const t = humanUntil(iso, nowMs)
+  return t === undefined ? undefined : `${t}后作废`
+}
+
 // ── 到期分档（滚动指针，用户 2026-10-25 定案）────────────────────────────
 //
 // 「临期」永远指向**最早到期的未耗尽桶**（FEFO 头 = 服务端正在扣的那桶），
