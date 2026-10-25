@@ -28,6 +28,7 @@ import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
 import { accioChannel } from './accio.mjs'
 import { autoclawChannel, autoclawIntlChannel } from './autoclaw.mjs'
+import { loomyChannel } from './loomy.mjs'
 import { sanitizeXff } from './minimax-transport.mjs'
 
 const PROVIDER = 'providers-hub'
@@ -46,7 +47,8 @@ const REFRESH_LEAD_MS = 10 * 60 * 1000
 const PLACEHOLDER_BASE = 'https://providers-hub.invalid'
 
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
-const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel]
+/** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
+const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel]
 
 // 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
 export { CHANNELS as REGISTERED_CHANNELS }
@@ -327,6 +329,8 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       return undefined
     }
   }
+  /** 当日签到记账（checkin 的全渠道合并 —— 见 auth.checkin 注释）。 */
+  const checkinTally = { day: '', map: new Map() }
 
   /** 请求体里的 model 是 `<channel>/<model>`（可能带供应商前缀）；拆出渠道。 */
   const resolve = (modelId) => {
@@ -362,7 +366,7 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         label: `登录 ${channel.displayName}`,
         async authorize() {
           // xff 只对 minimaxintl 有意义，其余渠道忽略该参数
-          const started = await channel.beginLogin(openBrowser, { xff: minimaxXff, proxy: minimaxProxy, proxy: minimaxProxy })
+          const started = await channel.beginLogin(openBrowser, { xff: minimaxXff, proxy: minimaxProxy })
           return {
             url: started.url,
             method: 'auto',
@@ -492,18 +496,65 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
        * 每日签到：**按账号**（magpie 对每个账号每天调一次 —— 社区插件同款）。
        * 该渠道无签到端点 → inactive；读不到账号 → 旁路口径全渠道扫（兼容）。
        * 返回词汇表：claimed / done / inactive / ineligible / failed（+credit/streak）。
+       *
+       * ⚠️⚠️ **当日全渠道记账**（用户真机缺口）：magpie 的每日签到**按账号槽**
+       * 调用 —— 旁路-only 渠道（如一键导入的 AutoClaw，没走过 magpie 登录）
+       * 永远轮不到 ⇒ 它们的签到从没人替它执行（卡片只 +100）。修法：每次
+       * checkin 调用 = 本账号渠道照签 + 顺带扫掉当日还没签的旁路渠道，
+       * 返回**当日合计**（credit 求和）—— 服务端幂等（已签 → done/0），
+       * 与其它账号槽的并发调用也不双计；magpie 无论取最后一次还是求和都对。
+       * 失败的渠道不缓存（下次调用重试）；claimed/done 当日缓存不重打。
        */
       async checkin(getAuth) {
         const auth = await safeGetAuth(getAuth)
         const channel = CHANNELS.find((c) => authOfChannel(auth, c))
-        if (channel !== undefined) {
-          if (typeof channel.checkin !== 'function') {
-            return { outcome: 'inactive', message: `${channel.displayName} 无每日签到` }
-          }
-          const credential = await ensureAuth(channel, auth)
-          return { channel: channel.displayName, ...await channel.checkin(credential, { xff: minimaxXff, proxy: minimaxProxy }) }
+        const day = new Date().toDateString()
+        if (checkinTally.day !== day) {
+          checkinTally.day = day
+          checkinTally.map.clear()
         }
-        return legacyCheckinAll()
+        const tally = checkinTally.map
+
+        if (channel !== undefined && typeof channel.checkin === 'function') {
+          const cached = tally.get(channel.id)
+          if (cached === undefined || cached.outcome === 'failed') {
+            try {
+              const credential = await ensureAuth(channel, auth)
+              const outcome = await channel.checkin(credential, { xff: minimaxXff, proxy: minimaxProxy })
+              tally.set(channel.id, { channel: channel.displayName, outcome: outcome.outcome, credit: Number.isFinite(outcome.credit) ? outcome.credit : undefined, message: outcome.message })
+            } catch (error) {
+              tally.set(channel.id, { channel: channel.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
+            }
+          }
+        }
+        // 其余有旁路的渠道：账号槽没覆盖到的在这里补签（含本账号渠道无签到端点的情况）
+        for (const c of CHANNELS) {
+          if (typeof c.checkin !== 'function') continue
+          if (tally.has(c.id)) continue
+          if (!signedIn(c)) continue
+          try {
+            const outcome = await c.checkin(sidecarCredentialOf(c), { xff: minimaxXff, proxy: minimaxProxy })
+            tally.set(c.id, { channel: c.displayName, outcome: outcome.outcome, credit: Number.isFinite(outcome.credit) ? outcome.credit : undefined, message: outcome.message })
+          } catch (error) {
+            tally.set(c.id, { channel: c.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
+          }
+        }
+
+        const all = [...tally.values()]
+        if (all.length === 0) {
+          const label = channel !== undefined ? `${channel.displayName} 无每日签到` : '无已登录渠道'
+          return { outcome: 'inactive', message: label }
+        }
+        const claimed = all.filter((r) => r.outcome === 'claimed')
+        const failed = all.filter((r) => r.outcome === 'failed')
+        const done = all.filter((r) => r.outcome === 'done')
+        const creditSum = claimed.reduce((s, r) => s + (r.credit ?? 0), 0)
+        return {
+          outcome: claimed.length > 0 ? 'claimed' : failed.length > 0 ? 'failed' : done.length > 0 ? 'done' : 'inactive',
+          ...(creditSum > 0 ? { credit: creditSum } : {}),
+          message: all.map((r) => `${r.channel}：${r.message ?? (r.outcome === 'claimed' ? `已领 ${r.credit ?? ''}` : r.outcome)}`).join('；'),
+          channels: all,
+        }
       },
     },
 
@@ -555,41 +606,5 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       used: 0,
       display: channel.expired?.(credential) ? '已过期，请重新登录' : '已登录',
     }]
-  }
-
-  /** 旁路口径的全渠道签到（无账号上下文时的兼容路径）。 */
-  async function legacyCheckinAll() {
-    const channels = []
-    let creditSum = 0
-    let hasCredit = false
-    let claimed = 0
-    let done = 0
-    let failed = 0
-    for (const channel of CHANNELS) {
-      if (typeof channel.checkin !== 'function') continue
-      if (!signedIn(channel)) continue
-      try {
-        const outcome = await channel.checkin(sidecarCredentialOf(channel), { xff: minimaxXff, proxy: minimaxProxy })
-        channels.push({ channel: channel.displayName, ...outcome })
-        if (outcome.outcome === 'claimed') {
-          claimed += 1
-          if (Number.isFinite(outcome.credit)) { creditSum += outcome.credit; hasCredit = true }
-        } else if (outcome.outcome === 'done') done += 1
-        else if (outcome.outcome === 'failed') failed += 1
-      } catch (error) {
-        failed += 1
-        channels.push({ channel: channel.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
-      }
-    }
-    const parts = channels.map((c) => `${c.channel}：${c.message ?? (c.outcome === 'claimed' ? `已领 ${c.credit ?? ''}` : c.outcome)}`)
-    const outcome = claimed > 0 ? 'claimed'
-      : failed > 0 ? 'failed'
-        : channels.length > 0 ? 'done' : 'inactive'
-    return {
-      outcome,
-      ...(hasCredit ? { credit: creditSum } : {}),
-      ...(parts.length > 0 ? { message: parts.join('；') } : {}),
-      channels,
-    }
   }
 }

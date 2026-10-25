@@ -267,7 +267,7 @@ test('无账号上下文 → 旁路口径全渠道扫（迁移前行为保持）
     const plugin = await build()
     const checkin = await plugin.auth.checkin()
     assert.equal(checkin.outcome, 'inactive', '独立沙箱无旁路凭据 → inactive')
-    assert.deepEqual(checkin.channels, [])
+    assert.match(checkin.message, /无已登录渠道/)
   })
 })
 

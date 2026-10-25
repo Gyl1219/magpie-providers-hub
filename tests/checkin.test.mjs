@@ -268,12 +268,13 @@ test('astudio 签到：新用户礼包一并领取（多弹窗积分求和）', 
 
 // ── 聚合层分发 ──────────────────────────────────────────────────────────
 
-test('聚合 checkin：无签到端点的渠道跳过；结果按渠道保留明细并汇总', async () => {
+test('聚合 checkin：无凭据 → inactive（旁路口径不臆造渠道明细）', async () => {
   const plugin = await DshProvidersHubPlugin({}, {})
   const cfg = {}
   await plugin.config(cfg)
   // 凭据存档在沙箱 HOME：全未登录 → inactive 且不发请求
   const outcome = await plugin.auth.checkin()
   assert.equal(outcome.outcome, 'inactive')
-  assert.deepEqual(outcome.channels, [])
+  assert.match(outcome.message, /无已登录渠道/)
+  assert.equal(outcome.credit, undefined)
 })
