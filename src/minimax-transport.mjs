@@ -193,6 +193,58 @@ function withXff(headers, xff) {
 }
 
 /**
+ * 出口 HTTP(S) 代理 —— **仅 minimaxintl** 用（对齐上游 minimax-proxy.ts 的取舍）。
+ *
+ * 与 XFF 的分工：XFF 是**声明**（请求头说"我来自海外"，上游信不信随它）；
+ * 代理是**真出口**（流量实际从代理出海，上游按 TLS 指纹分流也无效）。设了
+ * 代理后 XFF 自动降级为应急兜底。
+ *
+ * ⚠️ 刻意不做全局：中国站类渠道（agent.minimax.cn / 华为云 / 讯飞 / 阿里）
+ *    境内直连才是最优 —— 全局代理会让它们绕海外一圈（更慢、更易风控）。
+ *    本模块只被 minimaxintl 的调用链引入，其它渠道不经过这里。
+ *
+ * ⚠️ 只支持 http(s):// 代理（第一版）：Clash/V2Ray/Surge 的本地混合端口
+ *    全是 HTTP 代理，Bun 宿主原生支持 `init.proxy`。socks5 上游是自写
+ *    CONNECT 隧道（200 行 + 三个字节级坑），等真有用户需要再补。
+ *
+ * @param proxy 用户配置的代理串（如 'http://127.0.0.1:7890'）。
+ *   非法/非 http(s) 协议 ⇒ 返回 undefined（= 直连，不阻断 —— 填错的体验
+ *   是「仍被分流」，报错文案在 describeGeoRoute 里教他核对）。
+ */
+export function sanitizeProxy(raw) {
+  if (typeof raw !== 'string') return undefined
+  if (/[\r\n]/.test(raw)) return undefined
+  const value = raw.trim()
+  if (value.length === 0) return undefined
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 造「带出口代理的 fetcher」（Bun 原生 `init.proxy`；Node 测试环境没有该
+ * 支持，undici ProxyAgent 有也不引入 —— 测试里全 stub fetch，不需要真出口）。
+ *
+ * ⚠️ 不接受 `Request` 对象：minimaxFetch 的调用链全传 URL 字符串 + 普通
+ *    init（上游 IKK4BY 同款纪律：`{...Request}` 展开会静默丢 method/body）。
+ */
+export function proxyFetcher(proxy) {
+  const target = sanitizeProxy(proxy)
+  if (target === undefined) return undefined
+  const send = async (input, init) => {
+    if (input instanceof Request) {
+      throw new TypeError('proxyFetcher 不接受 Request 对象：{...init} 展开会丢失 method/body/headers')
+    }
+    return fetch(input, { ...init, proxy: target })
+  }
+  return send
+}
+
+/**
  * 推理请求头（Anthropic Messages 端点）。⚠️ 实测不需要 anthropic-version。
  *
  * @param accept 默认 `text/event-stream`（流式）；非流式请求传 `application/json`。

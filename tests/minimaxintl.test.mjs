@@ -10,6 +10,8 @@ import {
   hasHostSuffix,
   isTransportError,
   inferHeaders,
+  sanitizeProxy,
+  proxyFetcher,
 } from '../src/minimax-transport.mjs'
 import {
   buildAnthropicPayload,
@@ -472,4 +474,59 @@ test('beginLogin：登录成功后凭据带 nickname（真名进账号槽 accoun
   } finally {
     stub.restore()
   }
+})
+
+// ── 出口代理（上游 minimax-proxy 取舍：真换出口，仅 minimaxintl）──────────
+
+test('sanitizeProxy：只认 http(s)://；socks5/空/CRLF/非法串 → undefined（=直连）', () => {
+  assert.equal(sanitizeProxy('http://127.0.0.1:7890'), 'http://127.0.0.1:7890')
+  assert.equal(sanitizeProxy('  https://proxy.example.com:8443 '), 'https://proxy.example.com:8443')
+  assert.equal(sanitizeProxy('http://user:pass@127.0.0.1:7890'), 'http://user:pass@127.0.0.1:7890', '带认证的也认')
+  assert.equal(sanitizeProxy('socks5://127.0.0.1:1080'), undefined, '第一版只支持 http(s)（Bun 原生 init.proxy）')
+  assert.equal(sanitizeProxy(''), undefined)
+  assert.equal(sanitizeProxy('not a url'), undefined)
+  assert.equal(sanitizeProxy('http://127.0.0.1:7890\r\nX-Evil: 1'), undefined, 'CRRLF 头注入必须拦')
+  assert.equal(sanitizeProxy(undefined), undefined)
+})
+
+test('proxyFetcher：无代理 → undefined（直连不改行为）；有代理 → 带 proxy 键的 fetcher；拒 Request 对象', async () => {
+  assert.equal(proxyFetcher(undefined), undefined, '没配代理必须走原路径（不能改变无代理时的既有行为）')
+  assert.equal(proxyFetcher('garbage'), undefined)
+  const fetcher = proxyFetcher('http://127.0.0.1:7890')
+  assert.equal(typeof fetcher, 'function')
+  // Node 无 init.proxy 支持：验证 fetcher 把 proxy 键带进 init（真代理行为只能在 Bun 宿主验证）
+  let captured
+  const original = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    captured = { input, init }
+    return new Response('{}', { status: 200 })
+  }
+  try {
+    await fetcher('https://agent.minimax.io/x', { method: 'GET' })
+    assert.equal(captured.init.proxy, 'http://127.0.0.1:7890', '代理串必须进 init.proxy（Bun 原生键）')
+    assert.equal(captured.init.method, 'GET')
+    await assert.rejects(
+      () => fetcher(new Request('https://x.example'), {}),
+      /Request 对象/,
+      '{...Request} 展开会静默丢 method/body —— 必须显式拦截（上游 IKK4BY 纪律）',
+    )
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('minimaxFetch 接受代理 fetcher：307 跟随与凭据保持都走它', async () => {
+  const calls = []
+  const proxied = async (input, init) => {
+    calls.push(String(input))
+    if (String(input).includes('agent.minimax.io')) {
+      return new Response(null, { status: 307, headers: { location: 'https://agent.minimaxi.com/v1/x' } })
+    }
+    return new Response('{"ok":1}', { status: 200 })
+  }
+  const response = await minimaxFetch('https://agent.minimax.io/v1/x', () => ({
+    method: 'GET', headers: { Authorization: 'Bearer t' },
+  }), { fetcher: proxied })
+  assert.equal(response.status, 200)
+  assert.equal(calls.length, 2, '代理 fetcher 接管了整条重定向链（每一跳都经它）')
 })

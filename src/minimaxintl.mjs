@@ -18,7 +18,7 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import { loadCredential, saveCredential } from './shared.mjs'
-import { minimaxFetch, apiHeaders, inferHeaders, describeGeoRoute } from './minimax-transport.mjs'
+import { minimaxFetch, apiHeaders, inferHeaders, describeGeoRoute, proxyFetcher } from './minimax-transport.mjs'
 import {
   buildAnthropicPayload,
   anthropicSseToOpenAi,
@@ -270,14 +270,14 @@ export function parseUserIdentity(payload) {
  * ⚠️ 必须走 minimaxFetch（保凭据跟随 307 + 传输重试）+ apiHeaders（附 XFF）：
  * 大陆直连出口恒 307 到中国站 → 401（与凭据失效同形）；XFF/代理出海才能读到。
  */
-export async function fetchUserIdentity(credential, { xff } = {}) {
+export async function fetchUserIdentity(credential, { xff, proxy } = {}) {
   const url = `${API_HOST}${USERINFO_PATH}${USERINFO_QUERY}`
   try {
     const response = await minimaxFetch(url, () => ({
       method: 'GET',
       headers: Object.fromEntries(apiHeaders(credential, xff).entries()),
       signal: AbortSignal.timeout(8_000),
-    }))
+    }), { fetcher: proxyFetcher(proxy) })
     if (!response.ok) return undefined
     return parseUserIdentity(JSON.parse(await response.text()))
   } catch {
@@ -444,11 +444,11 @@ function sseResponse(generator) {
  * 发一次对话（OpenAI 请求体进，OpenAI 响应出）。
  *
  * @param credential minimaxintl 凭据
- * @param context `{ body, signal, renew, xff }` —— body 是**去掉渠道前缀**的
- *   OpenAI 请求体；`renew` 是聚合层注入的硬续期；`xff` 是可选的海外 IP
- *   （绕地理分流，magpie plugin options 的 `minimaxXff`）。
+ * @param context `{ body, signal, renew, xff, proxy }` —— body 是**去掉渠道前缀**的
+ *   OpenAI 请求体；`renew` 是聚合层注入的硬续期；`xff` 是可选的海外 IP；
+ *   `proxy` 是可选的出口代理（真换出口，对齐上游 minimax-proxy 取舍）。
  */
-async function chat(credential, { body, signal, renew, xff }) {
+async function chat(credential, { body, signal, renew, xff, proxy }) {
   let geoRouted = false
   const payload = buildAnthropicPayload(body)
   const send = (cred) => minimaxFetch(
@@ -461,6 +461,7 @@ async function chat(credential, { body, signal, renew, xff }) {
     }),
     {
       signal,
+      fetcher: proxyFetcher(proxy),
       // ⚠️ 必须在 307 那一跳记录：跟到中国站后的 401 与「凭据真失效」逐字同形。
       onGeoRoute: () => { geoRouted = true },
     },
@@ -594,7 +595,7 @@ function streakDaysOf(days) {
  * 打到中国站 = 401「invalid access token」，与「凭据真失效」逐字同形 ——
  * 不判就是「登录成功却签到 401」这种最具误导性的形态（真因是出口 IP）。
  */
-async function signinEnvelope(path, credential, method, xff) {
+async function signinEnvelope(path, credential, method, xff, proxy) {
   const url = new URL(`${API_HOST}${path}`)
   url.searchParams.set('timezone_id', timezoneId())
   let geoRouted = false
@@ -604,6 +605,7 @@ async function signinEnvelope(path, credential, method, xff) {
     ...(method === 'POST' ? { body: '{}' } : {}),
   }), {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    fetcher: proxyFetcher(proxy),
     onGeoRoute: () => { geoRouted = true },
   })
   const text = await response.text().catch(() => '')
@@ -644,10 +646,10 @@ async function signinEnvelope(path, credential, method, xff) {
  * ⚠️ 幂等判据是 `claim_result`（1=本次真领取，2=已领过），**不是 HTTP 状态码**
  * （重复领取同样 200）。
  */
-export async function checkin(credential, { xff } = {}) {
+export async function checkin(credential, { xff, proxy } = {}) {
   let panel
   try {
-    const statusPayload = await signinEnvelope(SIGNIN_STATUS_PATH, credential, 'GET', xff)
+    const statusPayload = await signinEnvelope(SIGNIN_STATUS_PATH, credential, 'GET', xff, proxy)
     panel = parseSigninPanel(statusPayload?.data)
   } catch (error) {
     return { outcome: 'failed', message: error.message, ...(error.signedOut ? { signIn: 'expired' } : {}) }
@@ -667,7 +669,7 @@ export async function checkin(credential, { xff } = {}) {
   if (today.status !== DAY_STATUS.Claimable) return { outcome: 'inactive', message: '今日签到还没开始' }
   let claimPayload
   try {
-    claimPayload = await signinEnvelope(SIGNIN_CLAIM_PATH, credential, 'POST', xff)
+    claimPayload = await signinEnvelope(SIGNIN_CLAIM_PATH, credential, 'POST', xff, proxy)
   } catch (error) {
     return { outcome: 'failed', message: error.message, ...(error.signedOut ? { signIn: 'expired' } : {}) }
   }
@@ -708,13 +710,14 @@ function looseAmount(value) {
  * ⚠️ 响应是**平铺**的（`total_count` 与 `base_resp` 同级），没有 `data` 信封
  * —— 与签到端点不同形，不能复用同一个解包（DSH 实测注释明确记录）。
  */
-async function usage(credential, { xff } = {}) {
+async function usage(credential, { xff, proxy } = {}) {
   let geoRouted = false
   const response = await minimaxFetch(`${API_HOST}${CREDIT_DETAILS_PATH}`, () => ({
     method: 'GET',
     headers: Object.fromEntries(apiHeaders(credential, xff).entries()),
   }), {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    fetcher: proxyFetcher(proxy),
     onGeoRoute: () => { geoRouted = true },
   })
   const text = await response.text().catch(() => '')
@@ -800,13 +803,13 @@ export const minimaxintlChannel = {
    * 内部 id。查不到不阻塞（token 不是 JWT、登录响应不含身份，真名只有这个
    * 端点给；大陆出口 307 时它静默失败，属预期）。
    */
-  async beginLogin(openBrowser, { xff } = {}) {
+  async beginLogin(openBrowser, { xff, proxy } = {}) {
     const started = await startDeviceFlow()
     if (openBrowser) openBrowser(started.url)
     return {
       url: started.url,
       result: started.result.then(async (credential) => {
-        const identity = await fetchUserIdentity(credential, { xff })
+        const identity = await fetchUserIdentity(credential, { xff, proxy })
         return identity !== undefined ? { ...credential, nickname: identity.name } : credential
       }),
       instructions: `在打开的页面里登录 MiniMax 并确认代码 ${started.userCode}，完成后本窗口自动继续。`,

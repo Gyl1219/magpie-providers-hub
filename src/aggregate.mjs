@@ -226,6 +226,16 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
    * （IP 字面量）防 CRLF 头注入，非法值静默不附头。
    */
   const minimaxXff = sanitizeXff(options.minimaxXff)
+  /**
+   * MiniMax 国际版的可选**出口代理**（'{"minimaxProxy":"http://127.0.0.1:7890"}'）。
+   *
+   * 与 XFF 的分工：XFF 是声明式（上游信不信随它）；代理是**真换出口**
+   *（流量实际出海，TLS 指纹分流也无效）—— 设了代理后 XFF 自动降为兜底。
+   * ⚠️ 只作用于 minimaxintl 的调用链（中国站类渠道境内直连最优，刻意不全局）；
+   * 只支持 http(s)://（Bun 原生 init.proxy；socks5 等真有需求再补）。
+   * 非法值静默直连（填错的体验是「仍被分流」，geo 报错文案教他核对）。
+   */
+  const minimaxProxy = typeof options.minimaxProxy === 'string' ? options.minimaxProxy : undefined
   /** magpie 的 auth 存储（社区插件同款 `client.auth.set`；不可用则只写旁路）。 */
   const authSet = typeof input?.client?.auth?.set === 'function' ? input.client.auth.set : undefined
   const saveAuth = async (auth) => {
@@ -276,7 +286,7 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         label: `登录 ${channel.displayName}`,
         async authorize() {
           // xff 只对 minimaxintl 有意义，其余渠道忽略该参数
-          const started = await channel.beginLogin(openBrowser, { xff: minimaxXff })
+          const started = await channel.beginLogin(openBrowser, { xff: minimaxXff, proxy: minimaxProxy, proxy: minimaxProxy })
           return {
             url: started.url,
             method: 'auto',
@@ -354,7 +364,7 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
               // 走凭据身份键控的去重闸（同账号并发共享，多账号不串号）。
               renew: (current) => gatedRenew(hit.channel, current),
               // MiniMax 国际版的可选绕行 IP（其余渠道忽略该字段）
-              xff: minimaxXff,
+              xff: minimaxXff, proxy: minimaxProxy,
             })
             // 续期后渠道拿到新凭据时同步双写（chat 的 renew 返回值不经手，这里
             // 由 gatedRenew 内部的 writeSidecar 完成；账号槽由 magpie refresh 兜）
@@ -406,7 +416,7 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
             return { outcome: 'inactive', message: `${channel.displayName} 无每日签到` }
           }
           const credential = await ensureAuth(channel, auth)
-          return { channel: channel.displayName, ...await channel.checkin(credential, { xff: minimaxXff }) }
+          return { channel: channel.displayName, ...await channel.checkin(credential, { xff: minimaxXff, proxy: minimaxProxy }) }
         }
         return legacyCheckinAll()
       },
@@ -453,7 +463,7 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       if (typeof channel.checkin !== 'function') continue
       if (!signedIn(channel)) continue
       try {
-        const outcome = await channel.checkin(sidecarCredentialOf(channel), { xff: minimaxXff })
+        const outcome = await channel.checkin(sidecarCredentialOf(channel), { xff: minimaxXff, proxy: minimaxProxy })
         channels.push({ channel: channel.displayName, ...outcome })
         if (outcome.outcome === 'claimed') {
           claimed += 1
