@@ -81,7 +81,11 @@ test('tierSummarize：≤3 桶原样返回；>3 桶汇总成 临期(指针)/长�
     { name: '新用户福利', used: 0, amount: 3994, resetsAt: '2026-11-12T00:00:00Z' },
     { name: '每日签到', used: 0, amount: 100, resetsAt: '2026-10-26T15:59:59Z' },
   ]
-  assert.deepEqual(tierSummarize(small), small, '≤3 桶不动')
+  // ≤3 桶保留原命名，但到期字段剥掉（浅灰行去重 —— 渠道行带 runsOutAt 只是分类输入）
+  const smallOut = tierSummarize(small)
+  assert.equal(smallOut.length, 3)
+  assert.ok(smallOut.every((w) => w.runsOutAt === undefined && w.resetsAt === undefined), '≤3 桶到期字段剥掉')
+  assert.equal(smallOut[1].amount, 3994, '其余字段原样保留')
 
   // AutoClaw 形态：8 桶（7 笔不同到期批次 + 1 永久）→ 3 桶
   const many = [

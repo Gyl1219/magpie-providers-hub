@@ -281,7 +281,7 @@ test('usage：display:false 池丢弃；批次守恒成立用批次、不成立�
     const windows = await autoclawChannel.usage({ access_token: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }) })
     const batch = windows.find((w) => w.name === '签到奖励')
     assert.ok(batch !== undefined, '守恒成立（150 = 200−50）→ 用批次（带 resetsAt）')
-    assert.equal(batch.runsOutAt, undefined, '批次不挂 runsOutAt（display 倒计时已亮色呈现）')
+    assert.ok(batch.runsOutAt !== undefined, '批次带 runsOutAt（tierSummarize 的分类输入；输出层剥掉）')
     assert.ok(!windows.some((w) => w.name === '每日积分'), 'display:false 的池必须丢弃')
   } finally {
     stub.restore()

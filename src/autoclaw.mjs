@@ -669,7 +669,9 @@ async function usage(product, credential) {
       amount: b.remaining,
       // ⚠️ 倒计时拼进亮色主文本（「将于 X 过期」辅助行浅灰看不清 —— 用户报障）
       display: `${Math.round(b.remaining * 100) / 100}${until !== undefined ? ` · ${until}` : ''}`,
-      // ⚠️ 刻意不挂 runsOutAt/runsOut：display 已带倒计时，再挂会多一行浅灰重复
+      // ⚠️ runsOutAt 必须带着：tierSummarize 靠它做三档分类（撤掉的当天就出过
+      //    「全部归永久、时间全丢」的回归）。汇总输出层会剥掉它（浅灰行去重）。
+      ...(iso !== undefined ? { runsOutAt: iso, runsOut: b.remaining } : {}),
     })
   }
   if (windows.length === 0 && total > 0) {

@@ -235,7 +235,15 @@ async function discoverModels(fallback) {
  */
 export function tierSummarize(rows) {
   const summable = rows.filter((r) => typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0)
-  if (summable.length <= 3) return rows
+  if (summable.length <= 3) {
+    // 小组数渠道保留原始命名，但**到期字段仍要剥**（浅灰行去重，用户报障）；
+    // 渠道行带 runsOutAt 只是给本函数的分类输入，不该漏到卡片上。
+    return rows.map((r) => {
+      if (!(typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0)) return r
+      const { runsOutAt, runsOut, resetsAt, ...keep } = r
+      return keep
+    })
+  }
   const rest = rows.filter((r) => !(typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0))
   const expiryOf = (r) => r.runsOutAt ?? r.resetsAt
   const permanent = summable.filter((r) => expiryOf(r) === undefined)
