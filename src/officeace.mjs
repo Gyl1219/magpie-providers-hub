@@ -12,7 +12,7 @@
 //    故失败必须留痕（console.warn），绝不静默吞掉。
 
 import { createHash, createHmac, randomBytes, webcrypto } from 'node:crypto'
-import { loadCredential, saveCredential, notSignedIn } from './shared.mjs'
+import { loadCredential, saveCredential, notSignedIn, untilText } from './shared.mjs'
 
 const PROVIDER = 'officeace'
 const CLAW_BASE = 'https://agentarts.cn-southwest-2.myhuaweicloud.com'
@@ -565,13 +565,12 @@ export async function fetchUsage(credential) {
       const isTrial = String(sku.sku_code ?? '').endsWith('.trial')
       const expiresAt = typeof q.expired_time === 'string' && q.expired_time.length > 0 ? q.expired_time : null
       const remaining = Math.max(0, total - used)
+      // ⚠️ 倒计时进亮色 display、撤 runsOutAt（浅灰行与 autoclaw 同款去重 —— 用户报障）
+      const until = expiresAt !== null ? untilText(expiresAt) : undefined
       windows.push({
         name: `${sku.sku_name ?? '套餐'} · 剩 ${remaining}`,
         used: Math.min(100, Math.max(0, Math.round((used / total) * 100))),
-        // 试用桶不带到期（试用不过期）；配额到期 = **作废**语义 → runsOutAt
-        //（magpie 渲染「N 积分 将于 X 过期」），不用 resetsAt（「重置于」误导）
-        ...(isTrial ? {} : expiresAt !== null ? { runsOutAt: new Date(expiresAt).toISOString(), runsOut: remaining } : {}),
-        display: `${remaining} / ${total}`,
+        display: `${remaining} / ${total}${until !== undefined ? ` · ${until}` : ''}`,
         // 已过期的桶收进折叠区（主环位留给活着的桶）
         ...(expiresAt !== null && !isTrial && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
       })
@@ -583,12 +582,11 @@ export async function fetchUsage(credential) {
     const used = Number(bonus.current_value)
     const remaining = Math.max(0, points - (Number.isFinite(used) ? used : 0))
     const expiresAt = typeof bonus.expired_time === 'string' ? bonus.expired_time : null
+    const until = expiresAt !== null ? untilText(expiresAt) : undefined
     windows.push({
       name: `${bonus.activity_name ?? '活动奖励'} · 剩 ${remaining}`,
       used: Math.min(100, Math.round(((points - remaining) / points) * 100)),
-      // 活动桶当日作废 —— 同样是 runsOutAt（不是重置）
-      ...(expiresAt !== null ? { runsOutAt: new Date(expiresAt).toISOString(), runsOut: remaining } : {}),
-      display: `${remaining} / ${points}`,
+      display: `${remaining} / ${points}${until !== undefined ? ` · ${until}` : ''}`,
       ...(expiresAt !== null && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
     })
   }

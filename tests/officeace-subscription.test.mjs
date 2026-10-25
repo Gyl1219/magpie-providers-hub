@@ -141,7 +141,7 @@ test('订阅分桶：套餐桶（.trial 不带到期）+ 活动桶 + 过期桶�
         ] },
       ],
       bonus_skus: [
-        { activity_id: 'daily', activity_name: '每日签到', points: 1000, current_value: 400, expired_time: '2026-10-25T23:59:59+08:00' },
+        { activity_id: 'daily', activity_name: '每日签到', points: 1000, current_value: 400, expired_time: '2027-01-01T23:59:59+08:00' },
       ],
     }),
   }])
@@ -150,15 +150,15 @@ test('订阅分桶：套餐桶（.trial 不带到期）+ 活动桶 + 过期桶�
     assert.equal(windows.length, 4)
     const pro = windows.find((w) => w.name.includes('专业版'))
     assert.equal(pro.used, 25, 'used = current/sku_value 百分比')
-    assert.equal(pro.display, '7500 / 10000')
-    assert.ok(pro.runsOutAt !== undefined, '套餐桶带 runsOutAt（作废语义，紧急条吃它）')
+    assert.match(pro.display, /^7500 \/ 10000 · \d+ 天后作废$/)
+    assert.match(pro.display, /作废/, '套餐桶 display 带相对倒计时（亮色行，浅灰行已撤）')
     const trial = windows.find((w) => w.name.includes('试用'))
     assert.equal(trial.resetsAt, undefined, '.trial 后缀不带到期（试用不过期语义，照抄 DSH 判据）')
     const expired = windows.find((w) => w.name.includes('已过期'))
     assert.equal(expired.aside, true, '已过期桶收进折叠区')
     const bonus = windows.find((w) => w.name.includes('每日签到'))
-    assert.equal(bonus.display, '600 / 1000')
-    assert.ok(bonus.runsOutAt !== undefined, '活动桶的当日作废时间进 runsOutAt')
+    assert.match(bonus.display, /^600 \/ 1000 · \d+ 天后作废$/)
+    assert.match(bonus.display, /作废/, '活动桶 display 带相对倒计时')
   } finally {
     stub.restore()
   }
