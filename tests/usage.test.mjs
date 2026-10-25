@@ -124,7 +124,7 @@ test('accio：quota 端点失败可容忍（只丢刷新时刻，不丢桶）', 
 
 // ── minimaxintl 分桶 ────────────────────────────────────────────────────
 
-test('minimaxintl：details 逐行一桶，remaining_amount 是字符串，过期桶跳过', async () => {
+test('minimaxintl：details 逐行一桶，remaining_amount 是字符串，过期桶跳过，指针分档', async () => {
   const future = Date.now() + 5 * 86400_000
   const past = Date.now() - 86400_000
   const stub = stubFetch([
@@ -144,7 +144,7 @@ test('minimaxintl：details 逐行一桶，remaining_amount 是字符串，过�
     const windows = await minimaxintlChannel.usage(MM_CRED)
     assert.equal(windows.length, 1, '过期桶不显示')
     assert.match(windows[0].name, /800 积分/, 'remaining_amount 字符串要解析（只认 number 会静默算成 0）')
-    assert.match(windows[0].name, /到期/)
+    assert.match(windows[0].name, /临期·5天/, '唯一未过期的带到期桶 = 指针位（5 天如实显示）')
     assert.equal(windows[0].resetsAt, new Date(future).toISOString())
   } finally {
     stub.restore()
@@ -170,7 +170,7 @@ test('minimaxintl：地理分流后的失败指向出口 IP 而不是凭据', as
 
 const AS_CRED = { accessToken: 'b', ssoSessionId: 's', accountId: 'a', token: 't' }
 
-test('astudio：到期串按 +08:00 解析进 resetsAt（面板才有「重置于 …」）；剩 0 的桶 aside', async () => {
+test('astudio：滚动指针分档 —— 临期指向最早到期的未耗尽桶，剩0桶已耗尽+aside', async () => {
   const stub = stubFetch([
     {
       match: '/points/balance',
@@ -181,6 +181,7 @@ test('astudio：到期串按 +08:00 解析进 resetsAt（面板才有「重置�
           memberBalance: 0, memberTotal: 100,
           buyBalance: 0, buyTotal: 50,
           activityBalance: 7000, activityTotal: 7000, activityNextExpireTime: '2026-11-01T04:45:48',
+          sparkTotalBalance: 60000, sparkTotalAmount: 60000, sparkNextExpireTime: '',
         },
       }),
     },
@@ -188,16 +189,43 @@ test('astudio：到期串按 +08:00 解析进 resetsAt（面板才有「重置�
   try {
     const windows = await astudioChannel.usage(AS_CRED)
     const member = windows.find((w) => w.name.includes('会员积分'))
-    assert.equal(member.aside, true, '剩 0 的桶收进折叠区（否则 0% 死环挤掉有值的主环）')
-    assert.equal(member.resetsAt, undefined, '无到期串不写 resetsAt')
+    assert.match(member.name, /已耗尽/, '剩 0 的桶标已耗尽（不占临期指针位）')
+    assert.equal(member.aside, true)
     const activity = windows.find((w) => w.name.includes('赠送积分'))
+    assert.match(activity.name, /临期·\d+天/, '唯一有到期且有值的桶 = 指针位')
     assert.equal(activity.used, 0)
-    assert.equal(activity.aside, undefined, '有值的桶留在主环')
-    assert.equal(activity.resetsAt, '2026-11-01T04:45:48+08:00' === '' ? '' : new Date('2026-11-01T04:45:48+08:00').toISOString())
-    assert.match(activity.name, /2026-11-01T04:45:48 到期/, '桶名保留原文（解析失败也不丢信息）')
+    assert.equal(activity.resetsAt, new Date('2026-11-01T04:45:48+08:00').toISOString())
+    assert.equal(activity.display, '剩余 7000 · 11-01 到期')
+    const spark = windows.find((w) => w.name.includes('星火积分'))
+    assert.match(spark.name, /永久/, '无到期 = 永久')
   } finally {
     stub.restore()
   }
+})
+
+test('assignExpiryBands：指针随最早桶耗尽/过期而滚动（12天桶接管显示）', async () => {
+  const { assignExpiryBands } = await import('../src/shared.mjs')
+  const now = Date.now()
+  // 3 天桶还在时：它是指针，12 天桶是长期
+  const round1 = [
+    { remaining: 100, expireMs: now + 3 * 86400_000 },
+    { remaining: 200, expireMs: now + 12 * 86400_000 },
+  ]
+  assignExpiryBands(round1, now)
+  assert.equal(round1[0].band, '临期·3天')
+  assert.equal(round1[1].band, '长期')
+  // 3 天桶耗尽：指针滚到 12 天桶（它变临期·12天，不再被瞒住）
+  const round2 = [
+    { remaining: 0, expireMs: now + 3 * 86400_000 },
+    { remaining: 200, expireMs: now + 12 * 86400_000 },
+  ]
+  assignExpiryBands(round2, now)
+  assert.equal(round2[0].band, '已耗尽')
+  assert.equal(round2[1].band, '临期·12天')
+  // 无到期桶 = 永久
+  const round3 = [{ remaining: 60000 }]
+  assignExpiryBands(round3, now)
+  assert.equal(round3[0].band, '永久')
 })
 
 // ── 聚合层分发 ──────────────────────────────────────────────────────────

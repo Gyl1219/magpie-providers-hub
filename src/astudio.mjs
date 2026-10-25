@@ -30,7 +30,7 @@
 
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { loadCredential, saveCredential } from './shared.mjs'
+import { loadCredential, saveCredential, assignExpiryBands } from './shared.mjs'
 
 const PROVIDER = 'astudio'
 const DISPLAY = 'AStudio（讯飞）'
@@ -907,39 +907,55 @@ export const astudioChannel = {
     }
     const windows = []
     /**
-     * 到期本地时间串 → ISO（按 +08:00 解析）。
+     * 到期本地时间串 → 毫秒（按 +08:00 解析）。
      *
      * ⚠️ 上游给的是**不带时区的本地时间串**（DSH 侧按纪律原样透出）。但讯飞是
-     * 国内服务，其「本地」就是 Asia/Shanghai —— 按东八区解析进 resetsAt 后，
-     * magpie 的托盘面板才能像 ZCODE 那样显示「重置于 …」。形状不认就留空
-     * （桶名里仍保留原文，信息不丢）。
+     * 国内服务，其「本地」就是 Asia/Shanghai —— 按东八区解析成确定时刻后，
+     * ①写进 resetsAt（托盘面板显示「重置于 …」，对齐 ZCODE）；②参与滚动指针
+     * 分档。形状不认就返回 undefined（该桶按永久处理，原文信息不丢）。
      */
-    const expiryIso = (text) => {
+    const expiryMs = (text) => {
       const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?$/.exec(String(text ?? ''))
       if (m === null) return undefined
-      return new Date(`${m[1]}T${m[2]}:${m[3] ?? '00'}+08:00`).toISOString()
+      return Date.parse(`${m[1]}T${m[2]}:${m[3] ?? '00'}+08:00`)
     }
+    const buckets = []
     const pushPool = (label, totalKey, balanceKey, expireKey) => {
       const remaining = int(balanceKey)
       if (remaining === undefined) return // 该池不下发 ⇒ 不臆造条目
       const poolTotal = int(totalKey) ?? remaining
-      const expire = str(expireKey)
-      const resetsAt = expiryIso(expire)
-      const usedPercent = poolTotal > 0 ? Math.max(0, Math.min(100, Math.round(((poolTotal - remaining) / poolTotal) * 100))) : (remaining > 0 ? 0 : 100)
-      windows.push({
-        name: `AStudio · ${label}${expire !== '' ? ` · ${expire} 到期` : ''}`,
-        used: usedPercent,
-        ...(resetsAt !== undefined ? { resetsAt } : {}),
-        // 剩 0 的桶收进折叠区（aside）：主环位留给有值的桶 ——
-        // 否则面板上两三个 0% 死环把「剩余 7000/60000」的好桶全挤掉
-        ...(remaining <= 0 ? { aside: true } : {}),
-        display: `剩余 ${remaining}`,
+      const expireRaw = str(expireKey)
+      buckets.push({
+        label,
+        remaining,
+        poolTotal,
+        expireRaw,
+        expireMs: expiryMs(expireRaw),
       })
     }
     pushPool('会员积分', 'memberTotal', 'memberBalance', 'memberNextExpireTime')
     pushPool('购买积分', 'buyTotal', 'buyBalance', 'buyNextExpireTime')
     pushPool('赠送积分', 'activityTotal', 'activityBalance', 'activityNextExpireTime')
     pushPool('星火积分（独立池）', 'sparkTotalAmount', 'sparkTotalBalance', 'sparkNextExpireTime')
+    // 滚动指针分档（shared.mjs 的 assignExpiryBands）：临期 = 最早到期的未耗尽桶
+    assignExpiryBands(buckets)
+    for (const bucket of buckets) {
+      const usedPercent = bucket.poolTotal > 0
+        ? Math.max(0, Math.min(100, Math.round(((bucket.poolTotal - bucket.remaining) / bucket.poolTotal) * 100)))
+        : (bucket.remaining > 0 ? 0 : 100)
+      const resetsAt = bucket.expireMs !== undefined ? new Date(bucket.expireMs).toISOString() : undefined
+      const expiryShort = bucket.expireRaw !== ''
+        ? bucket.expireRaw.replace(/^(\d{4})-(\d{2})-(\d{2}).*/, '$2-$3')
+        : undefined
+      windows.push({
+        name: `AStudio · ${bucket.label} · ${bucket.band}`,
+        used: usedPercent,
+        ...(resetsAt !== undefined ? { resetsAt } : {}),
+        // 剩 0 的桶收进折叠区（aside）：主环位留给有值的桶
+        ...(bucket.remaining <= 0 ? { aside: true } : {}),
+        display: `剩余 ${bucket.remaining}${expiryShort !== undefined ? ` · ${expiryShort} 到期` : ''}`,
+      })
+    }
     if (windows.length === 0) {
       // 上游只给合计、一个池都没下发：补一条让总额可见（与 DSH 同取舍）
       windows.push({ name: 'AStudio · 可用积分', used: 0, display: `剩余 ${total}` })

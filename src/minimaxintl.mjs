@@ -17,7 +17,7 @@
 //   `minimax-transport.mjs`，这里所有请求都必须走它。
 
 import { createHash, randomBytes } from 'node:crypto'
-import { loadCredential, saveCredential } from './shared.mjs'
+import { loadCredential, saveCredential, assignExpiryBands } from './shared.mjs'
 import { minimaxFetch, apiHeaders, inferHeaders, describeGeoRoute, proxyFetcher } from './minimax-transport.mjs'
 import {
   buildAnthropicPayload,
@@ -743,16 +743,30 @@ async function usage(credential, { xff, proxy } = {}) {
     throw error
   }
   const now = Date.now()
-  const windows = []
   const rows = Array.isArray(payload?.details) ? payload.details : []
+  /** 参与分档的桶（已过期/读不到剩余的行不进卡片，也不占指针位）。 */
+  const buckets = []
   for (const row of rows) {
     const remaining = looseAmount(row?.remaining_amount)
     const expireAt = finiteNumber(row?.expire_at_ms)
-    if (remaining === undefined) continue
+    if (remaining === undefined || remaining <= 0) continue
     if (expireAt !== undefined && expireAt <= now) continue // 已过期桶不可用，不显示
-    const expiryText = expireAt !== undefined
-      ? `${new Date(expireAt).getMonth() + 1}-${String(new Date(expireAt).getDate()).padStart(2, '0')} 到期`
-      : '长期有效'
+    const grantedAt = finiteNumber(row?.granted_at_ms)
+    buckets.push({
+      remaining,
+      expireMs: expireAt,
+      grantedAt,
+      span: grantedAt !== undefined && expireAt !== undefined && expireAt > grantedAt
+        ? Math.round((expireAt - grantedAt) / 1000)
+        : undefined,
+      consumed: looseAmount(row?.consumed_amount),
+      granted: looseAmount(row?.granted_amount),
+    })
+  }
+  // 滚动指针分档（shared.mjs 的 assignExpiryBands）：临期 = 最早到期的未耗尽桶
+  assignExpiryBands(buckets, now)
+  const windows = []
+  for (const bucket of buckets) {
     /**
      * 「重置前提醒」适配（magpie 设置里那个 提前 12/24/48 小时 通知）：
      * - `span`（秒）让 magpie 把桶识别为周期窗口（MiniMax 积分 ≈ 月度）——
@@ -761,21 +775,18 @@ async function usage(credential, { xff, proxy } = {}) {
      * 两个字段都来自同一行响应（DSH 取证：`granted_at_ms` / `consumed_amount`
      * / `granted_amount` 与 `remaining_amount` 同级），缺哪个就省哪个，不编造。
      */
-    const grantedAt = finiteNumber(row?.granted_at_ms)
-    const span = grantedAt !== undefined && expireAt !== undefined && expireAt > grantedAt
-      ? Math.round((expireAt - grantedAt) / 1000)
-      : undefined
-    const consumed = looseAmount(row?.consumed_amount)
-    const grantedAmount = looseAmount(row?.granted_amount)
-    const usedPercent = consumed !== undefined && grantedAmount !== undefined && grantedAmount > 0
-      ? Math.max(0, Math.min(100, Math.round((consumed / grantedAmount) * 100)))
+    const usedPercent = bucket.consumed !== undefined && bucket.granted !== undefined && bucket.granted > 0
+      ? Math.max(0, Math.min(100, Math.round((bucket.consumed / bucket.granted) * 100)))
       : 0
+    const expireShort = bucket.expireMs !== undefined
+      ? `${new Date(bucket.expireMs).getMonth() + 1}-${String(new Date(bucket.expireMs).getDate()).padStart(2, '0')} 到期`
+      : undefined
     windows.push({
-      name: `${remaining} 积分 · ${expiryText}`,
+      name: `${bucket.remaining} 积分 · ${bucket.band}`,
       used: usedPercent,
-      ...(span !== undefined ? { span } : {}),
-      ...(expireAt !== undefined ? { resetsAt: new Date(expireAt).toISOString() } : {}),
-      display: `剩余 ${remaining}`,
+      ...(bucket.span !== undefined ? { span: bucket.span } : {}),
+      ...(bucket.expireMs !== undefined ? { resetsAt: new Date(bucket.expireMs).toISOString() } : {}),
+      display: `剩余 ${bucket.remaining}${expireShort !== undefined ? ` · ${expireShort}` : ''}`,
     })
   }
   return windows.length > 0 ? windows : [{ name: DISPLAY_NAME, used: 0, display: '无积分明细' }]
