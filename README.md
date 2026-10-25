@@ -32,6 +32,22 @@ astudio/spark-x
 | `astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `/api/v1/model-manager/models` | ❌ 不支持（会话一年，不滑动） |
 | `minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（浏览器确认 user_code） | `/mavis/api/v1/models?region=en` | ✅ 标准 refresh_token 轮换 |
 | `accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调 | `POST /api/llm/config/v2` | ✅ refresh（⚠️ 轮换 refresh_token，已串行化） |
+| `autoclaw` | 智谱 AutoClaw 国内 | 本地载体页（**一键导入桌面端凭据** / 短信验证码） | `/autoclaw-proxy/proxy/autoclaw-model-config` | ✅ 标准 refresh_token 轮换 |
+| `autoclawintl` | 智谱 AutoClaw 国际版 | Z.ai OAuth（授权页回调）+ 本地导入 | 同上（两站同协议） | ✅ 同左 |
+
+### autoclaw / autoclawintl
+
+智谱清言桌面端（AutoClaw）协议，**国内与国际是两个渠道**：账号体系物理隔离
+（手机号 vs 邮箱 OAuth）、API 主机不同、登录方式不同 —— 实测国内 token 打
+国际基址全拒，不可能用一个站点参数切换；`appId`/`appKey` 两站通用。
+
+- 登录：国内载体页支持**一键读取本机桌面端凭据**（Electron 凭据解密：
+  DPAPI masterKey + AES-256-GCM）或短信验证码；国际版走 Z.ai OAuth
+  （`state` 由官方授权页生成随回调带回，插件透传），桌面端已登录也可一键导入。
+- ⚠️ 实测坑（都来自上游真机取证）：`X-Version` 是推理**硬校验头**（缺 →
+  HTTP 500 空响应体）；`messages[0]` 必须逐字等于白名单前缀（否则 406）；
+  `max_tokens` ≥ 10000 或不发；思考档位集合外**不发**（上游对非法档位回
+  200 按最贵档跑）；过期时间以 **JWT exp 为权威**（登录响应的声明值偏大 6 天）。
 
 ### officeace
 
@@ -114,6 +130,11 @@ MiniMax **国际版**是例外：ofm 渠道包只有国内站（`account.minimax
 国际版登录则卡在上游 307 丢 Authorization 的坑里（见上节）——而 DSH 已把这两个坑都
 真机修通过，故移植其实现。
 
+**AutoClaw 国内/国际**是后来应需求加入的（虽与社区插件覆盖重叠）：上游 DSH 对该渠道
+做过四轮审计修复（X-Version 硬校验、406 白名单、档位本地门禁、JWT exp 权威过期、
+`display:false` 钱包过滤、流水净额批次），社区插件跟进慢，且一键导入桌面端凭据 +
+Z.ai OAuth 的完整登录、与其它渠道统一的三档用量汇总，只有这里有。
+
 ⚠️ hub 的 `aggregate` / `jet-hub-auto` 是**池路由**（hub 内部把请求分派给其它渠道），不是真实
 渠道，独立实现等于重写整个调度层 ⇒ **不在范围内**，那部分仍需依赖 DSH Hub 网关的桥接插件。
 
@@ -121,7 +142,7 @@ MiniMax **国际版**是例外：ofm 渠道包只有国内站（`account.minimax
 
 ### 聚合形态的两个取舍（有意为之，但要知道）
 
-一个 provider id 意味着 magpie 把四个渠道当成**一个**供应商，由此有两点与
+一个 provider id 意味着 magpie 把六个渠道当成**一个**供应商，由此有两点与
 「每渠道一个独立包」的形态不同（[#1](https://github.com/Gyl1219/magpie-providers-hub/issues/1)
 里由 [@MYCF711](https://github.com/MYCF711) 指出，属实）：
 
@@ -174,7 +195,8 @@ src/minimaxintl.mjs        MiniMax 国际版渠道（设备码 + PKCE）
 src/minimax-transport.mjs  MiniMax 传输层（307 保凭据跟随、传输重试、地理路由）
 src/minimax-bridge.mjs     OpenAI↔Anthropic 翻译桥（含 SSE）
 src/accio.mjs              Accio（阿里）渠道（Gemini 风格信封 + 工具分片合并）
-src/shared.mjs             凭据存取、信封解析
+src/autoclaw.mjs           AutoClaw 国内+国际渠道（MD5 签名 / 406 白名单 / Z.ai OAuth / 凭据导入）
+src/shared.mjs             凭据存取、信封解析、到期分档
 tests/                     node --test
 NOTICE.md                  协议来源与边界声明
 ```
