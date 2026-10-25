@@ -252,9 +252,11 @@ export function tierSummarize(rows) {
       // ⚠️ display 只放倒计时 —— 剩余量已在 name 里（重复了用户会看到两遍）；
       //    倒计时必须进**亮色主文本**：「将于 X 过期」辅助行浅灰看不清（用户报障）
       display: untilText(expiry) ?? `剩 ${pointer.amount}`,
-      runsOutAt: expiry,
-      runsOut: pointer.amount,
     })
+    // ⚠️ 刻意不挂 runsOutAt/runsOut：亮色行已带倒计时，再挂会让 magpie 渲染
+    //    出第三行浅灰「N 将于 X 过期」（用户报障：重复）。
+    delete out[out.length - 1].runsOutAt
+    delete out[out.length - 1].runsOut
     delete out[out.length - 1].resetsAt
   }
   const longTerm = expiring.slice(1)
@@ -266,12 +268,10 @@ export function tierSummarize(rows) {
       ...earliest,
       name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
       amount,
-      display: untilText(expiry) !== undefined ? `最早 ${untilText(expiry)}` : `剩 ${amount} · ${longTerm.length} 批`,
-      runsOutAt: expiry,
-      // ⚠️ runsOut 必须是**那一批**的量（最早时刻真正作废的）——
-      //    写成合计会把「6 批不同时刻作废」说成「一次全没」
-      runsOut: earliest.amount,
+      display: untilText(expiry) !== undefined ? `最早 ${untilText(expiry)}作废` : `剩 ${amount} · ${longTerm.length} 批`,
     })
+    delete out[out.length - 1].runsOutAt
+    delete out[out.length - 1].runsOut
     delete out[out.length - 1].resetsAt
   }
   if (permanent.length > 0) {

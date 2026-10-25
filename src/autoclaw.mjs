@@ -669,9 +669,7 @@ async function usage(product, credential) {
       amount: b.remaining,
       // ⚠️ 倒计时拼进亮色主文本（「将于 X 过期」辅助行浅灰看不清 —— 用户报障）
       display: `${Math.round(b.remaining * 100) / 100}${until !== undefined ? ` · ${until}` : ''}`,
-      // ⚠️ 批次是**作废**语义（过期即没了，不会回满）—— 挂 runsOutAt/runsOut
-      //（magpie 渲染「N 积分 将于 X 过期」紧急条），不挂 resetsAt（「重置于」误导）
-      ...(iso !== undefined ? { runsOutAt: iso, runsOut: b.remaining } : {}),
+      // ⚠️ 刻意不挂 runsOutAt/runsOut：display 已带倒计时，再挂会多一行浅灰重复
     })
   }
   if (windows.length === 0 && total > 0) {
