@@ -15,8 +15,19 @@ const page = renderLoginPage()
 test('页面是完整 HTML 且包含全部交互元素', () => {
   assert.match(page, /<!doctype html>/i)
   assert.match(page, /<\/html>$/)
-  for (const id of ['captcha', 'captchaBox', 'mobile', 'send', 'code', 'go', 'msg']) {
+  // 三 Tab 的全部交互元素（短信 / 密码 / 微信扫码）
+  for (const id of [
+    'mobile', 'code', 'send', 'go',               // Tab 1 短信
+    'pwdAccount', 'pwdPassword', 'goPwd',          // Tab 2 密码
+    'qrBox', 'refreshQr',                          // Tab 3 微信
+    'smsCaptchaBox', 'pwdCaptchaBox',              // 极验（两份独立）
+    'msg',
+  ]) {
     assert.ok(page.includes(`id="${id}"`), `缺少 #${id}`)
+  }
+  // 三 Tab 的按钮与路由端点
+  for (const needle of ['/sms/send', '/sms/login', '/password/login', '/wechat/qrcode', '/poll', '/gee-captcha']) {
+    assert.ok(page.includes(needle), `缺少端点引用 ${needle}`)
   }
 })
 
