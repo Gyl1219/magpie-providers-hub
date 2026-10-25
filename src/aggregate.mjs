@@ -388,7 +388,16 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         const windows = []
         for (const each of CHANNELS) {
           if (!signedIn(each)) continue
-          windows.push(...await usageWindowsOf(each, sidecarCredentialOf(each)))
+          // ⚠️ 走 ensure（临期软续期）：AutoClaw 的 access_token 只活 24h，
+          //    旁路凭据不续期的话卡片第二天就报「额度查询失败」。
+          let credential
+          try {
+            credential = await ensure(each)
+          } catch {
+            credential = sidecarCredentialOf(each)
+          }
+          if (credential === undefined) continue
+          windows.push(...await usageWindowsOf(each, credential))
         }
         return { plan: PROVIDER_NAME, windows }
       },
@@ -435,7 +444,7 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
   async function usageWindowsOf(channel, credential) {
     if (typeof channel.usage === 'function') {
       try {
-        const rows = await channel.usage(credential, { xff: minimaxXff })
+        const rows = await channel.usage(credential, { xff: minimaxXff, proxy: minimaxProxy })
         if (Array.isArray(rows) && rows.length > 0) return rows
       } catch (error) {
         return [{
