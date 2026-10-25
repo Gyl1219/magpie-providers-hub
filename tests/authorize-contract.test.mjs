@@ -50,6 +50,10 @@ test('每个注册渠道都实现了 beginLogin', async () => {
   for (const channel of [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel]) {
     assert.ok(REGISTERED_CHANNELS.includes(channel), `${channel.id} 未注册进聚合层`)
   }
+  // autoclaw 两个渠道（国内/国际）：聚合层持有的必须就是模块导出的那份
+  const { autoclawChannel, autoclawIntlChannel } = await import('../src/autoclaw.mjs')
+  assert.ok(REGISTERED_CHANNELS.includes(autoclawChannel), 'autoclaw 未注册进聚合层')
+  assert.ok(REGISTERED_CHANNELS.includes(autoclawIntlChannel), 'autoclawintl 未注册进聚合层')
 })
 
 test('authorize 立刻返回（不 await 用户登录）', async () => {

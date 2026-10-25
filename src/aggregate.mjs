@@ -27,6 +27,7 @@ import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
 import { accioChannel } from './accio.mjs'
+import { autoclawChannel, autoclawIntlChannel } from './autoclaw.mjs'
 import { sanitizeXff } from './minimax-transport.mjs'
 
 const PROVIDER = 'providers-hub'
@@ -45,7 +46,7 @@ const REFRESH_LEAD_MS = 10 * 60 * 1000
 const PLACEHOLDER_BASE = 'https://providers-hub.invalid'
 
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
-const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel]
+const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel]
 
 // 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
 export { CHANNELS as REGISTERED_CHANNELS }
