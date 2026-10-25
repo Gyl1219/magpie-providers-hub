@@ -125,6 +125,9 @@ function basicAuthorization(credential) {
  *
  * ⚠️ 返回的是**平台目录**，不保证该账号已订阅；且**没有能力元数据**（只有 id），
  *    故上下文窗口统一按保守值，工具调用按实测（`toolCallingSupported: true`）声明。
+ *
+ * 倍率（V11 `/v1/model-token-rates`）拼进展示名（`GLM-5.2 · x0.7`）——
+ * 与 resolveModel 同源（选择器显示与实际计费一致）；倍率表拉不到就纯降级。
  */
 async function fetchCatalog(credential) {
   const response = await fetch(`${maasBase(credential)}${MODELS_PATH}`, {
@@ -134,12 +137,17 @@ async function fetchCatalog(credential) {
   if (!response.ok) throw new Error(`OfficeAce 目录读取失败：HTTP ${response.status}`)
   const body = await response.json()
   const rows = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : []
+  // 倍率表失败不阻断目录（降级为无 x 系数）
+  const rates = await fetchTokenRates(credential).catch(() => new Map())
   const models = {}
   for (const row of rows) {
     const id = typeof row === 'string' ? row : (typeof row?.id === 'string' ? row.id : '')
     if (id.length === 0) continue
+    const baseName = typeof row?.name === 'string' && row.name.length > 0 ? row.name : id
+    const rate = rates.get(id)
     models[id] = {
-      name: typeof row?.name === 'string' && row.name.length > 0 ? row.name : id,
+      // ⚠️ x1 不标（全默认倍率没有信息量）；只标非 1 的
+      name: rate !== undefined && rate !== 1 ? `${baseName} · x${rate}` : baseName,
       limit: { context: 128_000, output: 8192 },
       tool_call: true,
       capabilities: { temperature: true, reasoning: true, attachment: false },
@@ -436,6 +444,221 @@ function diagnose(status, body, renewal) {
   return `HTTP ${status}`
 }
 
+// ── V11 签名的订阅面（移植 officeace-auth.ts 的 signAndRequest / claimDailyBonus）──
+
+/**
+ * V11 签名请求（华为 APIG 私有算法，逐字复刻 OfficeAce 客户端的 B()/F()）。
+ *
+ * ## 三条铁律（每条都曾导致 401，别凭直觉改）
+ *
+ * 1. **GET 不发 Content-Type**（客户端的 cloudFetch 只在非 GET 时设置它）——
+ *    多这一个头，签名串就多一行，服务端重算必不匹配。POST 必须带
+ *    （实测不带是 HTTP 500 OfficeAce.11020001），且 body 参与哈希（无 body 按空串）。
+ * 2. **密钥派生**：u = HMAC(sha256, accessKey).update(secretKey)；
+ *    derive = HMAC(sha256, u).update(scope 字节 + 0x01) 取**前 32 字节**；
+ *    以 derive 的 **hex 字符串**（不是 raw bytes）为 key 签 stringToSign。
+ * 3. **LF 分隔**（canonical 头行与 stringToSign 都是）；canonical 路径**强制尾斜杠**；
+ *    头值 trim + 折叠空白。
+ *
+ * @returns `{ ok, status, text }` —— 失败把报文带出来（报文是唯一指路信息：
+ *   token expired / IAM.0011 / 签名过期，各指向完全不同的处置动作）。
+ */
+async function signAndRequest(url, credential, method, body) {
+  const region = 'cn-southwest-2'
+  const service = 'apic'
+  const pad = (n) => (n >= 10 ? String(n) : `0${n}`)
+  const now = new Date()
+  const xdate = String(now.getUTCFullYear()) + pad(now.getUTCMonth() + 1) + pad(now.getUTCDate())
+    + 'T' + pad(now.getUTCHours()) + pad(now.getUTCMinutes()) + pad(now.getUTCSeconds()) + 'Z'
+  const urlEncode = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+
+  const u = new URL(url)
+  const canonicalUri0 = u.pathname.split('/').map((s) => urlEncode(decodeURIComponent(s))).join('/')
+  const canonicalUri = canonicalUri0.endsWith('/') ? canonicalUri0 : `${canonicalUri0}/`
+  const queryPairs = []
+  u.searchParams.forEach((v, n) => queryPairs.push([n, v]))
+  queryPairs.sort(([a], [c]) => a.localeCompare(c))
+  const canonicalQuery = queryPairs.map(([k, v]) => `${urlEncode(k)}=${urlEncode(v)}`).join('&')
+
+  const original = {
+    'x-subscription-type': 'v2',
+    'X-Sdk-Date': xdate,
+    'X-Security-Token': String(credential.securityToken ?? '').trim(),
+    Host: u.host,
+  }
+  if (method === 'POST') original['Content-Type'] = 'application/json;charset=utf8'
+  if (credential.projectId) original['X-Project-ID'] = credential.projectId
+  const lower = {}
+  for (const [k, v] of Object.entries(original)) lower[k.toLowerCase()] = v.trim().replace(/\s+/g, ' ')
+  const signedHeaders = Object.keys(lower).sort()
+  let canonicalHeaders = ''
+  for (const h of signedHeaders) canonicalHeaders += `${h}:${lower[h]}\n`
+  const payloadHash = createHash('sha256').update(body ?? '', 'utf8').digest('hex')
+  const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders.join(';'), payloadHash].join('\n')
+  const scope = `${xdate.slice(0, 8)}/${region}/${service}`
+  const stringToSign = ['V11-HMAC-SHA256', xdate, scope, createHash('sha256').update(canonicalRequest).digest('hex')].join('\n')
+  const u1 = createHmac('sha256', credential.access).update(credential.secret).digest()
+  const derivedKey = createHmac('sha256', u1)
+    .update(Buffer.concat([Buffer.from(scope, 'utf8'), Buffer.from([1])]))
+    .digest()
+    .subarray(0, 32)
+    .toString('hex')
+  const signature = createHmac('sha256', Buffer.from(derivedKey, 'utf8')).update(stringToSign).digest('hex')
+
+  try {
+    const r = await fetch(url, {
+      method,
+      headers: {
+        ...original,
+        Authorization: `V11-HMAC-SHA256 Credential=${credential.access}/${scope}, SignedHeaders=${signedHeaders.join(';')}, Signature=${signature}`,
+      },
+      ...(body === undefined ? {} : { body }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    const text = await r.text().catch(() => '')
+    return { ok: r.ok, status: r.status, text }
+  } catch (error) {
+    // ⚠️ 失败/无响应也要带原因（不能只给空串 —— 那会把 401 读成「没有可领的」）
+    return { ok: false, status: 0, text: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+const SUBSCRIPTION_PATH = '/v1/subscription'
+const TOKEN_RATES_PATH = '/v1/model-token-rates'
+const BONUS_CLAIM_PATH = '/v1/subscription/bonus/claim'
+/**
+ * ⚠️⚠️ 订阅面（V11）挂在** MaaS 域**（`officeace.cn-southwest-2.huaweicloud-agentarts.com`，
+ * DSH `OFFICEACE.defaultBaseUrl`），不是 CLAW 域（`agentarts.…myhuaweicloud.com` 是
+ * 登录/auth 用的）。真机教训：打 CLAW 域回 `404 APIGW.0101 API 不存在`
+ * —— 签名是对的（签名错是 401），纯粹主机不对。
+ */
+const SUBSCRIPTION_BASE = 'https://officeace.cn-southwest-2.huaweicloud-agentarts.com'
+
+/**
+ * 拉订阅（V11）→ magpie usage windows（积分分桶）。
+ *
+ * 响应含套餐桶（`skus[].quotas`，`sku_attr_code === 'officeace_points'`）与
+ * 活动桶（`bonus_skus[]`）。⚠️ `.trial` 后缀的 sku 不带到期时间（试用不过期语义）
+ * —— 照抄 DSH 判据，不猜。
+ * 查询失败**不吞**：带原因显示。
+ */
+export async function fetchUsage(credential) {
+  const result = await signAndRequest(`${SUBSCRIPTION_BASE}${SUBSCRIPTION_PATH}`, credential, 'GET')
+  if (!result.ok) {
+    const detail = result.text.trim().slice(0, 200)
+    throw new Error(`订阅查询失败：HTTP ${result.status}${detail === '' ? '' : `：${detail}`}`)
+  }
+  let j
+  try {
+    j = JSON.parse(result.text)
+  } catch {
+    throw new Error('订阅查询失败：响应不是 JSON')
+  }
+  const windows = []
+  const nowMs = Date.now()
+  for (const sku of Array.isArray(j?.skus) ? j.skus : []) {
+    for (const q of Array.isArray(sku?.quotas) ? sku.quotas : []) {
+      if (q?.sku_attr_code !== 'officeace_points') continue
+      const total = Number(q.sku_value)
+      const used = Number(q.current_value)
+      if (!Number.isFinite(total) || total <= 0) continue
+      const isTrial = String(sku.sku_code ?? '').endsWith('.trial')
+      const expiresAt = typeof q.expired_time === 'string' && q.expired_time.length > 0 ? q.expired_time : null
+      const remaining = Math.max(0, total - used)
+      windows.push({
+        name: `${sku.sku_name ?? '套餐'} · 剩 ${remaining}`,
+        used: Math.min(100, Math.max(0, Math.round((used / total) * 100))),
+        // 试用桶不带到期（试用不过期）；到期 ISO → resetsAt（重置前提醒吃它）
+        ...(isTrial ? {} : expiresAt !== null ? { resetsAt: new Date(expiresAt).toISOString() } : {}),
+        display: `${remaining} / ${total}`,
+        // 已过期的桶收进折叠区（主环位留给活着的桶）
+        ...(expiresAt !== null && !isTrial && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
+      })
+    }
+  }
+  for (const bonus of Array.isArray(j?.bonus_skus) ? j.bonus_skus : []) {
+    const points = Number(bonus?.points)
+    if (!Number.isFinite(points) || points <= 0) continue
+    const used = Number(bonus.current_value)
+    const remaining = Math.max(0, points - (Number.isFinite(used) ? used : 0))
+    const expiresAt = typeof bonus.expired_time === 'string' ? bonus.expired_time : null
+    windows.push({
+      name: `${bonus.activity_name ?? '活动奖励'} · 剩 ${remaining}`,
+      used: Math.min(100, Math.round(((points - remaining) / points) * 100)),
+      ...(expiresAt !== null ? { resetsAt: new Date(expiresAt).toISOString() } : {}),
+      display: `${remaining} / ${points}`,
+      ...(expiresAt !== null && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
+    })
+  }
+  return windows
+}
+
+/**
+ * 每日签到：`POST /v1/subscription/bonus/claim`（每日送 1000 积分的活动桶）。
+ *
+ * ⚠️ 官方客户端**没有签到按钮** —— 订阅页一挂载就自动领（按小时去重）。
+ * ⚠️ 积分**当日作废**（expired_time = 当天 23:59:59）：当天不领就永久失去。
+ * ⚠️ POST 必须带 Content-Type（铁律 1 的另一面：不带是 500 11020001）；
+ *    非 2xx 必须按状态码判（signAndRequest 对失败可能给空串 —— 401 会被
+ *    读成「今天没有可领的」，每天白丢 1000 分且无痕，DSH 真实报障）。
+ */
+export async function checkin(credential) {
+  if (!credential?.access || !credential?.securityToken) {
+    return { outcome: 'failed', message: '凭据缺失（access 或 securityToken），未发起签到' }
+  }
+  const result = await signAndRequest(`${SUBSCRIPTION_BASE}${BONUS_CLAIM_PATH}`, credential, 'POST')
+  if (!result.ok || result.status < 200 || result.status >= 300) {
+    const detail = result.text.trim().slice(0, 200)
+    return {
+      outcome: 'failed',
+      message: `HTTP ${result.status === 0 ? '（未发出/无响应）' : result.status}${detail === '' ? '' : `：${detail}`}`,
+    }
+  }
+  if (result.text.length === 0) return { outcome: 'claimed', message: '已领取（响应为空）' }
+  try {
+    const j = JSON.parse(result.text)
+    const skus = (Array.isArray(j?.bonus_skus) ? j.bonus_skus : []).map((s) => ({
+      name: typeof s?.activity_name === 'string' ? s.activity_name : '活动奖励',
+      points: Number(s?.points) || 0,
+    }))
+    const credit = skus.reduce((sum, s) => sum + s.points, 0)
+    if (skus.length === 0) return { outcome: 'done', message: '今日已无新增可领' }
+    return { outcome: 'claimed', ...(credit > 0 ? { credit } : {}), message: skus.map((s) => `${s.name} +${s.points}`).join('；') }
+  } catch {
+    // 2xx 但解析失败：领取本身可能已成功，不当失败报（重复领取幂等，明天再来）
+    return { outcome: 'done', message: '已领取（响应无法解析）' }
+  }
+}
+
+/** 倍率缓存（catalog 时拉一次，chat 的模型名展示同源）。模块级 + 20 分钟。 */
+let tokenRatesCache = { at: 0, map: new Map() }
+const TOKEN_RATES_TTL_MS = 20 * 60 * 1000
+
+/**
+ * 拉消耗倍率（V11）：`GET /v1/model-token-rates` → Map<模型id, 倍率>。
+ * 响应 snake_case（`model_name` / `cost_coefficient`），兼容 camelCase 形态。
+ * 失败 → 空表（倍率显示优雅降级：模型照常可选，只是名字后不带 x 系数）。
+ */
+export async function fetchTokenRates(credential) {
+  if (Date.now() - tokenRatesCache.at < TOKEN_RATES_TTL_MS && tokenRatesCache.map.size > 0) {
+    return tokenRatesCache.map
+  }
+  const out = new Map()
+  try {
+    const result = await signAndRequest(`${SUBSCRIPTION_BASE}${TOKEN_RATES_PATH}`, credential, 'GET')
+    if (result.ok && result.text.length > 0) {
+      const j = JSON.parse(result.text)
+      for (const m of Array.isArray(j?.models) ? j.models : []) {
+        const name = typeof m?.model_name === 'string' ? m.model_name : (typeof m?.modelName === 'string' ? m.modelName : undefined)
+        const coeff = typeof m?.cost_coefficient === 'number' ? m.cost_coefficient : (typeof m?.costCoefficient === 'number' ? m.costCoefficient : undefined)
+        if (name !== undefined && coeff !== undefined) out.set(name, coeff)
+      }
+      tokenRatesCache = { at: Date.now(), map: out }
+    }
+  } catch { /* 空表降级 */ }
+  return out
+}
+
 /**
  * 渠道实现 —— 供聚合层消费，**本身不是插件**（不导出 config/auth/provider）。
  *
@@ -445,8 +668,10 @@ function diagnose(status, body, renewal) {
  *   - `beginLogin(openBrowser)` → `{ url, result }`（url 立刻可用，不 await 登录）
  *   - `refresh(credential, persist?)` → 新凭据；`persist` 负责立即落盘
  *   - `expired(credential)` → 是否临期（提前 10 分钟）
- *   - `catalog(credential)` → `{ [modelId]: modelDef }`
+ *   - `catalog(credential)` → `{ [modelId]: modelDef }`（倍率拼进 name）
  *   - `chat(credential, { body, signal, renew? })` → Response
+ *   - `usage(credential)` → magpie windows（订阅积分分桶）
+ *   - `checkin(credential)` → 每日签到（bonus/claim）
  */
 export const officeaceChannel = {
   id: PROVIDER,
@@ -474,6 +699,10 @@ export const officeaceChannel = {
   refresh: refreshOnce,
   expired,
   catalog: fetchCatalog,
+  /** 订阅积分分桶（V11 直读，失败由聚合层带原因显示）。 */
+  usage: fetchUsage,
+  /** 每日签到（POST bonus/claim，每日 1000 积分、当日作废）。 */
+  checkin,
 
   /**
    * 发一次对话请求；`model` 已去掉渠道前缀。

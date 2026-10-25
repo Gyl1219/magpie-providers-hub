@@ -224,14 +224,24 @@ test('refresh：astudio（无 refresh_token）与未知渠道 → undefined（�
 
 // ── checkin / usage：按账号 ─────────────────────────────────────────────
 
-test('checkin 按账号槽的渠道分发（officeace 无签到端点 → inactive）', async () => {
+test('checkin 按账号槽的渠道分发（officeace 账号 → V11 bonus/claim）', async () => {
   await isolated(async ({ build }) => {
-    const stub = stubFetch(() => new Response('{"code":0,"data":{}}', { status: 200, headers: { 'content-type': 'application/json' } }))
+    let claimCalls = 0
+    const stub = stubFetch(({ url }) => {
+      if (url.includes('/v1/subscription/bonus/claim')) {
+        claimCalls += 1
+        return new Response(JSON.stringify({
+          bonus_skus: [{ activity_id: 'daily', activity_name: '每日签到', points: 1000 }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('{}', { status: 200 })
+    })
     try {
       const plugin = await build()
       const outcome = await plugin.auth.checkin(async () => officeaceAuth())
-      assert.equal(outcome.outcome, 'inactive')
-      assert.match(outcome.message, /无每日签到/)
+      assert.equal(claimCalls, 1, '签到请求必须发到该账号渠道的 bonus/claim')
+      assert.equal(outcome.outcome, 'claimed')
+      assert.equal(outcome.credit, 1000)
     } finally {
       stub.restore()
     }

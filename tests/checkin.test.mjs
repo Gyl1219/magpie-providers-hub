@@ -173,12 +173,12 @@ test('签到：地理分流（307→中国站）后的 401 必须报「出口 IP
   }
 })
 
-test('渠道对象挂了 checkin；officeace/accio 没有签到端点（跳过不占失败名额）', async () => {
+test('渠道对象挂了 checkin；accio 没有签到端点（跳过不占失败名额）', async () => {
   assert.equal(typeof minimaxintlChannel.checkin, 'function')
   assert.equal(typeof astudioChannel.checkin, 'function')
   const { officeaceChannel } = await import('../src/officeace.mjs')
   const { accioChannel } = await import('../src/accio.mjs')
-  assert.equal(officeaceChannel.checkin, undefined, '华为云 MaaS 无签到面')
+  assert.equal(typeof officeaceChannel.checkin, 'function', 'officeace 有签到（每日 bonus/claim，1000 积分当日作废）')
   assert.equal(accioChannel.checkin, undefined, 'Accio 每日 200 积分由登录触发，无签到端点')
 })
 
