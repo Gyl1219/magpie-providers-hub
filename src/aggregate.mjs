@@ -1,19 +1,26 @@
-// 聚合层：一个供应商，内部聚合多个渠道。
+// 聚合层：一个供应商，内部聚合多个渠道；凭据进 **magpie 账号槽**（多账号）。
 //
-// ## 为什么是聚合而不是每渠道一个供应商
+// ## 形态：一个供应商，多渠，多账号
 //
-// 参照 ofm（our-free-model）：它**一个供应商**覆盖 13 个渠道，模型 id 带渠道前缀
-// （`our-free-model/<upstream>/<model>`）。这样在 magpie 的供应商列表里只有**一个**
-// 条目，而不是十几个并列的供应商。本插件同款：**一个条目，多渠**。
+// 参照 ofm（our-free-model）：**一个供应商条目**覆盖多个渠道，模型 id 带渠道前缀
+// （`officeace/glm-5.3`）。在此之上，凭据按 magpie 的**账号槽**存放（社区插件同款）：
+// 每次登录 = 一个账号条目，auth 里带 `channel` 字段标记归属渠道 ——
+// 同渠道可挂多个账号（不再互相覆盖），magpie 网关在额度耗尽时自动换槽。
 //
-// 模型 id 形态：`dsh-hub/<channel>/<model>`，例：`dsh-hub/officeace/glm-5.3`。
-// 请求进来时按前缀分派到对应渠道。
+// ## 存储：账号槽为主，旁路文件为兜底（双写）
 //
-// ## 只做 ofm 没有的渠道
+// - **主**：magpie 账号槽存 `{type:'oauth', channel, ...凭据, expires}` ——
+//   loader/refresh/checkin/usage 全部以 `getAuth()` 拿到的账号为口径；
+// - **兜底**：`~/.config/magpie/<channel>-credential.json` 旁路文件继续写
+//   （迁移前已登录的账号不至于失效；magpie 轮到**别的渠道**的账号槽时，
+//   请求靠它照常发出去 —— 旁路内容 = 最近一次成功使用的该渠道凭据）。
 //
-// ofm 已覆盖 13 个（CodeArts / WorkBuddy 国内+国际 / LobsterAI / Qoder 国内+国际 /
-// TRAE / Cline / Loomy / Raccoon / MiniMax Code / ZCode / Gemini），
-// 故 lobsterai、loomy **不做**。这里只补 ofm 没有的。
+// ## 为什么去重闸按「凭据身份」而不是渠道 id 键控
+//
+// refresh_token 会轮换的渠道（minimaxintl / accio / officeace STS），同渠道
+// 两个账号并发续期是**合法**场景 —— 按渠道键控会让第二个账号共享第一个的
+// 续期结果（拿到别人的凭据）。按 `channel + refresh_token`（或 access）键控：
+// 同一凭据并发共享一个在途请求，不同凭据各走各的。
 
 import { loadCredential, saveCredential, notSignedIn } from './shared.mjs'
 import { officeaceChannel } from './officeace.mjs'
@@ -24,6 +31,9 @@ import { sanitizeXff } from './minimax-transport.mjs'
 
 const PROVIDER = 'providers-hub'
 const PROVIDER_NAME = 'Providers Hub'
+
+/** magpie 在到期前这么多毫秒调 auth.refresh（对齐各渠道 10 分钟临期口径）。 */
+const REFRESH_LEAD_MS = 10 * 60 * 1000
 
 /**
  * loader 的占位 baseURL。
@@ -40,106 +50,148 @@ const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioCha
 // 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
 export { CHANNELS as REGISTERED_CHANNELS }
 
-// ── 凭据：每渠道一份文件，内存里各留一份 ──────────────────────────────────
+// ── 账号（auth）与凭据的形状工具 ──────────────────────────────────────────
 
-const credentials = new Map()
+/** auth 是否属于该渠道（登录回调写入的 `channel` 字段是唯一判据）。 */
+const authOfChannel = (auth, channel) =>
+  auth?.type === 'oauth' && auth?.channel === channel.id
 
-function credentialOf(channel) {
-  if (credentials.has(channel.id)) return credentials.get(channel.id)
+/** 从 auth 剥出裸凭据（旁路文件存这个形状，与渠道函数的入参一致）。 */
+function credentialOfAuth(auth) {
+  const { type, channel, expires, accountId, ...credential } = auth ?? {}
+  return credential
+}
+
+/**
+ * 凭据的到期时刻（毫秒）。三渠道的字段形态各不相同：
+ * - officeace：`expiresAt` 是 ISO 字符串；
+ * - minimaxintl：`expires_at` 是毫秒**数字串**（本实现写入）；
+ * - accio：`expires_at` 是毫秒数字（秒→毫秒已在兑换层归一）。
+ * 数字串/数字都兼容秒级（`> 1e12` 视为毫秒）；astudio 无到期字段 → undefined。
+ */
+export function expiresMsOf(credential) {
+  if (typeof credential?.expiresAt === 'string') {
+    const t = Date.parse(credential.expiresAt)
+    if (Number.isFinite(t)) return t
+  }
+  const raw = credential?.expires_at
+  if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+    const n = Number(raw)
+    if (n > 0) return n > 1e12 ? n : n * 1000
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return raw > 1e12 ? raw : raw * 1000
+  }
+  return undefined
+}
+
+/** 续期去重闸的键：渠道 + 凭据身份（refresh_token 优先，退 access）。 */
+const identityOf = (credential) =>
+  String(credential?.refreshToken ?? credential?.refresh_token ?? credential?.access ?? credential?.access_token ?? '')
+
+// ── 旁路文件（兜底）：内存缓存 + 磁盘 ────────────────────────────────────
+
+const sidecar = new Map()
+/** 最近一次写旁路的凭据身份（身份没变就不重复写盘 —— 请求热路径不做 IO）。 */
+const sidecarIdentity = new Map()
+
+function sidecarCredentialOf(channel) {
+  if (sidecar.has(channel.id)) return sidecar.get(channel.id)
   const stored = loadCredential(channel.id)
-  if (stored) credentials.set(channel.id, stored)
+  if (stored) sidecar.set(channel.id, stored)
   return stored
 }
 
-async function ensure(channel) {
-  let current = credentialOf(channel)
-  if (!current) throw notSignedIn(`未登录：请先在插件里登录 ${channel.displayName}`)
-  if (channel.expired?.(current)) {
-    // ⚠️ **软续期**：失败不抛错、沿用旧凭据（缺口 3 的聚合侧落点）。
-    //    理由与渠道侧一致：STS/会话续期失败 ≠ 推理凭据失效；把一次续期失败
-    //    升级成「所有请求报错」才是更糟的行为。真正确凿的失效由 401 那条路兜底。
-    current = await renew(channel, current)
-  }
-  return current
+/** 写旁路（仅当凭据身份变化时落盘；首次见到也写）。 */
+function writeSidecar(channel, credential) {
+  const identity = identityOf(credential)
+  sidecar.set(channel.id, credential)
+  if (sidecarIdentity.get(channel.id) === identity) return
+  sidecarIdentity.set(channel.id, identity)
+  saveCredential(channel.id, credentialOfAuth(credential))
+}
+
+// ── 续期：去重闸 + 双写落盘 ──────────────────────────────────────────────
+
+/**
+ * **聚合层级的续期去重闸**：同一凭据同一时刻只允许一个在途续期。
+ *
+ * ⚠️ 键是 `channel + 凭据身份`（见文件头）—— 同渠道多账号互不串号，
+ *    同一账号的并发入口（loader 临期软续期 / chat 401 硬续期 / magpie refresh）
+ *    共享同一个在途请求。
+ *
+ * ⚠️ refresh_token 一次性渠道（officeace STS）的「消费即落盘」纪律：
+ *    渠道 refresh 的第二参 persist 回调只写**旁路**（此刻 modelInfo 还没合并，
+ *    写账号槽会丢 channel 等字段）；账号槽在最终结果处一次写齐。
+ */
+const renewInFlight = new Map()
+
+function gatedRenew(channel, current) {
+  const key = channel.id + '\n' + identityOf(current)
+  const pending = renewInFlight.get(key)
+  if (pending !== undefined) return pending
+  const bare = credentialOfAuth(current)
+  const task = channel.refresh(bare, (partial) => writeSidecar(channel, partial))
+    .then((next) => {
+      // current 是 auth（带 channel 字段）就合并回 auth 形状；是裸凭据就保持裸
+      const merged = current?.type === 'oauth' ? { ...current, ...next } : next
+      writeSidecar(channel, merged)
+      return merged
+    })
+    .finally(() => renewInFlight.delete(key))
+  renewInFlight.set(key, task)
+  return task
 }
 
 /**
- * 某渠道的落盘器：**内存缓存 + 磁盘一次写齐**。
- *
- * ⚠️ 单一出口 —— `ensure()` 的软续期、`chat()` 里的 401 重发续期、magpie 显式
- *    `refresh()` 三条路径必须共用它，否则「refresh_token 已消费后立刻落盘」
- *    这条纪律会在某一路径上漏掉（漏掉 = 中途崩掉就丢新 token）。
+ * 软续期（失败不抛错、沿用原凭据）：loader 临期路径与 ensure() 共用。
+ * 真正确凿的失效由渠道 chat 的 401 那条路（硬续期）兜底。
  */
-function persistFor(channel) {
-  return (credential) => {
-    credentials.set(channel.id, credential)
-    saveCredential(channel.id, credential)
-  }
-}
-
-/**
- * 续期一次（软）。返回新凭据；**失败交回原凭据**并留痕。
- *
- * `persist` 让渠道在「refresh_token 已消费」的瞬间**立即落盘**（缺口 5），
- * 不等 modelInfo —— 中途崩掉也不能丢新 token。
- */
-async function renew(channel, current) {
+async function renewSoft(channel, current) {
   try {
-    const next = await gatedRenew(channel, current)
-    return next
+    return await gatedRenew(channel, current)
   } catch (error) {
     console.warn(`[${channel.id}] 续期未成功，沿用原凭据：${error.message}`)
     return current
   }
 }
 
-/**
- * **聚合层级的续期去重闸**：同一渠道同一时刻只允许一个在途续期。
- *
- * ⚠️ 渠道各自的闸（如 officeace 的 refreshOnce）只罩住自己；而 MiniMax 这类
- * **refresh_token 会轮换**的标准 OAuth 渠道，两个并发续期里第二个会拿着
- * 已被作废的 token 去换 → 失败。并发入口有三处（ensure 软续期、chat 401
- * 路径的硬续期、magpie 显式 refresh），在聚合层统一闸一次，全部受益。
- * 在途的调用方共享同一个 promise（失败也一样 —— 这是硬语义，调用方自行决定吞不吞）。
- */
-const renewInFlight = new Map()
-
-function gatedRenew(channel, current) {
-  const pending = renewInFlight.get(channel.id)
-  if (pending !== undefined) return pending
-  const persist = persistFor(channel)
-  const task = channel.refresh(current, persist)
-    .then((next) => {
-      persist(next)
-      return next
-    })
-    .finally(() => renewInFlight.delete(channel.id))
-  renewInFlight.set(channel.id, task)
-  return task
+/** 旁路路径的取凭据 + 临期软续期（迁移前的账号走这条）。 */
+async function ensure(channel) {
+  let current = sidecarCredentialOf(channel)
+  if (!current) throw notSignedIn(`未登录：请先在插件里登录 ${channel.displayName}`)
+  if (channel.expired?.(current)) current = await renewSoft(channel, current)
+  return current
 }
 
-/** 已登录的渠道（登录方法是**每渠道一个**，用户按需逐个登）。 */
-const signedIn = (channel) => Boolean(credentialOf(channel))
+/**
+ * 账号路径的取凭据 + 临期软续期。**账号是活的就顺带刷新旁路**
+ * （旁路内容 = 最近一次成功使用的该渠道凭据 —— 目录/兜底路径靠它）。
+ */
+async function ensureAuth(channel, auth) {
+  let current = auth
+  if (channel.expired?.(auth)) current = await renewSoft(channel, auth)
+  writeSidecar(channel, current)
+  return current
+}
 
-// ── 目录：合并所有已登录渠道，模型 id 加渠道前缀 ──────────────────────────
+/** 已登录渠道（旁路口径 —— 目录合并用；账号槽由 magpie 自管）。 */
+const signedIn = (channel) => Boolean(sidecarCredentialOf(channel))
+
+// ── 目录：合并渠道目录，模型 id 加渠道前缀 ────────────────────────────────
 
 /**
  * 目录里的模型 id 只带**渠道**前缀：`officeace/glm-5.3`
  * （与 jethub 同形态：那里 `loomy/GLM-5.3-Flash` 的 `loomy` 也是渠道）。
- * magpie 展示/选择时会自动补供应商名前缀，呈现为
- * `providers-hub/officeace/glm-5.3`。
+ * magpie 展示/选择时会自动补供应商名前缀，呈现为 `providers-hub/officeace/glm-5.3`。
  */
 function prefixed(channelId, modelId) {
   return `${channelId}/${modelId}`
 }
 
 /**
- * 合并所有渠道的目录，模型 id 加渠道前缀。
- *
- * ⚠️ **按渠道分别回落**：已登录渠道拉到真实目录、未登录渠道用兜底目录。
- *    如果只在「一个渠道都没登录」时才回落（早先的写法），会造成
- *    「officeace 登录后，astudio 的模型从选择器里凭空消失」——
- *    用户看到的是模型变少，而不是「astudio 未登录」。
+ * 合并所有渠道的目录。⚠️ **按渠道分别回落**：已登录渠道拉真实目录、
+ * 未登录渠道用兜底目录（否则「officeace 登录后 astudio 的模型凭空消失」）。
  */
 async function discoverModels(fallback) {
   const merged = {}
@@ -166,25 +218,34 @@ async function discoverModels(fallback) {
 
 // ── 插件 ─────────────────────────────────────────────────────────────────
 
-export const DshProvidersHubPlugin = async (_input, options = {}) => {
+export const DshProvidersHubPlugin = async (input, options = {}) => {
   const openBrowser = typeof options.openBrowser === 'function' ? options.openBrowser : undefined
   /**
    * MiniMax 国际版的可选绕行 IP（`magpie plugin options providers-hub
-   * '{"minimaxXff":"<海外IP>"}'` 设置）。
-   *
-   * ⚠️ 默认关闭（与 DSH 同款：无默认值，用户显式填才生效）。
-   * ⚠️ 读取时过 `sanitizeXff`（DSH `sanitizeMinimaxXff` 逐字移植）：
-   * 只接受 IP 字面量 —— 这个值会拼进请求头，白名单校验防 CRLF 头注入；
-   * 非法值静默不附头（不崩 —— 填错的用户体验是「仍被分流」，
-   * 报错文案在 describeGeoRoute 里教他核对）。
+   * '{"minimaxXff":"<海外IP>"}'` 设置）。⚠️ 默认关闭；`sanitizeXff` 白名单
+   * （IP 字面量）防 CRLF 头注入，非法值静默不附头。
    */
   const minimaxXff = sanitizeXff(options.minimaxXff)
+  /** magpie 的 auth 存储（社区插件同款 `client.auth.set`；不可用则只写旁路）。 */
+  const authSet = typeof input?.client?.auth?.set === 'function' ? input.client.auth.set : undefined
+  const saveAuth = async (auth) => {
+    try {
+      await authSet?.({ path: { id: PROVIDER }, body: auth })
+    } catch { /* magpie 存储失败不阻断：旁路已有兜底 */ }
+  }
+  /** getAuth 的安全包装（未登录/异常 → undefined，不抛）。 */
+  const safeGetAuth = async (getAuth) => {
+    try {
+      return typeof getAuth === 'function' ? await getAuth() : undefined
+    } catch {
+      return undefined
+    }
+  }
 
-  /** 请求体里的 model 是 `dsh-hub/<channel>/<model>`；拆出渠道。 */
+  /** 请求体里的 model 是 `<channel>/<model>`（可能带供应商前缀）；拆出渠道。 */
   const resolve = (modelId) => {
     const raw = String(modelId ?? '')
     const parts = raw.split('/')
-    // 兼容「只写了 channel/model」（不带供应商前缀）的历史选择
     const channelId = parts.length >= 2 ? parts[parts.length - 2] : ''
     const inner = parts[parts.length - 1] ?? ''
     const channel = CHANNELS.find((c) => c.id === channelId)
@@ -204,17 +265,12 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
 
     auth: {
       provider: PROVIDER,
-      // 每渠道一个登录入口 —— 用户按需逐个登（与 ofm 的控制台集中登录不同，
-      // 各渠道登录方式不同：OAuth / 扫码 / 短信，合并不到一个按钮里）。
-      //
-      // ⚠️ 约定（对齐 ofm 的 `authorizeConsole`）：`authorize()` 必须**立刻**返回
-      //    `{ url, method, callback }` —— 不要在这里 await 用户完成登录，否则
-      //    magpie 在等 authorize 返回、用户却在等浏览器打开，双向死锁。
-      //    真正等待登录完成的是 `callback()`：magpie 打开 url 之后才调它。
-      //
-      // 渠道统一契约：`beginLogin(openBrowser)` → `{ url, result }`
-      //   - `url` 立刻可用（授权页 / 本地载体页）
-      //   - `result` 兑现最终凭据（Promise）
+      // magpie 在到期前 LEAD 调 refresh（多账号时按各账号自己的 auth 调）
+      refreshLead: REFRESH_LEAD_MS,
+
+      // 每渠道一个登录入口。⚠️ 约定（对齐社区插件）：authorize() 必须**立刻**
+      // 返回 { url, method, callback } —— 在这里 await 用户完成登录会与 magpie
+      // 双向死锁；真正等登录的是 callback()。渠道契约 beginLogin() → { url, result }。
       methods: CHANNELS.map((channel) => ({
         type: 'oauth',
         label: `登录 ${channel.displayName}`,
@@ -223,22 +279,38 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
           return {
             url: started.url,
             method: 'auto',
-            instructions: `在打开的页面里完成 ${channel.displayName} 登录，本窗口会自动继续。`,
+            instructions: started.instructions
+              ?? `在打开的页面里完成 ${channel.displayName} 登录，本窗口会自动继续。`,
             async callback() {
               const credential = await started.result
-              credentials.set(channel.id, credential)
-              saveCredential(channel.id, credential)
-              return { type: 'success', key: channel.id, metadata: { channel: channel.id } }
+              const expires = expiresMsOf(credential)
+              // 双写：账号槽（主，magpie 按 auth.channel 归属这个账号）+ 旁路（兜底）
+              const auth = {
+                type: 'success',
+                channel: channel.id,
+                ...credential,
+                ...(expires !== undefined ? { expires } : {}),
+                accountId: channel.displayName,
+              }
+              writeSidecar(channel, { type: 'oauth', channel: channel.id, ...credential })
+              await saveAuth(auth)
+              return auth
             },
           }
         },
       })),
 
-      async loader() {
+      /**
+       * 按账号发请求：`getAuth()` 拿**当前账号槽**的 auth。
+       *
+       * - auth 属于目标渠道 → 用它（同渠道多账号：magpie 换槽即换号）；
+       * - auth 属于**别的**渠道（多渠供应商轮到别的账号）或读不到 →
+       *   旁路兜底（旁路 = 最近一次成功使用的该渠道凭据）；
+       * - 都没有 → 明确的未登录响应（不炸会话）。
+       */
+      async loader(getAuth) {
         return {
-          // ⚠️ baseURL 不能是空串：magpie 会在发请求前据此判「无处可发」
-          //    （症状：`provider test` 报 "nowhere to send its requests"）。
-          //    这里只是占位 —— 真正的上游地址在下面的 fetch 里按渠道前缀改写。
+          // ⚠️ baseURL 不能是空串：magpie 会据此判「无处可发」；真正上游在 fetch 里改写。
           baseURL: PLACEHOLDER_BASE,
           async fetch(input, init) {
             let body
@@ -254,129 +326,84 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
                 { status: 404 },
               )
             }
-            const credential = await ensure(hit.channel)
+            const auth = await safeGetAuth(getAuth)
+            let credential
+            if (authOfChannel(auth, hit.channel)) {
+              credential = await ensureAuth(hit.channel, auth)
+            } else {
+              try {
+                credential = await ensure(hit.channel)
+              } catch (error) {
+                return Response.json(
+                  { error: { type: 'authentication_error', message: error.message } },
+                  { status: 401 },
+                )
+              }
+            }
             // ⚠️ 发给上游的 model 必须**去掉**渠道前缀
             const upstreamBody = { ...body, model: hit.model }
-            // 注入 `renew`：让渠道自己在 401/4xx 时判断「续期一次再重发」有没有意义
-            //（缺口 4 的闭环）。判据在渠道侧，聚合层只提供续期能力。
-            // ⚠️ 这里必须传**硬**续期（让异常透出来）：渠道要靠它区分
-            //    `unreadable`（续期没成功）与 `unchanged`（续期成功但逐字节没变）——
-            //    两者的用户指引完全不同。若传软续期（吞异常、交回原凭据），指纹必然
-            //    相同 ⇒ 四态永远退化成 `unchanged`，会把「续期失败」误报成
-            //    「重登也没用，去查订阅」，把用户引向完全错误的方向。
-            //    `ensure()` 那条路（请求前的临期续期）才用软续期。
             const response = await hit.channel.chat(credential, {
               body: upstreamBody,
               signal: init?.signal,
-              // ⚠️ **硬**续期（异常透传）：渠道要靠它区分「续期没成功」与
-              //    「续期成功但没变化」。走聚合层的去重闸（gatedRenew）——
-              //    并发 401 时共享同一个在途续期，不重复消费 refresh_token。
+              // **硬**续期（异常透传）：渠道靠它区分「续期没成功」与「续期成功但没变」；
+              // 走凭据身份键控的去重闸（同账号并发共享，多账号不串号）。
               renew: (current) => gatedRenew(hit.channel, current),
               // MiniMax 国际版的可选绕行 IP（其余渠道忽略该字段）
               xff: minimaxXff,
             })
-            // 流式（SSE）与 JSON 都原样透传
+            // 续期后渠道拿到新凭据时同步双写（chat 的 renew 返回值不经手，这里
+            // 由 gatedRenew 内部的 writeSidecar 完成；账号槽由 magpie refresh 兜）
             return response
           },
         }
       },
 
       /**
-       * 用量卡（magpie 的 usage 钩子）：**到期分桶**进 windows。
-       *
-       * 渠道有 `usage()` 的（accio / minimaxintl）→ 每个额度桶一根条
-       * （name 带到期日、resetsAt 带时刻）；没有的（officeace / astudio）
-       * → 一根登录状态条。查询失败**不吞**：带原因显示，不退化成「已登录」。
+       * 用量卡：**按账号**（getAuth 的渠道）出该渠道的桶；读不到账号时
+       * 退回「旁路口径的全渠道扫」（迁移前/异常路径的行为保持不变）。
        */
-      async usage() {
+      async usage(getAuth) {
+        const auth = await safeGetAuth(getAuth)
+        const channel = CHANNELS.find((c) => authOfChannel(auth, c))
+        if (channel !== undefined) {
+          const credential = await ensureAuth(channel, auth)
+          return { plan: PROVIDER_NAME, windows: await usageWindowsOf(channel, credential) }
+        }
         const windows = []
-        for (const channel of CHANNELS) {
-          if (!signedIn(channel)) continue
-          const credential = credentialOf(channel)
-          if (typeof channel.usage === 'function') {
-            try {
-              const rows = await channel.usage(credential, { xff: minimaxXff })
-              if (Array.isArray(rows) && rows.length > 0) {
-                windows.push(...rows)
-                continue
-              }
-            } catch (error) {
-              windows.push({
-                name: channel.displayName,
-                used: 0,
-                display: `额度查询失败：${error instanceof Error ? error.message : String(error)}`,
-              })
-              continue
-            }
-          }
-          windows.push({
-            name: channel.displayName,
-            used: 0,
-            display: channel.expired?.(credential) ? '已过期，请重新登录' : '已登录',
-          })
+        for (const each of CHANNELS) {
+          if (!signedIn(each)) continue
+          windows.push(...await usageWindowsOf(each, sidecarCredentialOf(each)))
         }
         return { plan: PROVIDER_NAME, windows }
       },
 
-      // magpie 的显式「续期」入口：**硬**续期（失败如实报 failed），
-      // 与 ensure() 里的软续期分工不同，但**共用同一个去重闸与同一份落盘纪律**
-      // —— 判据只有一份，避免两处漂移。
-      async refresh() {
-        let ok = true
-        for (const channel of CHANNELS) {
-          if (!signedIn(channel)) continue
-          try {
-            await gatedRenew(channel, credentialOf(channel))
-          } catch {
-            // ⚠️ 不静默：失败必须让调用方看到（refresh_token 一次性，丢了只能重登）
-            ok = false
-          }
-        }
-        return { type: ok ? 'success' : 'failed' }
+      // magpie 的显式/提前续期入口：**按 auth.channel 分发**（多账号各续各的）。
+      // astudio 无 refresh_token → 返回 undefined（magpie 保持原登录不动）。
+      async refresh(auth) {
+        const channel = CHANNELS.find((c) => authOfChannel(auth, c))
+        if (channel === undefined) return undefined
+        if (identityOf(auth) === '') return undefined
+        const next = await gatedRenew(channel, auth) // 失败抛出，magpie 如实记失败
+        await saveAuth(next)
+        return next
       },
 
       /**
-       * 每日签到（magpie 的 checkin 钩子）：**按渠道分发**，汇总成一份结果。
-       *
-       * 返回形状对齐社区插件的词汇表（magpie 把它落到用量卡上）：
-       * `outcome ∈ claimed / done / inactive / ineligible / failed`，
-       * 另附 `channels[]` 保留逐渠道明细（多渠供应商只有我们能给）。
-       * 汇总规则：任一 claimed ⇒ claimed（credit 求和）；否则全部 done ⇒ done；
-       * 任一 failed ⇒ failed；否则 inactive。officeace / accio 没有签到端点，
-       * 直接跳过（不占「失败」名额）。
+       * 每日签到：**按账号**（magpie 对每个账号每天调一次 —— 社区插件同款）。
+       * 该渠道无签到端点 → inactive；读不到账号 → 旁路口径全渠道扫（兼容）。
+       * 返回词汇表：claimed / done / inactive / ineligible / failed（+credit/streak）。
        */
-      async checkin() {
-        const channels = []
-        let creditSum = 0
-        let hasCredit = false
-        let claimed = 0
-        let done = 0
-        let failed = 0
-        for (const channel of CHANNELS) {
-          if (typeof channel.checkin !== 'function') continue // 无签到端点的渠道
-          if (!signedIn(channel)) continue // 未登录的渠道不签（ magpie 会在登录后次日自动补）
-          try {
-            const outcome = await channel.checkin(credentialOf(channel), { xff: minimaxXff })
-            channels.push({ channel: channel.displayName, ...outcome })
-            if (outcome.outcome === 'claimed') { claimed += 1; if (Number.isFinite(outcome.credit)) { creditSum += outcome.credit; hasCredit = true } }
-            else if (outcome.outcome === 'done') done += 1
-            else if (outcome.outcome === 'failed') failed += 1
-          } catch (error) {
-            failed += 1
-            channels.push({ channel: channel.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
+      async checkin(getAuth) {
+        const auth = await safeGetAuth(getAuth)
+        const channel = CHANNELS.find((c) => authOfChannel(auth, c))
+        if (channel !== undefined) {
+          if (typeof channel.checkin !== 'function') {
+            return { outcome: 'inactive', message: `${channel.displayName} 无每日签到` }
           }
+          const credential = await ensureAuth(channel, auth)
+          return { channel: channel.displayName, ...await channel.checkin(credential, { xff: minimaxXff }) }
         }
-        const parts = channels.map((c) => `${c.channel}：${c.message ?? (c.outcome === 'claimed' ? `已领 ${c.credit ?? ''}` : c.outcome)}`)
-        const outcome = claimed > 0 ? 'claimed'
-          : failed > 0 ? 'failed'
-            : done > 0 && done === channels.length ? 'done'
-              : channels.length > 0 ? 'done' : 'inactive'
-        return {
-          outcome,
-          ...(hasCredit ? { credit: creditSum } : {}),
-          ...(parts.length > 0 ? { message: parts.join('；') } : {}),
-          channels,
-        }
+        return legacyCheckinAll()
       },
     },
 
@@ -386,5 +413,62 @@ export const DshProvidersHubPlugin = async (_input, options = {}) => {
         return discoverModels(provider.models)
       },
     },
+  }
+
+  /** 单渠道的用量窗口（有 usage() 出分桶，没有出登录状态条；失败带原因）。 */
+  async function usageWindowsOf(channel, credential) {
+    if (typeof channel.usage === 'function') {
+      try {
+        const rows = await channel.usage(credential, { xff: minimaxXff })
+        if (Array.isArray(rows) && rows.length > 0) return rows
+      } catch (error) {
+        return [{
+          name: channel.displayName,
+          used: 0,
+          display: `额度查询失败：${error instanceof Error ? error.message : String(error)}`,
+        }]
+      }
+    }
+    return [{
+      name: channel.displayName,
+      used: 0,
+      display: channel.expired?.(credential) ? '已过期，请重新登录' : '已登录',
+    }]
+  }
+
+  /** 旁路口径的全渠道签到（无账号上下文时的兼容路径）。 */
+  async function legacyCheckinAll() {
+    const channels = []
+    let creditSum = 0
+    let hasCredit = false
+    let claimed = 0
+    let done = 0
+    let failed = 0
+    for (const channel of CHANNELS) {
+      if (typeof channel.checkin !== 'function') continue
+      if (!signedIn(channel)) continue
+      try {
+        const outcome = await channel.checkin(sidecarCredentialOf(channel), { xff: minimaxXff })
+        channels.push({ channel: channel.displayName, ...outcome })
+        if (outcome.outcome === 'claimed') {
+          claimed += 1
+          if (Number.isFinite(outcome.credit)) { creditSum += outcome.credit; hasCredit = true }
+        } else if (outcome.outcome === 'done') done += 1
+        else if (outcome.outcome === 'failed') failed += 1
+      } catch (error) {
+        failed += 1
+        channels.push({ channel: channel.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    const parts = channels.map((c) => `${c.channel}：${c.message ?? (c.outcome === 'claimed' ? `已领 ${c.credit ?? ''}` : c.outcome)}`)
+    const outcome = claimed > 0 ? 'claimed'
+      : failed > 0 ? 'failed'
+        : channels.length > 0 ? 'done' : 'inactive'
+    return {
+      outcome,
+      ...(hasCredit ? { credit: creditSum } : {}),
+      ...(parts.length > 0 ? { message: parts.join('；') } : {}),
+      channels,
+    }
   }
 }

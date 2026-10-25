@@ -66,16 +66,21 @@ test('authorize 立刻返回（不 await 用户登录）', async () => {
   }
 })
 
-test('callback 兑现凭据、返回 success 并落盘', async () => {
+test('callback 兑现凭据：success + channel 归属 + 双写落盘', async () => {
   const plugin = await build()
   const { loadCredential } = await import('../src/shared.mjs')
   for (const method of plugin.auth.methods) {
     const handle = await method.authorize()
     const outcome = await handle.callback()
     assert.equal(outcome.type, 'success')
-    assert.equal(typeof outcome.key, 'string')
-    assert.ok(outcome.key.length > 0)
-    assert.notEqual(loadCredential(outcome.key), null, `${outcome.key}: 凭据未落盘`)
+    // ⚠️ channel 字段是账号槽归属的唯一判据（loader/refresh/checkin 都按它分发）
+    assert.ok(typeof outcome.channel === 'string' && outcome.channel.length > 0,
+      `${method.label}: 登录回调缺 channel 字段`)
+    assert.ok(REGISTERED_CHANNELS.some((c) => c.id === outcome.channel), `${method.label}: channel 未注册`)
+    // 旁路双写（兜底路径的凭据源）
+    assert.notEqual(loadCredential(outcome.channel), null, `${outcome.channel}: 旁路凭据未落盘`)
+    // FAKE 凭据字段被完整带进账号槽（magpie 存的就是这个对象）
+    assert.equal(outcome.fake, true, `${method.label}: 凭据字段未随账号槽存储`)
   }
 })
 

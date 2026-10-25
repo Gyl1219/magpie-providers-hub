@@ -344,16 +344,20 @@ async function doRefresh(current, persist) {
  *
  * ⚠️ refresh_token 是**一次性**的：两个并发请求同时看到临期 → 各自发一次 STS 续期 →
  *    第二次去消费已被消费的 refresh_token → 凭据**永久失效**，只能重新登录。
- *    故同一渠道同一时刻只允许一个在途续期，其余调用方共享它的结果
- *    （对齐 DSH 的 `refreshInFlight`）。
+ *    故同一凭据同一时刻只允许一个在途续期，其余调用方共享它的结果。
+ *
+ * ⚠️⚠️ 键必须是**凭据身份**（refreshToken）而不是渠道 id：账号池下同渠道
+ *    会有多个账号并发续期 —— 按渠道键控会让账号 B 共享账号 A 的续期结果
+ *    （拿到别人的凭据，且 B 的 token 根本没被消费）。聚合层 gatedRenew 同款键控。
  */
 const refreshInFlight = new Map()
 
 function refreshOnce(current, persist) {
-  const pending = refreshInFlight.get(PROVIDER)
+  const key = `${PROVIDER}\n${current?.refreshToken ?? ''}`
+  const pending = refreshInFlight.get(key)
   if (pending !== undefined) return pending
-  const task = doRefresh(current, persist).finally(() => refreshInFlight.delete(PROVIDER))
-  refreshInFlight.set(PROVIDER, task)
+  const task = doRefresh(current, persist).finally(() => refreshInFlight.delete(key))
+  refreshInFlight.set(key, task)
   return task
 }
 
