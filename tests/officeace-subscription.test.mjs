@@ -151,14 +151,14 @@ test('订阅分桶：套餐桶（.trial 不带到期）+ 活动桶 + 过期桶�
     const pro = windows.find((w) => w.name.includes('专业版'))
     assert.equal(pro.used, 25, 'used = current/sku_value 百分比')
     assert.equal(pro.display, '7500 / 10000')
-    assert.ok(pro.resetsAt !== undefined, '套餐桶带 resetsAt（重置前提醒吃它）')
+    assert.ok(pro.runsOutAt !== undefined, '套餐桶带 runsOutAt（作废语义，紧急条吃它）')
     const trial = windows.find((w) => w.name.includes('试用'))
     assert.equal(trial.resetsAt, undefined, '.trial 后缀不带到期（试用不过期语义，照抄 DSH 判据）')
     const expired = windows.find((w) => w.name.includes('已过期'))
     assert.equal(expired.aside, true, '已过期桶收进折叠区')
     const bonus = windows.find((w) => w.name.includes('每日签到'))
     assert.equal(bonus.display, '600 / 1000')
-    assert.ok(bonus.resetsAt !== undefined, '活动桶的当日 23:59:59 作废时间进 resetsAt')
+    assert.ok(bonus.runsOutAt !== undefined, '活动桶的当日作废时间进 runsOutAt')
   } finally {
     stub.restore()
   }

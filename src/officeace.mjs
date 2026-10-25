@@ -568,8 +568,9 @@ export async function fetchUsage(credential) {
       windows.push({
         name: `${sku.sku_name ?? '套餐'} · 剩 ${remaining}`,
         used: Math.min(100, Math.max(0, Math.round((used / total) * 100))),
-        // 试用桶不带到期（试用不过期）；到期 ISO → resetsAt（重置前提醒吃它）
-        ...(isTrial ? {} : expiresAt !== null ? { resetsAt: new Date(expiresAt).toISOString() } : {}),
+        // 试用桶不带到期（试用不过期）；配额到期 = **作废**语义 → runsOutAt
+        //（magpie 渲染「N 积分 将于 X 过期」），不用 resetsAt（「重置于」误导）
+        ...(isTrial ? {} : expiresAt !== null ? { runsOutAt: new Date(expiresAt).toISOString(), runsOut: remaining } : {}),
         display: `${remaining} / ${total}`,
         // 已过期的桶收进折叠区（主环位留给活着的桶）
         ...(expiresAt !== null && !isTrial && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
@@ -585,7 +586,8 @@ export async function fetchUsage(credential) {
     windows.push({
       name: `${bonus.activity_name ?? '活动奖励'} · 剩 ${remaining}`,
       used: Math.min(100, Math.round(((points - remaining) / points) * 100)),
-      ...(expiresAt !== null ? { resetsAt: new Date(expiresAt).toISOString() } : {}),
+      // 活动桶当日作废 —— 同样是 runsOutAt（不是重置）
+      ...(expiresAt !== null ? { runsOutAt: new Date(expiresAt).toISOString(), runsOut: remaining } : {}),
       display: `${remaining} / ${points}`,
       ...(expiresAt !== null && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
     })

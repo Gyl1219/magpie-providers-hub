@@ -99,10 +99,10 @@ test('tierSummarize：≤3 桶原样返回；>3 桶汇总成 临期(指针)/长�
   const pointer = out.find((w) => w.name.startsWith('临期'))
   // 指针桶 = 最早到期的那一批，amount 只算它自己（数字必须如实）
   assert.equal(pointer.amount, 500)
-  assert.equal(pointer.resetsAt, '2026-10-26T14:47:00Z')
+  assert.equal(pointer.runsOutAt, '2026-10-26T14:47:00Z')
   const longTerm = out.find((w) => w.name.includes('长期'))
   assert.equal(longTerm.amount, 200 + 200 + 200 + 500 + 200 + 200, '其余 6 批合计')
-  assert.equal(longTerm.resetsAt, '2026-10-26T14:58:00Z', '长期桶的 resetsAt = 其中最早（烧桶一死自动转正）')
+  assert.equal(longTerm.runsOutAt, '2026-10-26T14:58:00Z', '长期桶的 runsOutAt = 其中最早（烧桶一死自动转正）')
   const permanent = out.find((w) => w.name.includes('永久'))
   assert.equal(permanent.amount, 10550)
   assert.equal(permanent.resetsAt, undefined)

@@ -666,7 +666,9 @@ async function usage(product, credential) {
       used: 0,
       amount: b.remaining,
       display: `${Math.round(b.remaining * 100) / 100}`,
-      ...(b.expiresAtMs !== undefined ? { resetsAt: new Date(b.expiresAtMs).toISOString() } : {}),
+      // ⚠️ 批次是**作废**语义（过期即没了，不会回满）—— 挂 runsOutAt/runsOut
+      //（magpie 渲染「N 积分 将于 X 过期」紧急条），不挂 resetsAt（「重置于」误导）
+      ...(b.expiresAtMs !== undefined ? { runsOutAt: new Date(b.expiresAtMs).toISOString(), runsOut: b.remaining } : {}),
     })
   }
   if (windows.length === 0 && total > 0) {

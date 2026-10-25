@@ -943,7 +943,7 @@ export const astudioChannel = {
       const usedPercent = bucket.poolTotal > 0
         ? Math.max(0, Math.min(100, Math.round(((bucket.poolTotal - bucket.remaining) / bucket.poolTotal) * 100)))
         : (bucket.remaining > 0 ? 0 : 100)
-      const resetsAt = bucket.expireMs !== undefined ? new Date(bucket.expireMs).toISOString() : undefined
+      const runsOutAt = bucket.expireMs !== undefined ? new Date(bucket.expireMs).toISOString() : undefined
       const expiryShort = bucket.expireRaw !== ''
         ? bucket.expireRaw.replace(/^(\d{4})-(\d{2})-(\d{2}).*/, '$2-$3')
         : undefined
@@ -951,7 +951,8 @@ export const astudioChannel = {
         // 渠道前缀由聚合层统一加（usageWindowsOf）—— 这里只写桶本身的语义
         name: `${bucket.label} · ${bucket.band}`,
         used: usedPercent,
-        ...(resetsAt !== undefined ? { resetsAt } : {}),
+        // 池到期 = **作废**语义 → runsOutAt/runsOut（magpie「N 积分 将于 X 过期」紧急条）
+        ...(runsOutAt !== undefined ? { runsOutAt, runsOut: bucket.remaining } : {}),
         // 剩 0 的桶收进折叠区（aside）：主环位留给有值的桶
         ...(bucket.remaining <= 0 ? { aside: true } : {}),
         display: `剩余 ${bucket.remaining}${expiryShort !== undefined ? ` · ${expiryShort} 到期` : ''}`,

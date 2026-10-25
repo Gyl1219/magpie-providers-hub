@@ -225,38 +225,49 @@ async function discoverModels(fallback) {
  * - 只动**可求和**的桶（amount 为数字）；状态条/失败条原样透传。
  * - 可求和的桶 ≤ 3 时**原样返回**（小组数渠道保留原始命名，信息更足）。
  * - 临期 = 最早到期的**那一批**（amount 只算它自己 —— 指针桶数字必须如实）；
- *   长期 = 其余有到期批次合计（resetsAt = 其中最早 —— 烧桶一死自动转正）；
+ *   长期 = 其余有到期批次合计（到期时刻 = 其中最早 —— 烧桶一死自动转正）；
  *   永久 = 无到期批次合计。
+ *
+ * ⚠️ 到期字段输出 **runsOutAt + runsOut**（作废语义，magpie 渲染「N 积分
+ *   将于 X 过期」紧急条），**不用 resetsAt**（「重置于」暗示会回满 ——
+ *   这些批次过期即作废，语义相反）。输入侧 runsOutAt ?? resetsAt 都认
+ *   （resetsAt 是旧形态兼容）。
  */
 export function tierSummarize(rows) {
   const summable = rows.filter((r) => typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0)
   if (summable.length <= 3) return rows
   const rest = rows.filter((r) => !(typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0))
-  const permanent = summable.filter((r) => r.resetsAt === undefined)
+  const expiryOf = (r) => r.runsOutAt ?? r.resetsAt
+  const permanent = summable.filter((r) => expiryOf(r) === undefined)
   const expiring = summable
-    .filter((r) => r.resetsAt !== undefined)
-    .sort((a, b) => Date.parse(a.resetsAt) - Date.parse(b.resetsAt))
+    .filter((r) => expiryOf(r) !== undefined)
+    .sort((a, b) => Date.parse(expiryOf(a)) - Date.parse(expiryOf(b)))
   const out = []
   if (expiring.length > 0) {
     const pointer = expiring[0]
     out.push({
+      ...pointer,
       name: `临期 · 剩 ${pointer.amount}`,
-      used: 0,
-      amount: pointer.amount,
-      display: `剩 ${pointer.amount}`,
-      resetsAt: pointer.resetsAt,
+      runsOutAt: expiryOf(pointer),
+      runsOut: pointer.amount,
     })
+    delete out[out.length - 1].resetsAt
   }
   const longTerm = expiring.slice(1)
   if (longTerm.length > 0) {
+    const earliest = longTerm[0]
     const amount = longTerm.reduce((s, r) => s + r.amount, 0)
     out.push({
+      ...earliest,
       name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
-      used: 0,
       amount,
       display: `剩 ${amount} · ${longTerm.length} 批`,
-      resetsAt: longTerm[0].resetsAt,
+      runsOutAt: expiryOf(earliest),
+      // ⚠️ runsOut 必须是**那一批**的量（最早时刻真正作废的）——
+      //    写成合计会把「6 批不同时刻作废」说成「一次全没」
+      runsOut: earliest.amount,
     })
+    delete out[out.length - 1].resetsAt
   }
   if (permanent.length > 0) {
     const amount = permanent.reduce((s, r) => s + r.amount, 0)
