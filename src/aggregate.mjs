@@ -29,6 +29,7 @@ import { minimaxintlChannel } from './minimaxintl.mjs'
 import { accioChannel } from './accio.mjs'
 import { autoclawChannel, autoclawIntlChannel } from './autoclaw.mjs'
 import { loomyChannel } from './loomy.mjs'
+import { startSelfRegister } from './self-register.mjs'
 import { sanitizeXff } from './minimax-transport.mjs'
 
 const PROVIDER = 'providers-hub'
@@ -298,6 +299,30 @@ export function tierSummarize(rows) {
 
 export const DshProvidersHubPlugin = async (input, options = {}) => {
   const openBrowser = typeof options.openBrowser === 'function' ? options.openBrowser : undefined
+  /**
+   * 自注册：把本插件写进 magpie 的本地市场缓存（`~/.cache/magpie/plugin-market.json`）。
+   *
+   * 没有条目时插件卡片的标题退回包名（`magpie-providers-hub`）且没有「源码」按钮。
+   * magpie 只在启动时整体重写这个缓存、静默期间不碰（模板作者实测），故写一次即稳、
+   * 绝不轮询。移植自 MYCF711/magpie-plugin-template（MIT），见 src/self-register.mjs 头注。
+   */
+  startSelfRegister({
+    package: 'magpie-providers-hub',
+    name: 'Providers Hub',
+    providers: [PROVIDER],
+    community: true,
+    summary: {
+      en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one provider aggregating 7 channels — OfficeAce, AStudio, MiniMax Code Intl, Accio, AutoClaw CN/Intl, Loomy. Runs without DSH.',
+      zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：一个供应商聚合七个渠道——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy，不依赖 DSH 运行。',
+    },
+  }, {
+    configDir: typeof input?.directory === 'string' ? input.directory : undefined,
+    log: (msg) => {
+      try {
+        input?.client?.app?.log?.({ service: 'providers-hub', level: 'info', message: msg })
+      } catch { /* 日志失败不影响注册 */ }
+    },
+  })
   /**
    * MiniMax 国际版的可选绕行 IP（`magpie plugin options providers-hub
    * '{"minimaxXff":"<海外IP>"}'` 设置）。⚠️ 默认关闭；`sanitizeXff` 白名单

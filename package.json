@@ -22,7 +22,14 @@
     "provider",
     "providers-hub",
     "officeace",
-    "astudio"
+    "astudio",
+    "opencode",
+    "opencode-plugin",
+    "auth",
+    "minimax",
+    "accio",
+    "autoclaw",
+    "loomy"
   ],
   "author": "JetLi (原项目 https://github.com/iJetLi/dsh-providers-hub) — 本仓库为第三方 Magpie 适配",
   "license": "MIT",
