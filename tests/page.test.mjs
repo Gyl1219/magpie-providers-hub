@@ -15,6 +15,25 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (p) => readFileSync(join(ROOT, p), 'utf8')
 
+test('页面不自带主题：不写背景/字体族/字号，颜色只取 --magpie-* 变量', () => {
+  const html = read('page/index.html')
+  const style = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''
+  // bridge 注入 :where() 零权重样式表（字体/颜色/标题/按钮/表格），页面不该覆盖它
+  for (const forbidden of [/font-family\s*:/i, /^\s*body\s*\{/m, /background\s*:/i, /prefers-color-scheme/i]) {
+    assert.doesNotMatch(style, forbidden, `页面不该自带主题样式：${forbidden}`)
+  }
+  // 要写颜色就必须用 magpie 的主题变量（深浅色自动跟随），不许硬编码 hex
+  const hexes = style.match(/#[0-9a-f]{3,8}\b/gi) ?? []
+  const varColors = style.match(/var\(--magpie-[a-z0-9-]+/gi) ?? []
+  assert.ok(hexes.length === 0 || varColors.length > 0,
+    `颜色应取 var(--magpie-*)，发现硬编码：${hexes.join(', ')}`)
+  // 硬编码 hex 只允许出现在 var() 的兜底位（var(--x, #fff)）
+  for (const m of style.matchAll(/(?<!var\([^)]*)#[0-9a-f]{3,8}\b/gi)) {
+    const before = style.slice(Math.max(0, m.index - 60), m.index)
+    assert.ok(/var\(--magpie-[a-z0-9-]+,\s*$/.test(before), `硬编码颜色 ${m[0]} 不在 var() 兜底位`)
+  }
+})
+
 test('package.json 声明了侧边栏页面，文件存在', () => {
   const pkg = JSON.parse(read('package.json'))
   assert.ok(pkg.magpie, '缺 magpie 段')

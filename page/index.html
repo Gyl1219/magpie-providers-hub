@@ -3,27 +3,31 @@
 <head>
   <meta charset="utf-8">
   <title>Providers Hub</title>
-  <!-- 页面跑在沙盒里（connect-src 'none'）：没有 fetch，只能加载本文件夹的 JS。
-       实时数据由插件宿主（Bun，有文件权限）写进 snapshot.js，见 src/aggregate.mjs 的 writeSnapshot。
-       ⚠️ 样式一律沿用 magpie 注入的默认样式（与 Jet Hub 页面同款：纯语义化的
-       h2/p.hint/table/label.row/button，不写自己的配色、不写 <style> 里的主题色），
-       否则在 magpie 里会像一张外来页面。仅分档胶囊需要一丁点颜色语义，
-       用系统语义色 + currentColor 派生，跟随 magpie 的深浅色主题。 -->
+  <!-- 页面跑在沙盒 iframe 里（sandbox="allow-scripts"，connect-src 'none'）：没有 fetch，
+       只能加载本文件夹的 JS。实时数据由插件宿主写进 snapshot.js（见 src/aggregate.mjs writeSnapshot）。
+       ⚠️ 样式纪律（docs/subsystems/plugin-runtime.md + magpie 的 bridge.js）：
+       bridge 会注入一份 :where() 零权重的样式表 —— 字体、颜色、标题、按钮、输入框、
+       表格全部沿用 magpie 的观感，主题色以 --magpie-<token> 变量提供给页面。
+       故本页**只写 bridge 不管的那部分**（分档胶囊、数字右对齐），且颜色一律取
+       var(--magpie-*) 变量（深浅色主题自动跟随），绝不硬编码配色、不自带背景/字体。 -->
   <script src="_magpie/bridge.js"></script>
   <script src="snapshot.js"></script>
   <script src="app.js" defer></script>
   <style>
-    /* 只做「语义色胶囊」：不加背景、不改字体族与字号 —— 排版全部交给 magpie。 */
-    .pill { display: inline-block; margin: 0 6px 6px 0; padding: 0 8px;
-            border: 1px solid currentColor; border-radius: 999px;
-            font-size: .85em; line-height: 1.6; color: inherit; opacity: .85; }
-    .pill.hot { color: #e5484d; }   /* 临期：最早到期、该先烧的那桶 */
-    .pill.long { color: #d97706; }  /* 长期 */
-    .pill.perm { color: #2f9e44; }  /* 永久 */
-    .pill.dead { text-decoration: line-through; opacity: .45; } /* 已耗尽 */
+    .pill {
+      display: inline-block; margin: 0 6px 6px 0; padding: 0 8px;
+      border: 1px solid currentColor; border-radius: 999px;
+      font-size: .85em; line-height: 1.6; color: var(--magpie-muted, inherit);
+    }
+    .pill.hot { color: var(--magpie-red, #e5484d); }    /* 临期：最早到期、该先烧的那桶 */
+    .pill.long { color: var(--magpie-amber, #d97706); } /* 长期 */
+    .pill.perm { color: var(--magpie-green, #2f9e44); } /* 永久 */
+    .pill.dead { text-decoration: line-through; opacity: .5; color: var(--magpie-faint, inherit); }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
-    .muted { opacity: .55; }
-    .ok { color: #2f9e44; } .bad { color: #e5484d; }
+    .muted { color: var(--magpie-muted, inherit); }
+    .ok { color: var(--magpie-green, #2f9e44); }
+    .bad { color: var(--magpie-red, #e5484d); }
+    .warn { color: var(--magpie-amber, #d97706); }
   </style>
 </head>
 <body>
