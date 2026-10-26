@@ -143,6 +143,11 @@ async function fetchCatalog(credential) {
   for (const row of rows) {
     const id = typeof row === 'string' ? row : (typeof row?.id === 'string' ? row.id : '')
     if (id.length === 0) continue
+    // ⚠️ **账号部署过滤**：`/v2/models` 是全平台目录，本账号未部署的模型
+    //    推理端回 HTTP 200/404 + `ModelArts.81009 Invalid model`（选到就整轮失败）。
+    //    判据 = 在 V11 倍率表里（实测 9 条里 8 条可用）或下面的已验证白名单
+    //    （倍率表只覆盖已开通的计费项，少数免费/预览模型不在表里但能跑）。
+    if (!verifiableDeployed(id) && !rates.has(id)) continue
     const baseName = typeof row?.name === 'string' && row.name.length > 0 ? row.name : id
     const rate = rates.get(id)
     models[id] = {
@@ -160,6 +165,21 @@ async function fetchCatalog(credential) {
   }
   return models
 }
+
+/**
+ * 已真机验证「本账号能跑、但不在 V11 倍率表里」的模型（免费/预览计费项不入表）。
+ * ⚠️ 2026-10-26 实测 26 个目录项逐个打推理端得出。
+ * `glm-5.3-flash` **不在这里**：它在倍率表里，但本账号推理端 404（ModelArts.81009）——
+ * 「有倍率」不等于「已部署」，见 catalog 的降级说明。
+ */
+const DEPLOYED_NO_RATE = new Set([
+  'deepseek-v4-flash',
+  'deepseek-v4.1-flash-0930',
+  'qwen3-30b-a3b',
+  'qwen3-32b',
+  'kimi-k2.6',
+])
+const verifiableDeployed = (id) => DEPLOYED_NO_RATE.has(id)
 
 async function registerState() {
   const r = await fetch(`${CLAW_BASE}${STATE_PATH}`, {

@@ -457,6 +457,20 @@ const readNumber = (v) => {
  * 每日桶 resetsAt = 下一北京午夜（每日 5000 未用完随日重置）、span 86400s；
  * 永久桶无到期。`balance` 缺失 ≠ 0（IKMCOO：不臆造 0），缺失时不出永久桶。
  */
+/**
+ * 额度分桶 → magpie windows。两池分开（用户明确要求：永久与每日分开计算）：
+ * 每日桶 resetsAt = 下一北京午夜（每日 5000 未用完随日重置）、span 86400s；
+ * 永久桶无到期。`balance` 缺失 ≠ 0（IKMCOO：不臆造 0），缺失时不出永久桶。
+ *
+ * ⚠️⚠️ **used 必须按真实消耗算**（MYCF711 模板实测纪律）：`used` 不只画进度条，
+ * 还是 magpie **路由排序的输入** —— 硬编码 0 = 满额，账号会排到队首，额度烧穿
+ * 的账号反而继续接活（用户真机报障：每日 5000 剩 3611 还显示「剩余 100%」）。
+ * 每日基数 5000 来自签到端点实测的 `dailyQuota`；上游若加赠导致 daily > 基数，
+ * 按钳制到 0 处理（不报负数）。渠道内部名不带 "Loomy ·" 前缀（聚合层统一加
+ * 渠道前缀 —— 内部再带就叠成 "Loomy (讯飞) · Loomy · …"）。
+ */
+const DAILY_QUOTA = 5000
+
 async function usage(credential) {
   const result = await pointsEnvelope(credential, '/points/records?pageNo=1&pageSize=1&recordType=all')
   if (!result.ok) {
@@ -465,16 +479,17 @@ async function usage(credential) {
   const data = typeof result.data === 'object' && result.data !== null ? result.data : {}
   const permanent = readNumber(data.balance)
   const daily = readNumber(data.dailyBalance) ?? 0
+  const dailyUsedPercent = Math.max(0, Math.min(100, Math.round(((DAILY_QUOTA - daily) / DAILY_QUOTA) * 100)))
   const windows = []
   if (permanent !== undefined) {
-    windows.push({ name: 'Loomy · 永久积分', used: 0, display: `剩余 ${permanent}` })
+    windows.push({ name: '永久积分', used: 0, display: `剩余 ${permanent}` })
   }
   // 每日池重置点 = 下一北京午夜（Asia/Shanghai），span 86400s 让 magpie 识别为周期窗口
   const nowBeijing = new Date(Date.now() + 8 * 3600_000)
   const nextMidnight = Date.UTC(nowBeijing.getUTCFullYear(), nowBeijing.getUTCMonth(), nowBeijing.getUTCDate() + 1) - 8 * 3600_000
   windows.push({
-    name: 'Loomy · 每日赠送',
-    used: 0,
+    name: '每日赠送',
+    used: dailyUsedPercent,
     span: 86_400,
     resetsAt: new Date(nextMidnight).toISOString(),
     display: `剩余 ${daily}`,

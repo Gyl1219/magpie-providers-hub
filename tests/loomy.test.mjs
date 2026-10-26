@@ -157,7 +157,7 @@ test('usage：两池分开（永久 balance 缺失不臆造 0）；每日桶带�
       match: '/points/records',
       respond: () => new Response(JSON.stringify({
         code: '000000',
-        data: { balance: 15000, dailyBalance: 4992, availableBalance: 19992 },
+        data: { balance: 15000, dailyBalance: 3611, availableBalance: 18611 },
       }), { status: 200 }),
     },
   ])
@@ -165,8 +165,10 @@ test('usage：两池分开（永久 balance 缺失不臆造 0）；每日桶带�
     const windows = await loomyChannel.usage(CRED)
     const permanent = windows.find((w) => w.name.includes('永久积分'))
     assert.equal(permanent.display, '剩余 15000')
+    assert.ok(!permanent.name.includes('Loomy ·'), '内部名不带渠道前缀（聚合层统一加，叠了会双前缀）')
     const daily = windows.find((w) => w.name.includes('每日赠送'))
-    assert.equal(daily.display, '剩余 4992')
+    assert.equal(daily.display, '剩余 3611')
+    assert.equal(daily.used, 28, 'used = (5000-3611)/5000 —— 路由排序输入，不能硬编码 0')
     assert.equal(daily.span, 86_400)
     const resetHour = new Date(daily.resetsAt).getUTCHours()
     assert.ok(resetHour === 16 || resetHour === 15, '每日池重置点应是北京午夜（UTC 15/16 时，视 DST）')
