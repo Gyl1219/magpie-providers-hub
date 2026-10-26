@@ -4,42 +4,33 @@
   <meta charset="utf-8">
   <title>Providers Hub</title>
   <!-- 页面跑在沙盒里（connect-src 'none'）：没有 fetch，只能加载本文件夹的 JS。
-       实时数据由插件宿主（Bun，有文件权限）写进 snapshot.js，见 src/aggregate.mjs 的 writeSnapshot。 -->
+       实时数据由插件宿主（Bun，有文件权限）写进 snapshot.js，见 src/aggregate.mjs 的 writeSnapshot。
+       ⚠️ 样式一律沿用 magpie 注入的默认样式（与 Jet Hub 页面同款：纯语义化的
+       h2/p.hint/table/label.row/button，不写自己的配色、不写 <style> 里的主题色），
+       否则在 magpie 里会像一张外来页面。仅分档胶囊需要一丁点颜色语义，
+       用系统语义色 + currentColor 派生，跟随 magpie 的深浅色主题。 -->
   <script src="_magpie/bridge.js"></script>
   <script src="snapshot.js"></script>
   <script src="app.js" defer></script>
   <style>
-    body { font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; padding: 20px 24px 40px; color: #1f2329; background: #fff; }
-    @media (prefers-color-scheme: dark) { body { color: #e6e8eb; background: #1b1d1f; } }
-    h2 { font-size: 15px; margin: 24px 0 6px; font-weight: 600; }
-    h2:first-of-type { margin-top: 4px; }
-    p.hint { font-size: 12px; opacity: .6; margin: 4px 0 10px; }
-    #summary { font-size: 12px; opacity: .65; margin-bottom: 4px; }
-    table { border-collapse: collapse; width: 100%; font-size: 13px; }
-    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(128,128,128,.18); vertical-align: top; }
-    th { font-weight: 600; opacity: .7; font-size: 12px; }
-    td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    .ok { color: #16a34a; } .warn { color: #d97706; } .bad { color: #dc2626; } .muted { opacity: .5; }
-    .pill { display: inline-block; padding: 0 7px; border-radius: 9px; font-size: 11px; line-height: 18px; margin: 0 4px 4px 0; border: 1px solid rgba(128,128,128,.3); }
-    .pill.hot { border-color: #dc2626; color: #dc2626; }
-    .pill.long { border-color: #d97706; color: #d97706; }
-    .pill.perm { border-color: #16a34a; color: #16a34a; }
-    .pill.dead { color: inherit; opacity: .45; text-decoration: line-through; }
-    label.row { display: flex; gap: 10px; align-items: center; margin: 10px 0; }
-    label.row span { width: 84px; flex: none; font-size: 13px; opacity: .75; }
-    input[type=text] { flex: 1; max-width: 320px; padding: 7px 9px; font-size: 13px; border: 1px solid rgba(128,128,128,.35); border-radius: 6px; background: transparent; color: inherit; }
-    button { padding: 7px 16px; font-size: 13px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
-    button:disabled { opacity: .5; cursor: default; }
-    #status { margin-left: 10px; font-size: 12px; }
-    .actions { margin-top: 14px; }
-    #snapAt { margin-top: 26px; font-size: 11px; opacity: .45; }
+    /* 只做「语义色胶囊」：不加背景、不改字体族与字号 —— 排版全部交给 magpie。 */
+    .pill { display: inline-block; margin: 0 6px 6px 0; padding: 0 8px;
+            border: 1px solid currentColor; border-radius: 999px;
+            font-size: .85em; line-height: 1.6; color: inherit; opacity: .85; }
+    .pill.hot { color: #e5484d; }   /* 临期：最早到期、该先烧的那桶 */
+    .pill.long { color: #d97706; }  /* 长期 */
+    .pill.perm { color: #2f9e44; }  /* 永久 */
+    .pill.dead { text-decoration: line-through; opacity: .45; } /* 已耗尽 */
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { opacity: .55; }
+    .ok { color: #2f9e44; } .bad { color: #e5484d; }
   </style>
 </head>
 <body>
   <h2>渠道总览</h2>
-  <p class="hint">只读快照：插件宿主在刷新模型目录或用量时写出，页面沙盒没有网络。<br>
+  <p class="hint">只读快照：插件宿主在刷新模型目录或用量时写出，页面沙盒没有网络。
     登录 / 增删账号请在「插件」页对 providers-hub 执行登录操作。</p>
-  <div id="summary">读取中…</div>
+  <p class="hint" id="summary">读取中…</p>
   <table id="channelsTable" hidden>
     <thead><tr><th>渠道</th><th>登录</th><th>模型</th><th>额度（到期分档）</th><th>签到</th></tr></thead>
     <tbody id="channelsBody"></tbody>
@@ -47,13 +38,16 @@
 
   <h2>MiniMax 出口（X-Forwarded-For）</h2>
   <p class="hint">MiniMax 国际版在部分网络下会被分流到中国站，表现为「凭据无效 401」。填一个海外 IP 可绕过（留空 = 不发送）。</p>
-  <label class="row"><span>XFF IP</span><input id="xff" type="text" placeholder="如 8.8.8.8，留空表示不设置"></label>
+  <label class="row">
+    <span>XFF IP</span>
+    <input id="xff" type="text" placeholder="如 8.8.8.8，留空表示不设置">
+  </label>
+
   <div class="actions">
     <button id="save">保存</button>
     <span id="status"></span>
   </div>
   <p class="hint">保存后到「插件」把 Providers Hub 关掉再打开生效。</p>
-
-  <p id="snapAt"></p>
+  <p class="hint" id="snapAt"></p>
 </body>
 </html>
