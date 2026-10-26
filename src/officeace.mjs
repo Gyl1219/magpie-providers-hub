@@ -129,10 +129,10 @@ function basicAuthorization(credential) {
  * 倍率（V11 `/v1/model-token-rates`）拼进展示名（`GLM-5.2 · x0.7`）——
  * 与 resolveModel 同源（选择器显示与实际计费一致）。
  *
- * ⚠️ **拉不到倍率表 ≠ 全量保留**：倍率表同时是「账号已部署」的证据 ——
- *    平台目录里有、账号没部署的模型，推理端回 ModelArts.81009（选到就整轮失败）。
- *    故倍率表不可用时只保留实测白名单（DEPLOYED_NO_RATE），其余不列：
- *    宁可少列，不列一个选了必炸的模型。
+ * ⚠️ **拉不到倍率表时不做过滤**（回落全量，行为与加过滤前一致）：
+ *    过滤的前提是「倍率表 = 已部署证据」，表都拉不到就没有证据可用 ——
+ *    这时若只留白名单，会把一个本来正常的账号缩成 5 个模型（比列出几个
+ *    可能 404 的更糟）。倍率表可用时才按它过滤。
  */
 async function fetchCatalog(credential) {
   const response = await fetch(`${maasBase(credential)}${MODELS_PATH}`, {
@@ -144,15 +144,22 @@ async function fetchCatalog(credential) {
   const rows = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : []
   // 倍率表失败不阻断目录（降级为无 x 系数）
   const rates = await fetchTokenRates(credential).catch(() => new Map())
+  // ⚠️ 只有拿到倍率表才启用部署过滤（空表 = 没证据，不过滤）
+  const deployFiltered = rates.size > 0
   const models = {}
   for (const row of rows) {
     const id = typeof row === 'string' ? row : (typeof row?.id === 'string' ? row.id : '')
     if (id.length === 0) continue
     // ⚠️ **账号部署过滤**：`/v2/models` 是全平台目录，本账号未部署的模型
-    //    推理端回 HTTP 200/404 + `ModelArts.81009 Invalid model`（选到就整轮失败）。
-    //    判据 = 在 V11 倍率表里（实测 9 条里 8 条可用）或下面的已验证白名单
-    //    （倍率表只覆盖已开通的计费项，少数免费/预览模型不在表里但能跑）。
-    if (!verifiableDeployed(id) && !rates.has(id)) continue
+    //    推理端回 HTTP 404 + `ModelArts.81009 Invalid model`（选到就整轮失败）。
+    //    ① RATE_BUT_UNDEPLOYED：**无条件**剔除「确证跑不了」的反向例外
+    //       （与倍率表能否拉到无关 —— 这是硬事实）；
+    //    ② 倍率表命中 = 已开通计费项（实测 9 条里 8 条可用）；
+    //    ③ DEPLOYED_NO_RATE：补「能跑但无倍率」（免费/预览）。
+    //    ⚠️ ②③ 只在倍率表可用时生效：拿不到表就没有证据，跳过过滤回落全量，
+    //       否则一次 V11 抖动会把正常账号从十来个模型缩成 5 个。
+    if (RATE_BUT_UNDEPLOYED.has(id)) continue
+    if (deployFiltered && !verifiableDeployed(id) && !rates.has(id)) continue
     const baseName = typeof row?.name === 'string' && row.name.length > 0 ? row.name : id
     const rate = rates.get(id)
     models[id] = {
@@ -174,8 +181,6 @@ async function fetchCatalog(credential) {
 /**
  * 已真机验证「本账号能跑、但不在 V11 倍率表里」的模型（免费/预览计费项不入表）。
  * ⚠️ 2026-10-26 实测 26 个目录项逐个打推理端得出。
- * `glm-5.3-flash` **不在这里**：它在倍率表里，但本账号推理端 404（ModelArts.81009）——
- * 「有倍率」不等于「已部署」，见 catalog 的降级说明。
  */
 const DEPLOYED_NO_RATE = new Set([
   'deepseek-v4-flash',
@@ -185,6 +190,19 @@ const DEPLOYED_NO_RATE = new Set([
   'kimi-k2.6',
 ])
 const verifiableDeployed = (id) => DEPLOYED_NO_RATE.has(id)
+
+/**
+ * 已真机验证「**在**倍率表里、但本账号推理端仍不可用」的模型 —— **反向例外**。
+ *
+ * ⚠️⚠️ 这是本文件最容易写错的一条：「进了倍率表」**不等于**「已部署」。
+ *    实测 `glm-5.3-flash` 在 V11 倍率表里（有 cost_coefficient），
+ *    但推理端回 `HTTP 404 ModelArts.81009 Invalid model` ——
+ *    用户选中它就会整轮失败（2026-10-26 真机报障）。
+ *    故这两张表要**同时**用：白名单补「能跑但无倍率」，本表剔除「有倍率但跑不了」。
+ */
+const RATE_BUT_UNDEPLOYED = new Set([
+  'glm-5.3-flash',
+])
 
 async function registerState() {
   const r = await fetch(`${CLAW_BASE}${STATE_PATH}`, {

@@ -22,6 +22,7 @@
 // 续期结果（拿到别人的凭据）。按 `channel + refresh_token`（或 access）键控：
 // 同一凭据并发共享一个在途请求，不同凭据各走各的。
 
+import { writeFileSync } from 'node:fs'
 import { loadCredential, saveCredential, notSignedIn, untilText } from './shared.mjs'
 import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
@@ -220,7 +221,74 @@ async function discoverModels(fallback) {
   return Object.keys(merged).length > 0 ? merged : fallback
 }
 
-// ── 插件 ─────────────────────────────────────────────────────────────────
+// ── 页面快照（侧边栏 Providers Hub 页用的只读数据）──────────────────────
+//
+// 页面跑在沙盒里（connect-src 'none'，没有 fetch），只能加载本文件夹的 JS ——
+// 所以由宿主（Bun，有文件权限）把**非敏感**状态写进 page/snapshot.js，页面
+// 用 <script src="snapshot.js"> 读。机制与 magpie-jet-hub 同款（同机验证过）。
+//
+// ⚠️ 绝不写凭据：access_token / refresh_token / secret_* / STS AK·SK 一律不出现。
+//    只写「是否登录 / 是否过期 / 桶 / 签到结果 / 模型数」。
+
+const SNAPSHOT_PATH = new URL('../page/snapshot.js', import.meta.url)
+
+/** 最近一次 usage / checkin 的成果缓存（models 钩子没有桶数据，靠它拼快照）。 */
+const snapshotCache = { buckets: new Map(), checkin: new Map(), modelCount: undefined, at: 0 }
+
+function sanitizeWindows(windows) {
+  const out = []
+  for (const w of Array.isArray(windows) ? windows : []) {
+    if (typeof w !== 'object' || w === null) continue
+    // 只留展示字段 —— 不猜上游结构，也不透传任何未知键（防未来某渠道塞凭据进来）
+    out.push({
+      name: typeof w.name === 'string' ? w.name : '',
+      used: Number.isFinite(w.used) ? w.used : undefined,
+      display: typeof w.display === 'string' ? w.display : undefined,
+      resetsAt: typeof w.resetsAt === 'string' ? w.resetsAt : undefined,
+      aside: w.aside === true ? true : undefined,
+    })
+  }
+  return out
+}
+
+/**
+ * 写页面快照。失败静默（页面显示「暂无快照」，不影响任何插件功能）。
+ * 调用点：auth.usage()（有桶）、auth.checkin()（有签到）、provider.models()（有模型数）。
+ */
+function writeSnapshot() {
+  try {
+    const channels = CHANNELS.map((channel) => {
+      const credential = sidecarCredentialOf(channel)
+      const signedInNow = Boolean(credential)
+      let expired
+      if (signedInNow && typeof channel.expired === 'function') {
+        try { expired = Boolean(channel.expired(credential)) } catch { expired = undefined }
+      }
+      const ck = snapshotCache.checkin.get(channel.id)
+      return {
+        id: channel.id,
+        displayName: channel.displayName,
+        signedIn: signedInNow,
+        ...(expired ? { expired: true } : {}),
+        // 逐渠道模型数：从合并目录按 `<channel>/` 前缀统计（没有则 0）
+        modelCount: snapshotCache.perChannelModelCount?.[channel.id] ?? 0,
+        buckets: sanitizeWindows(snapshotCache.buckets.get(channel.id)),
+        ...(ck ? { checkin: { outcome: ck.outcome, credit: ck.credit, message: ck.message } } : {}),
+      }
+    })
+    const snap = {
+      at: Date.now(),
+      provider: PROVIDER_NAME,
+      models: snapshotCache.modelCount,
+      channels,
+    }
+    writeFileSync?.(SNAPSHOT_PATH, `window.__PROVIDERS_HUB_SNAPSHOT__ = ${JSON.stringify(snap)};\n`, 'utf8')
+  } catch {
+    /* 写不进去就算了 */
+  }
+}
+
+
 
 /**
  * 桶过多时按「指针方案」三档汇总（方案 A）。
@@ -487,7 +555,10 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         const channel = CHANNELS.find((c) => authOfChannel(auth, c))
         if (channel !== undefined) {
           const credential = await ensureAuth(channel, auth)
-          return { plan: PROVIDER_NAME, windows: await usageWindowsOf(channel, credential) }
+          const windows = await usageWindowsOf(channel, credential)
+          snapshotCache.buckets.set(channel.id, windows)
+          writeSnapshot()
+          return { plan: PROVIDER_NAME, windows }
         }
         const windows = []
         for (const each of CHANNELS) {
@@ -501,8 +572,11 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
             credential = sidecarCredentialOf(each)
           }
           if (credential === undefined) continue
-          windows.push(...await usageWindowsOf(each, credential))
+          const eachWindows = await usageWindowsOf(each, credential)
+          snapshotCache.buckets.set(each.id, eachWindows)
+          windows.push(...eachWindows)
         }
+        writeSnapshot()
         return { plan: PROVIDER_NAME, windows }
       },
 
@@ -574,6 +648,12 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         const failed = all.filter((r) => r.outcome === 'failed')
         const done = all.filter((r) => r.outcome === 'done')
         const creditSum = claimed.reduce((s, r) => s + (r.credit ?? 0), 0)
+        // 同步签到结果进页面快照（tally 以 displayName 为 key，反查回 channel.id）
+        for (const r of all) {
+          const ch = CHANNELS.find((c) => c.displayName === r.channel)
+          if (ch) snapshotCache.checkin.set(ch.id, r)
+        }
+        writeSnapshot()
         return {
           outcome: claimed.length > 0 ? 'claimed' : failed.length > 0 ? 'failed' : done.length > 0 ? 'done' : 'inactive',
           ...(creditSum > 0 ? { credit: creditSum } : {}),
@@ -586,7 +666,21 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
     provider: {
       id: PROVIDER,
       async models(provider) {
-        return discoverModels(provider.models)
+        const models = await discoverModels(provider.models)
+        // 逐渠道模型数（key 形如 `<channel>/<model>`）+ 总数，喂给页面快照
+        try {
+          const perChannel = {}
+          for (const key of Object.keys(models ?? {})) {
+            const slash = key.indexOf('/')
+            if (slash <= 0) continue
+            const channelId = key.slice(0, slash)
+            perChannel[channelId] = (perChannel[channelId] ?? 0) + 1
+          }
+          snapshotCache.perChannelModelCount = perChannel
+          snapshotCache.modelCount = Object.keys(models ?? {}).length
+          writeSnapshot()
+        } catch { /* 快照失败不影响目录 */ }
+        return models
       },
     },
   }
