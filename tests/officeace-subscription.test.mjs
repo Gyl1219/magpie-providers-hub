@@ -209,16 +209,22 @@ test('目录：倍率拼进展示名（x1 不标）；倍率表拉不到纯降�
   } finally {
     stub.restore()
   }
-  // 降级：全新实例 + 倍率端点挂了 → 目录照常，只是无 x 系数
+  // 降级：全新实例 + 倍率端点挂了 → 部署证据缺失，只保留实测白名单模型
+  //（fetchCatalog 的部署过滤：不在倍率表也不在白名单的平台模型选到就整轮失败）
   const q2 = '?v=' + Date.now() + '-b'
   const { officeaceChannel: fresh } = await import('../src/officeace.mjs' + q2)
   const stub2 = stubFetch([
-    { match: '/v2/models', respond: () => json({ data: [{ id: 'glm-5.2', name: 'GLM-5.2' }] }) },
+    { match: '/v2/models', respond: () => json({ data: [
+      { id: 'glm-5.2', name: 'GLM-5.2' },
+      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }, // DEPLOYED_NO_RATE 白名单成员
+    ] }) },
     { match: '/v1/model-token-rates', respond: () => new Response('err', { status: 500 }) },
   ])
   try {
     const models = await fresh.catalog(CRED)
-    assert.equal(models['glm-5.2'].name, 'GLM-5.2', '倍率失败 → 优雅降级（模型照常可选）')
+    assert.equal(models['glm-5.2'], undefined, '倍率拉不到 = 无部署证据 → 未在白名单的模型不列（选到就整轮失败）')
+    assert.ok(models['deepseek-v4-flash'] !== undefined, '白名单模型保留（实测可跑、免费/预览计费项不入倍率表）')
+    assert.ok(!models['deepseek-v4-flash'].name.includes('· x'), '无倍率 → 名字无 x 系数')
   } finally {
     stub2.restore()
   }

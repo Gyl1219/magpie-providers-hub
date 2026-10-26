@@ -127,7 +127,12 @@ function basicAuthorization(credential) {
  *    故上下文窗口统一按保守值，工具调用按实测（`toolCallingSupported: true`）声明。
  *
  * 倍率（V11 `/v1/model-token-rates`）拼进展示名（`GLM-5.2 · x0.7`）——
- * 与 resolveModel 同源（选择器显示与实际计费一致）；倍率表拉不到就纯降级。
+ * 与 resolveModel 同源（选择器显示与实际计费一致）。
+ *
+ * ⚠️ **拉不到倍率表 ≠ 全量保留**：倍率表同时是「账号已部署」的证据 ——
+ *    平台目录里有、账号没部署的模型，推理端回 ModelArts.81009（选到就整轮失败）。
+ *    故倍率表不可用时只保留实测白名单（DEPLOYED_NO_RATE），其余不列：
+ *    宁可少列，不列一个选了必炸的模型。
  */
 async function fetchCatalog(credential) {
   const response = await fetch(`${maasBase(credential)}${MODELS_PATH}`, {
