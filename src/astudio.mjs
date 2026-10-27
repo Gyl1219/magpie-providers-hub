@@ -30,7 +30,7 @@
 
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { loadCredential, saveCredential, assignExpiryBands } from './shared.mjs'
+import { loadCredential, saveCredential, assignExpiryBands, debugLog } from './shared.mjs'
 
 const PROVIDER = 'astudio'
 const DISPLAY = 'AStudio（讯飞）'
@@ -629,6 +629,7 @@ async function startLoginFlow() {
             signal: AbortSignal.timeout(15_000),
           }).catch(() => {})
           const credential = await completeLogin({ ...account, loginMethod: 'wechat' })
+          debugLog(`astudio wechat: 登录完成，settle（${credential.accountId}）`)
           sendJson(res, 200, { status: 'success', message: '登录成功' })
           clearTimeout(timer)
           settleOk(credential)

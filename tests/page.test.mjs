@@ -15,6 +15,14 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (p) => readFileSync(join(ROOT, p), 'utf8')
 
+test('分档不由页面按名字猜（真机 bug：OfficeAce 桶名不含档位字样会全变灰）', () => {
+  const app = read('page/app.js')
+  // 页面必须读宿主算好的 b.band
+  assert.match(app, /b\.band/, '页面应读宿主算出的 band')
+  // 页面不得自己拿名字去 indexOf 档位字样
+  assert.doesNotMatch(app, /name\.indexOf\("临期"\)/, '页面不该按名字猜档位')
+})
+
 test('页面不自带主题：不写背景/字体族/字号，颜色只取 --magpie-* 变量', () => {
   const html = read('page/index.html')
   const style = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''
@@ -70,14 +78,22 @@ test('页面引用的 DOM id 都在 index.html 里存在', () => {
   const app = read('page/app.js')
   const ids = new Set()
   for (const m of app.matchAll(/getElementById\("([^"]+)"\)/g)) ids.add(m[1])
+  // 动态创建的 id（脚本里 .id = "..." 赋值）不在静态 HTML 里，跳过
+  const dynamic = new Set()
+  for (const m of app.matchAll(/\.id\s*=\s*"([^"]+)"/g)) dynamic.add(m[1])
   for (const id of ids) {
+    if (dynamic.has(id)) continue
     assert.ok(html.includes(`id="${id}"`), `app.js 取了 #${id}，但 index.html 里没有`)
   }
 })
 
 test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async () => {
-  // 用假凭据驱动一次 usage/models，再读写出的 snapshot.js 检查
+  // 用假凭据驱动一次 usage/models，再读写出的 snapshot.js 检查。
+  // ⚠️ 快照路径用 env 重定向到临时文件 —— 测试绝不能碰真实的 page/snapshot.js
+  //（真机事故：测试跑在沙箱 HOME 里把真实快照覆盖成「全部未登录」）。
   const sandbox = mkdtempSync(join(tmpdir(), 'hub-page-'))
+  const snapPath = join(sandbox, 'snapshot-test.js')
+  process.env.DSH_HUB_SNAPSHOT_PATH = snapPath
   const home = process.env.USERPROFILE
   process.env.USERPROFILE = sandbox
   process.env.HOME = sandbox
@@ -96,7 +112,7 @@ test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async
     await plugin.config({})
     // 触发 provider.models（会写快照）—— 用临时 provider.props 空对象
     await plugin.provider.models({ models: {} })
-    const snap = read('page/snapshot.js')
+    const snap = readFileSync(snapPath, 'utf8')
     for (const secret of [
       'SECRET_ACCESS_TOKEN_SHOULD_NOT_LEAK',
       'SECRET_REFRESH_TOKEN_SHOULD_NOT_LEAK',
@@ -112,6 +128,7 @@ test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async
     assert.ok(Array.isArray(obj.channels))
     assert.ok(obj.channels.length >= 5, '应含全部渠道')
   } finally {
+    delete process.env.DSH_HUB_SNAPSHOT_PATH
     process.env.USERPROFILE = home
     if (home === undefined) delete process.env.USERPROFILE
     rmSync(sandbox, { recursive: true, force: true })

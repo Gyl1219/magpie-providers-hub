@@ -24,6 +24,8 @@
     .pill.perm { color: var(--magpie-green, #2f9e44); } /* 永久 */
     .pill.dead { text-decoration: line-through; opacity: .5; color: var(--magpie-faint, inherit); }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
+    /* 行内小按钮：只调大小，不改配色（配色交给 magpie 的按钮样式） */
+    button.mini { margin: 0; padding: 2px 10px; font-size: 12px; }
     .muted { color: var(--magpie-muted, inherit); }
     .ok { color: var(--magpie-green, #2f9e44); }
     .bad { color: var(--magpie-red, #e5484d); }
@@ -33,12 +35,27 @@
 <body>
   <h2>渠道总览</h2>
   <p class="hint">只读快照：插件宿主在刷新模型目录或用量时写出，页面沙盒没有网络。
-    登录 / 增删账号请在「插件」页对 providers-hub 执行登录操作。</p>
+    登录 / 增删账号在「供应商」页点开 Providers Hub 的编辑器 —— 里面有每个渠道的登录按钮。</p>
   <p class="hint" id="summary">读取中…</p>
   <table id="channelsTable" hidden>
-    <thead><tr><th>渠道</th><th>登录</th><th>模型</th><th>额度（到期分档）</th><th>签到</th></tr></thead>
+    <thead><tr><th>渠道</th><th>登录</th><th>模型</th><th>额度（到期分档）</th><th>签到</th><th>操作</th></tr></thead>
     <tbody id="channelsBody"></tbody>
   </table>
+
+  <h2>刷新</h2>
+  <p class="hint">数据由插件宿主**每 5 分钟**自动重查一遍全部已登录渠道（无论本页开不开、
+    选不选都更新；options.snapshotRefreshMinutes 可调）。下面的「刷新周期」只管本页
+    **显示**多久跟上一次 —— 不选也完全可以，只是盯着页面时看不到变化。</p>
+  <label class="row">
+    <span>刷新周期</span>
+    <select id="refreshEvery">
+      <option value="0">关闭</option>
+      <option value="5">5 秒</option>
+      <option value="10">10 秒</option>
+      <option value="30">30 秒</option>
+      <option value="60">1 分钟</option>
+    </select>
+  </label>
 
   <h2>MiniMax 出口（X-Forwarded-For）</h2>
   <p class="hint">MiniMax 国际版在部分网络下会被分流到中国站，表现为「凭据无效 401」。填一个海外 IP 可绕过（留空 = 不发送）。</p>

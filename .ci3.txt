@@ -1,0 +1,22 @@
+fix(core): 快照写入失效/宿主守护/officeace 部署过滤与页面收口
+
+## 快照（真机「等半天没刷新」根因）
+- SNAPSHOT_PATH 必须是路径字符串，不能是 file:// URL 对象（拼 .tmp 后缀会变成
+  非法串 → renameSync 抛错被吞 → 快照从此一次都没写过）
+- writeSnapshot 在模块层，引用工厂内 const 会 ReferenceError 被静默吞掉 →
+  改用模块层开关 snapshotWritesDisabled（工厂按 options.notify 设置）
+- 宿主 5 分钟定时 sweep 无条件启动（unref 不驻留进程，node --test 不会假死）
+
+## officeace
+- RATE_BUT_UNDEPLOYED 无条件跳过（有 rate 但未部署的模型不列）
+- 部署过滤按 rates.size > 0 判定
+
+## 页面
+- 到期分档用 b.band（不按名字猜）；数字 ≤2dp
+- 登录列显示账号槽数（· N 个账号）
+- 刷新周期选择器只控制页面重读节奏（数据由宿主 sweep 保持新鲜）
+- 配色只用 magpie 的 --magpie-* 变量，不自带主题
+
+## 其它
+- shared: 原子写凭据（tmp + rename）、readMagpieAuthSlots 增 expires
+- 测试 175 项全绿

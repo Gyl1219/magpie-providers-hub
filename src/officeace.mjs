@@ -614,6 +614,9 @@ export async function fetchUsage(credential) {
         name: `${sku.sku_name ?? '套餐'} · 剩 ${remaining}`,
         used: Math.min(100, Math.max(0, Math.round((used / total) * 100))),
         display: `${remaining} / ${total}${until !== undefined ? ` · ${until}` : ''}`,
+        // ⚠️ 内部字段：仅供页面快照分档（临期/长期/永久），**不进 magpie 卡片**
+        //    （卡片上倒计时已由 display 承担；聚合层照旧剔除未知键以外的一切）
+        ...(expiresAt !== null ? { expiresAtMs: new Date(expiresAt).getTime() } : {}),
         // 已过期的桶收进折叠区（主环位留给活着的桶）
         ...(expiresAt !== null && !isTrial && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
       })
@@ -630,6 +633,8 @@ export async function fetchUsage(credential) {
       name: `${bonus.activity_name ?? '活动奖励'} · 剩 ${remaining}`,
       used: Math.min(100, Math.round(((points - remaining) / points) * 100)),
       display: `${remaining} / ${points}${until !== undefined ? ` · ${until}` : ''}`,
+      // 内部字段：仅供页面快照分档（不进 magpie 卡片）
+      ...(expiresAt !== null ? { expiresAtMs: new Date(expiresAt).getTime() } : {}),
       ...(expiresAt !== null && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
     })
   }
