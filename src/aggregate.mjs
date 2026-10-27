@@ -34,6 +34,7 @@ import { accioChannel } from './accio.mjs'
 import { autoclawChannel, autoclawIntlChannel } from './autoclaw.mjs'
 import { loomyChannel } from './loomy.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
+import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { startSelfRegister } from './self-register.mjs'
 import { sanitizeXff } from './minimax-transport.mjs'
 
@@ -54,7 +55,7 @@ const PLACEHOLDER_BASE = 'https://providers-hub.invalid'
 
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
-const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel, lobsteraiChannel]
+const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel]
 
 // 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
 export { CHANNELS as REGISTERED_CHANNELS }
@@ -884,7 +885,10 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
             }
           }
         }
-        // 其余有旁路的渠道：账号槽没覆盖到的在这里补签（含本账号渠道无签到端点的情况）
+        // 其余有旁路的渠道：账号槽没覆盖到的在这里补签（含本账号渠道无签到端点的情况）。
+        // ⚠️⚠️ 这些结果**只进页面快照**，绝不进本账号的返回信息 —— 真机报障：
+        //   全渠道的签到明细被怼到**每个**账号底下（Loomy 卡片挂着 OfficeAce /
+        //   MiniMax / AutoClaw… 一整屏），用户原话「谁失败在谁下面啊，你全怼到一块干嘛」。
         for (const c of CHANNELS) {
           if (typeof c.checkin !== 'function') continue
           if (tally.has(c.id)) continue
@@ -897,23 +901,40 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
           }
         }
 
-        const all = [...tally.values()]
-        if (all.length === 0) {
-          const label = channel !== undefined ? `${channel.displayName} 无每日签到` : '无已登录渠道'
-          return { outcome: 'inactive', message: label }
-        }
-        const claimed = all.filter((r) => r.outcome === 'claimed')
-        const failed = all.filter((r) => r.outcome === 'failed')
-        const done = all.filter((r) => r.outcome === 'done')
-        const creditSum = claimed.reduce((s, r) => s + (r.credit ?? 0), 0)
-        // 同步签到结果进页面快照（tally 以 displayName 为 key，反查回 channel.id）
-        for (const r of all) {
+        // 快照同步（tally 以 displayName 为 key，反查回 channel.id）—— 全渠道都记，
+        // 旁路渠道的失败在这里可见（Providers Hub 页的签到列），不打扰别的账号。
+        for (const r of tally.values()) {
           const ch = CHANNELS.find((c) => c.displayName === r.channel)
           if (ch) snapshotCache.checkin.set(ch.id, r)
         }
         writeSnapshot()
+
+        // ⚠️⚠️ 返回值：**有渠道的账号只报自己**（谁的结果在谁的卡片下面）。
+        //   无渠道上下文（api key 形态）才返回全渠道汇总。
+        if (channel !== undefined) {
+          const own = tally.get(channel.id)
+            ?? { outcome: 'inactive', message: `${channel.displayName} 无每日签到` }
+          return {
+            outcome: own.outcome,
+            ...(Number.isFinite(own.credit) && own.credit > 0 ? { credit: own.credit } : {}),
+            message: own.message ?? '',
+          }
+        }
+        const all = [...tally.values()]
+        if (all.length === 0) return { outcome: 'inactive', message: '无已登录渠道' }
+        const claimed = all.filter((r) => r.outcome === 'claimed')
+        const failed = all.filter((r) => r.outcome === 'failed')
+        const done = all.filter((r) => r.outcome === 'done')
+        const creditSum = claimed.reduce((s, r) => s + (r.credit ?? 0), 0)
         return {
-          outcome: claimed.length > 0 ? 'claimed' : failed.length > 0 ? 'failed' : done.length > 0 ? 'done' : 'inactive',
+          // 判定顺序：claimed（领到新额度）→ done（都签过了）→ failed → inactive
+          outcome: claimed.length > 0
+            ? 'claimed'
+            : done.length > 0
+              ? 'done'
+              : failed.length > 0
+                ? 'failed'
+                : 'inactive',
           ...(creditSum > 0 ? { credit: creditSum } : {}),
           message: all.map((r) => `${r.channel}：${r.message ?? (r.outcome === 'claimed' ? `已领 ${r.credit ?? ''}` : r.outcome)}`).join('；'),
           channels: all,

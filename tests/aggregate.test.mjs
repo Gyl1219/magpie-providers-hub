@@ -50,7 +50,7 @@ test('未登录也不返回空目录（回落兜底，选择器不会空掉）',
 test('登录入口每渠道一个（不是每渠道一个供应商）', async () => {
   const { plugin } = await build()
   const labels = plugin.auth.methods.map((m) => m.label)
-  assert.equal(labels.length, 8)
+  assert.equal(labels.length, 10)
   assert.ok(labels.some((l) => l.includes('OfficeAce')))
   assert.ok(labels.some((l) => l.includes('AStudio')))
   assert.ok(labels.some((l) => l.includes('MiniMax')))
@@ -59,6 +59,8 @@ test('登录入口每渠道一个（不是每渠道一个供应商）', async ()
   assert.ok(labels.some((l) => l.includes('AutoClaw (国际版)')), '国际 AutoClaw 登录入口')
   assert.ok(labels.some((l) => l.includes('Loomy')), 'Loomy 登录入口')
   assert.ok(labels.some((l) => l.includes('LobsterAI')), 'LobsterAI 登录入口')
+  assert.ok(labels.some((l) => l.includes('超级麦吉')), '超级麦吉登录入口')
+  assert.ok(labels.some((l) => l.includes('MagiCrew')), 'MagiCrew 国际版登录入口')
 })
 
 test('无法识别的 model 返回 404 而不是抛异常炸掉会话', async () => {

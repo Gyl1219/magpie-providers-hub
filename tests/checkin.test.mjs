@@ -278,3 +278,29 @@ test('聚合 checkin：无凭据 → inactive（旁路口径不臆造渠道明�
   assert.match(outcome.message, /无已登录渠道/)
   assert.equal(outcome.credit, undefined)
 })
+
+test('聚合 checkin：有渠道的账号只返回自己渠道的结果（谁失败在谁下面）', async () => {
+  // 真机报障：全渠道的签到明细被怼到每个账号底下（Loomy 卡片挂着 OfficeAce /
+  // MiniMax / AutoClaw… 一整屏）。正确语义：账号卡片只显示自己渠道的签到结果；
+  // 旁路渠道（无账号槽）的结果只进页面快照。
+  const plugin = await DshProvidersHubPlugin({}, { notify: false })
+  const cfg = {}
+  await plugin.config(cfg)
+  const channels = REGISTERED_CHANNELS
+  const [own, other] = channels
+  for (const c of channels) c.checkin = async () => ({ outcome: 'done', message: `${c.displayName} OK` })
+  // other 渠道签到失败
+  other.checkin = async () => ({ outcome: 'failed', message: `${other.displayName} 炸了` })
+  // 让 other 有旁路凭据（sweep 才会签它 —— 生产里 minimaxintl 就是这种形态）
+  const { saveCredential } = await import('../src/shared.mjs')
+  saveCredential(other.id, { access_token: 't' })
+  try {
+    const outcome = await plugin.auth.checkin(async () => ({ type: 'success', channel: own.id }))
+    assert.equal(outcome.outcome, 'done', '本账号渠道的结果')
+    assert.match(outcome.message, /OK/, '只含自己渠道的信息')
+    assert.equal(outcome.message.includes(other.displayName), false,
+      '别的渠道的签到结果不能怼到这个账号下面')
+  } finally {
+    for (const c of channels) delete c.checkin
+  }
+})
