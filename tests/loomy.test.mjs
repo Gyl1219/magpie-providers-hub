@@ -200,7 +200,7 @@ test('签到：首次 → claimed（credit = dailyQuota - dailyConsumed）', asy
   }
 })
 
-test('签到：alreadyProcessed → done（幂等）', async () => {
+test('签到：alreadyProcessed → claimed + 今日发放量（今日确实领到了，done 会被 magpie 渲染成黄色「稍后再问」）', async () => {
   const stub = stubFetch([{
     match: '/points/first-login',
     respond: () => new Response(JSON.stringify({
@@ -210,7 +210,8 @@ test('签到：alreadyProcessed → done（幂等）', async () => {
   }])
   try {
     const outcome = await loomyChannel.checkin(CRED)
-    assert.equal(outcome.outcome, 'done')
+    assert.equal(outcome.outcome, 'claimed')
+    assert.equal(outcome.credit, 5000, '今日发放量 = dailyQuota')
     assert.match(outcome.message, /4900\/5000/)
   } finally {
     stub.restore()

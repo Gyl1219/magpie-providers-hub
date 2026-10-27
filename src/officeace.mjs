@@ -12,7 +12,7 @@
 //    故失败必须留痕（console.warn），绝不静默吞掉。
 
 import { createHash, createHmac, randomBytes, webcrypto } from 'node:crypto'
-import { loadCredential, saveCredential, notSignedIn, untilText } from './shared.mjs'
+import { loadCredential, saveCredential, notSignedIn, expiryBandedWindows } from './shared.mjs'
 
 const PROVIDER = 'officeace'
 const CLAW_BASE = 'https://agentarts.cn-southwest-2.myhuaweicloud.com'
@@ -599,6 +599,11 @@ export async function fetchUsage(credential) {
   }
   const windows = []
   const nowMs = Date.now()
+  // ── 滚动指针分档（AGENTS.md 第 1 条）──
+  // 每个 quota / bonus = 一个桶；「临期」永远指向**最早到期的未耗尽桶**（FEFO 头），
+  // 它用完/过期后指针自动轮到下一桶。桶名带档位（`· 临期·N天` / `· 长期` /
+  // `· 永久` / `· 已耗尽`），聚合层 bandOfWindow 的第 1 优先级就是「名字里已有档位」。
+  const buckets = []
   for (const sku of Array.isArray(j?.skus) ? j.skus : []) {
     for (const q of Array.isArray(sku?.quotas) ? sku.quotas : []) {
       if (q?.sku_attr_code !== 'officeace_points') continue
@@ -608,17 +613,15 @@ export async function fetchUsage(credential) {
       const isTrial = String(sku.sku_code ?? '').endsWith('.trial')
       const expiresAt = typeof q.expired_time === 'string' && q.expired_time.length > 0 ? q.expired_time : null
       const remaining = Math.max(0, total - used)
-      // ⚠️ 倒计时进亮色 display、撤 runsOutAt（浅灰行与 autoclaw 同款去重 —— 用户报障）
-      const until = expiresAt !== null ? untilText(expiresAt) : undefined
-      windows.push({
-        name: `${sku.sku_name ?? '套餐'} · 剩 ${remaining}`,
-        used: Math.min(100, Math.max(0, Math.round((used / total) * 100))),
-        display: `${remaining} / ${total}${until !== undefined ? ` · ${until}` : ''}`,
-        // ⚠️ 内部字段：仅供页面快照分档（临期/长期/永久），**不进 magpie 卡片**
-        //    （卡片上倒计时已由 display 承担；聚合层照旧剔除未知键以外的一切）
-        ...(expiresAt !== null ? { expiresAtMs: new Date(expiresAt).getTime() } : {}),
-        // 已过期的桶收进折叠区（主环位留给活着的桶）
-        ...(expiresAt !== null && !isTrial && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
+      const expireMs = expiresAt !== null ? new Date(expiresAt).getTime() : NaN
+      buckets.push({
+        label: sku.sku_name ?? '套餐',
+        remaining,
+        poolTotal: total,                       // used% 按真实总量算
+        expireMs: Number.isFinite(expireMs) ? expireMs : undefined,
+        expireRaw: expiresAt ?? '',
+        // ⚠️ 已过期的**试用桶不折叠**（用户要看得见它过期），非试用过期桶折叠
+        asideWhen: Number.isFinite(expireMs) && !isTrial && expireMs <= nowMs,
       })
     }
   }
@@ -628,14 +631,24 @@ export async function fetchUsage(credential) {
     const used = Number(bonus.current_value)
     const remaining = Math.max(0, points - (Number.isFinite(used) ? used : 0))
     const expiresAt = typeof bonus.expired_time === 'string' ? bonus.expired_time : null
-    const until = expiresAt !== null ? untilText(expiresAt) : undefined
+    const expireMs = expiresAt !== null ? new Date(expiresAt).getTime() : NaN
+    buckets.push({
+      label: bonus.activity_name ?? '活动奖励',
+      remaining,
+      poolTotal: points,
+      expireMs: Number.isFinite(expireMs) ? expireMs : undefined,
+      expireRaw: expiresAt ?? '',
+      asideWhen: Number.isFinite(expireMs) && expireMs <= nowMs,
+    })
+  }
+  // 分档 + 拼窗口（共享工具，AGENTS.md 第 1 条）
+  for (const w of expiryBandedWindows(buckets, nowMs)) {
+    const b = buckets.find((x) => w.name.startsWith(x.label))
     windows.push({
-      name: `${bonus.activity_name ?? '活动奖励'} · 剩 ${remaining}`,
-      used: Math.min(100, Math.round(((points - remaining) / points) * 100)),
-      display: `${remaining} / ${points}${until !== undefined ? ` · ${until}` : ''}`,
-      // 内部字段：仅供页面快照分档（不进 magpie 卡片）
-      ...(expiresAt !== null ? { expiresAtMs: new Date(expiresAt).getTime() } : {}),
-      ...(expiresAt !== null && new Date(expiresAt).getTime() <= nowMs ? { aside: true } : {}),
+      ...w,
+      ...(b?.asideWhen === true ? { aside: true } : {}),
+      // ⚠️ 内部字段：仅供页面快照分档/倒计时，**不进 magpie 卡片**
+      ...(b?.expireMs !== undefined ? { expiresAtMs: b.expireMs } : {}),
     })
   }
   return windows

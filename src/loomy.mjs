@@ -511,8 +511,13 @@ async function checkin(credential) {
   const dailyQuota = readNumber(data.dailyQuota)
   const dailyBalance = readNumber(data.dailyBalance)
   if (data.alreadyProcessed === true) {
+    // ⚠️ alreadyProcessed = **今天的每日额度已经领到**（当日首次签到时初始化）。
+    //   如实报 claimed + 今日发放量 —— magpie 对 `done` 渲染成**黄色**「回复已签到
+    //   …稍后会再问」（它的语义是「厂商说已签到，可能签到日没翻页」），用户报障
+    //   「明明每日的领到了为啥不显示成功」。今日确实领过 5000，claimed 是诚实的。
     return {
-      outcome: 'done',
+      outcome: 'claimed',
+      credit: dailyQuota ?? DAILY_QUOTA,
       message: dailyQuota === undefined ? '今日额度已初始化' : `今日额度已初始化（每日 ${dailyBalance ?? 0}/${dailyQuota}）`,
     }
   }
