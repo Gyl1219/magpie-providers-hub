@@ -2,7 +2,7 @@
 //
 // 每个渠道一份凭据文件，互不干扰。
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 
@@ -14,6 +14,48 @@ const storeDir = () => join(homedir(), '.config', 'magpie')
 
 export function credentialPath(name) {
   return join(storeDir(), `${name}-credential.json`)
+}
+
+/**
+ * 全链路诊断日志（登录流程排查用）：~/.config/magpie/notify-debug.log。
+ * 纯文本、无凭据；追加写。
+ */
+export function debugLog(line) {
+  try {
+    mkdirSync(storeDir(), { recursive: true })
+    appendFileSync(join(storeDir(), 'notify-debug.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')
+  } catch { /* 忽略 */ }
+}
+
+/**
+ * magpie 的账号槽存储（plugin-auth.json）—— 供「每渠道账号数」统计用。
+ * ⚠️ 只读，绝不写（那是 magpie 的地盘）；路径可用 env 重定向（测试）。
+ */
+export function magpieAuthPath() {
+  return process.env.DSH_HUB_AUTH_PATH ?? join(storeDir(), 'plugin-auth.json')
+}
+
+/** 读 magpie 账号槽：`[{key, type, accountId, channel, expires}]`（本插件的槽）。读不到返回 []。 */
+export function readMagpieAuthSlots(providerId) {
+  try {
+    const obj = JSON.parse(readFileSync(magpieAuthPath(), 'utf8'))
+    const out = []
+    for (const [key, val] of Object.entries(obj ?? {})) {
+      if (key !== providerId && !key.startsWith(`${providerId}#`)) continue
+      if (typeof val !== 'object' || val === null) continue
+      const expires = Number(val.expires)
+      out.push({
+        key,
+        type: typeof val.type === 'string' ? val.type : '',
+        accountId: typeof val.accountId === 'string' ? val.accountId : '',
+        channel: typeof val.channel === 'string' ? val.channel : '',
+        expires: Number.isFinite(expires) && expires > 0 ? expires : undefined,
+      })
+    }
+    return out
+  } catch {
+    return []
+  }
 }
 
 export function loadCredential(name) {
@@ -29,7 +71,13 @@ export function loadCredential(name) {
 export function saveCredential(name, credential) {
   try {
     mkdirSync(storeDir(), { recursive: true })
-    writeFileSync(credentialPath(name), JSON.stringify(credential, null, 2), 'utf8')
+    const target = credentialPath(name)
+    // ⚠️ **原子写**（临时文件 + 改名）：magpie 重启/登录并发时，宿主可能正在
+    //    读这份文件 —— 非原子的截断写入会让读侧 JSON.parse 失败 → 凭据被当成
+    //    「未登录」（真机瞬态：重启后快照整帧「部分未登录」）。
+    const tmp = `${target}.tmp`
+    writeFileSync(tmp, JSON.stringify(credential, null, 2), 'utf8')
+    renameSync(tmp, target)
   } catch {
     // 存不下不致命：本次会话仍可用，重启后重新登录。
   }

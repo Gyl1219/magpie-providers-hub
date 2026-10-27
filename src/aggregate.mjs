@@ -22,14 +22,18 @@
 // 续期结果（拿到别人的凭据）。按 `channel + refresh_token`（或 access）键控：
 // 同一凭据并发共享一个在途请求，不同凭据各走各的。
 
-import { writeFileSync } from 'node:fs'
-import { loadCredential, saveCredential, notSignedIn, untilText } from './shared.mjs'
+import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { homedir } from 'node:os'
+import { spawn, spawnSync } from 'node:child_process'
+import { loadCredential, saveCredential, notSignedIn, untilText, readMagpieAuthSlots, debugLog } from './shared.mjs'
 import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
 import { accioChannel } from './accio.mjs'
 import { autoclawChannel, autoclawIntlChannel } from './autoclaw.mjs'
 import { loomyChannel } from './loomy.mjs'
+import { lobsteraiChannel } from './lobsterai.mjs'
 import { startSelfRegister } from './self-register.mjs'
 import { sanitizeXff } from './minimax-transport.mjs'
 
@@ -50,16 +54,24 @@ const PLACEHOLDER_BASE = 'https://providers-hub.invalid'
 
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
 /** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
-const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel]
+const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel, lobsteraiChannel]
 
 // 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
 export { CHANNELS as REGISTERED_CHANNELS }
 
 // ── 账号（auth）与凭据的形状工具 ──────────────────────────────────────────
 
-/** auth 是否属于该渠道（登录回调写入的 `channel` 字段是唯一判据）。 */
+/**
+ * auth 是否属于该渠道（登录回调写入的 `channel` 字段是唯一判据）。
+ *
+ * ⚠️ **type 要认两种**（真机 bug）：登录回调写进账号槽的是 `type: 'success'`
+ *    （magpie 的 auth 形状），而这里若只认 `'oauth'` 就**永不匹配** ——
+ *    于是每个账号槽都掉进「旁路全渠道扫」分支，**每个槽都显示全部渠道的额度**
+ *    （用户报障：登录一个渠道后所有账号卡的额度一模一样）。
+ *    `'success'` 与 `'oauth'` 都接受，判据仍是 `channel` 字段。
+ */
 const authOfChannel = (auth, channel) =>
-  auth?.type === 'oauth' && auth?.channel === channel.id
+  (auth?.type === 'oauth' || auth?.type === 'success') && auth?.channel === channel.id
 
 /** 从 auth 剥出裸凭据（旁路文件存这个形状，与渠道函数的入参一致）。 */
 function credentialOfAuth(auth) {
@@ -139,7 +151,10 @@ function gatedRenew(channel, current) {
   const task = channel.refresh(bare, (partial) => writeSidecar(channel, partial))
     .then((next) => {
       // current 是 auth（带 channel 字段）就合并回 auth 形状；是裸凭据就保持裸
-      const merged = current?.type === 'oauth' ? { ...current, ...next } : next
+      // ⚠️ type 认 'success'（我们写进账号槽的形状）与 'oauth'（社区插件形状）
+      const merged = current?.type === 'oauth' || current?.type === 'success'
+        ? { ...current, ...next }
+        : next
       writeSidecar(channel, merged)
       return merged
     })
@@ -230,20 +245,92 @@ async function discoverModels(fallback) {
 // ⚠️ 绝不写凭据：access_token / refresh_token / secret_* / STS AK·SK 一律不出现。
 //    只写「是否登录 / 是否过期 / 桶 / 签到结果 / 模型数」。
 
-const SNAPSHOT_PATH = new URL('../page/snapshot.js', import.meta.url)
+// ⚠️ **必须是文件路径字符串**，不能留 file:// URL 对象：原子写要拼 `.tmp` 后缀
+//    （模板串会把 URL 对象变成 "file:///…" 字符串，renameSync 直接失败且被
+//    catch 吞掉 —— 快照从此静默不再更新，真机「等半天没刷新」的根因）。
+const SNAPSHOT_PATH = process.env.DSH_HUB_SNAPSHOT_PATH
+  ?? fileURLToPath(new URL('../page/snapshot.js', import.meta.url))
+
+/**
+ * 快照写入开关 —— 由工厂按 options.notify 设置（模块层变量：writeSnapshot
+ * 在模块层，引用工厂内的 const 会 ReferenceError 且被静默吞掉 ——
+ * 真机 2026-10-27：快照从此一次都没写过，「等半天没刷新」的根因）。
+ * 测试里 npm test 的 --import setup 重定向快照路径，配合此开关双保险。
+ */
+let snapshotWritesDisabled = false
 
 /** 最近一次 usage / checkin 的成果缓存（models 钩子没有桶数据，靠它拼快照）。 */
 const snapshotCache = { buckets: new Map(), checkin: new Map(), modelCount: undefined, at: 0 }
 
+/** read('refresh') 的宿主侧限流：上游最多每 15 秒被全渠道查一次。 */
+const SWEEP_MIN_INTERVAL_MS = 15_000
+let lastSweepAt = 0
+let lastSweepSnapshot = undefined
+
+/** 与 shared.mjs 的 pointer 分档一致：≤15 天算临期，其后长期，无到期则永久。 */
+const WEB_EXPIRING_WINDOW_DAYS = 15
+
+/** 数字收口：最多两位小数，去尾零（`3994.5640045714285` → `3994.56`）。 */
+function tidyNumber(text) {
+  return String(text).replace(/-?\d+\.\d{3,}/g, (m) => {
+    const n = Number(m)
+    if (!Number.isFinite(n)) return m
+    return String(Math.round(n * 100) / 100)
+  })
+}
+
+/**
+ * 一个桶的到期档位（页面据此上色）。
+ *
+ * ⚠️ **不靠桶名里的字样猜**：OfficeAce 这类渠道的桶名是「个人体验版 / 新用户专属福利」，
+ *    到期信息只在结构化字段里 —— 按名字匹配会让它们全变灰（真机报障）。
+ *
+ * 判据优先级：
+ * 1. 名字里已有档位（聚合层汇总过的「临期 · 剩 N」/「长期（7 批）」）→ 直接用；
+ * 2. 有**作废**时刻（expiresAtMs / runsOutAt）→ 按 ≤15 天分临期/长期；
+ * 3. 只有 **resetsAt（重置回满）** → 同样按剩余时间分档：
+ *    ⚠️ 用户口径：「每日赠送 21 小时后」不是永久 —— 那个额度明天就清零，
+ *       属于**该赶紧用掉**的那类，必须标红（用户真机报障：绿胶囊写着「21 小时后」）。
+ *    重置与作废的**损失**不同，但**紧迫性**同源，故共用同一时间窗；
+ * 4. 两者都没有 → 永久。
+ */
+function bandOfWindow(w, now) {
+  const name = typeof w?.name === 'string' ? w.name : ''
+  for (const known of ['临期', '长期', '永久', '已耗尽']) {
+    if (name.includes(known)) return known
+  }
+  // 状态条/错误条（没有额度语义）不分档
+  if (typeof w?.display === 'string' && /查询失败|不可用|未登录|已过期|无积分明细|请重新登录/.test(w.display)) {
+    return undefined
+  }
+  if (!Number.isFinite(w?.used) && !/剩 /.test(name) && w?.display === undefined) return undefined
+  const raw = w?.expiresAtMs ?? w?.runsOutAt ?? w?.runsOut ?? w?.resetsAt
+  const ms = typeof raw === 'string' ? Date.parse(raw) : (typeof raw === 'number' ? raw : NaN)
+  if (!Number.isFinite(ms)) return '永久'
+  const days = Math.ceil((ms - now) / 86_400_000)
+  if (days <= 0) return '已耗尽'
+  return days <= WEB_EXPIRING_WINDOW_DAYS ? '临期' : '长期'
+}
+
 function sanitizeWindows(windows) {
+  const now = Date.now()
   const out = []
   for (const w of Array.isArray(windows) ? windows : []) {
     if (typeof w !== 'object' || w === null) continue
     // 只留展示字段 —— 不猜上游结构，也不透传任何未知键（防未来某渠道塞凭据进来）
     out.push({
-      name: typeof w.name === 'string' ? w.name : '',
+      // 名字里的长小数同样收口（OfficeAce 的「剩 3994.5640045714285」）
+      name: typeof w.name === 'string' ? tidyNumber(w.name) : '',
+      band: bandOfWindow(w, now),
       used: Number.isFinite(w.used) ? w.used : undefined,
-      display: typeof w.display === 'string' ? w.display : undefined,
+      // 长小数收口：上游算出来的 3994.5640045714285 直接怼到界面上很难看
+      display: typeof w.display === 'string' ? tidyNumber(w.display) : undefined,
+      // 作废时刻优先（resetsAt 是重置语义，页面不拿它算倒计时）
+      runsOutAt: (() => {
+        const raw = w.expiresAtMs ?? w.runsOutAt
+        const ms = typeof raw === 'number' ? raw : (typeof raw === 'string' ? Date.parse(raw) : NaN)
+        return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
+      })(),
       resetsAt: typeof w.resetsAt === 'string' ? w.resetsAt : undefined,
       aside: w.aside === true ? true : undefined,
     })
@@ -252,39 +339,84 @@ function sanitizeWindows(windows) {
 }
 
 /**
- * 写页面快照。失败静默（页面显示「暂无快照」，不影响任何插件功能）。
- * 调用点：auth.usage()（有桶）、auth.checkin()（有签到）、provider.models()（有模型数）。
+ * 构建快照对象（writeSnapshot 与 read('refresh') 共用）。
+ * 调用点（写盘）：auth.usage()（有桶）、auth.checkin()（有签到）、provider.models()（有模型数）。
+ *
+ * ⚠️⚠️ **不得用空数据覆盖已有数据**（真机报障：插件重载只触发 models()，
+ *    此时桶缓存是空的 —— 直接写会把上一份有数据的快照覆盖成全空，
+ *    页面随即整列显示「—」）。
+ *    修法：本次没有桶的渠道，**沿用上一份快照里的桶**（快照本身也当缓存用）。
  */
+function buildSnapshot() {
+  const previous = readPreviousSnapshot()
+  // 每渠道的 magpie 账号槽数：accountId 相同 = 原地更新（同账号重登不重复，
+  // magpie 原生语义）；不同 accountId 并存 = 真多账号。槽数 >1 说明该渠道
+  // 登了多个账号，>0 且旁路也有 = 正常。
+  const slots = readMagpieAuthSlots(PROVIDER)
+  const channels = CHANNELS.map((channel) => {
+    const credential = sidecarCredentialOf(channel)
+    const signedInNow = Boolean(credential)
+    let expired
+    if (signedInNow && typeof channel.expired === 'function') {
+      try { expired = Boolean(channel.expired(credential)) } catch { expired = undefined }
+    }
+    const ck = snapshotCache.checkin.get(channel.id)
+    const fresh = snapshotCache.buckets.get(channel.id)
+    // 本次没查到桶 → 沿用上一份快照的（没有过期的旧数据也别长期挂着）
+    const old = previous?.channels?.find((c) => c && c.id === channel.id)
+    const oldBuckets = Array.isArray(old?.buckets) ? old.buckets : []
+    const buckets = fresh !== undefined ? sanitizeWindows(fresh) : oldBuckets
+    const accountSlots = slots.filter((s) => s.channel === channel.id).length
+    return {
+      id: channel.id,
+      displayName: channel.displayName,
+      signedIn: signedInNow,
+      ...(expired ? { expired: true } : {}),
+      ...(accountSlots > 0 ? { accounts: accountSlots } : {}),
+      // 逐渠道模型数：从合并目录按 `<channel>/` 前缀统计（没有则 0）
+      modelCount: snapshotCache.perChannelModelCount?.[channel.id] ?? 0,
+      buckets,
+      ...(ck ? { checkin: { outcome: ck.outcome, credit: ck.credit, message: ck.message } }
+        : (old?.checkin ? { checkin: old.checkin } : {})),
+    }
+  })
+  return {
+    at: Date.now(),
+    provider: PROVIDER_NAME,
+    models: snapshotCache.modelCount,
+    channels,
+  }
+}
+
 function writeSnapshot() {
   try {
-    const channels = CHANNELS.map((channel) => {
-      const credential = sidecarCredentialOf(channel)
-      const signedInNow = Boolean(credential)
-      let expired
-      if (signedInNow && typeof channel.expired === 'function') {
-        try { expired = Boolean(channel.expired(credential)) } catch { expired = undefined }
-      }
-      const ck = snapshotCache.checkin.get(channel.id)
-      return {
-        id: channel.id,
-        displayName: channel.displayName,
-        signedIn: signedInNow,
-        ...(expired ? { expired: true } : {}),
-        // 逐渠道模型数：从合并目录按 `<channel>/` 前缀统计（没有则 0）
-        modelCount: snapshotCache.perChannelModelCount?.[channel.id] ?? 0,
-        buckets: sanitizeWindows(snapshotCache.buckets.get(channel.id)),
-        ...(ck ? { checkin: { outcome: ck.outcome, credit: ck.credit, message: ck.message } } : {}),
-      }
-    })
-    const snap = {
-      at: Date.now(),
-      provider: PROVIDER_NAME,
-      models: snapshotCache.modelCount,
-      channels,
-    }
-    writeFileSync?.(SNAPSHOT_PATH, `window.__PROVIDERS_HUB_SNAPSHOT__ = ${JSON.stringify(snap)};\n`, 'utf8')
+    // ⚠️ 测试进程禁止写真快照（真机事故：node --test 跑在沙箱 HOME 里，
+    //    sidecarCredentialOf 全空 → 把真实快照覆盖成「全部未登录」）。
+    //    测试统一用 tests/setup.mjs 把 DSH_HUB_SNAPSHOT_PATH 重定向到临时文件 ——
+    //    ⚠️ **不能用 NODE_TEST_CONTEXT 判测试**：真机实证 magpie 给 bun 宿主的
+    //    环境里它也有值 → 生产快照被这一行整个吞掉（「等半天没刷新」的根因）。
+    if (snapshotWritesDisabled) return
+    const snap = buildSnapshot()
+    // ⚠️ 原子写（临时文件 + 改名）：页面/读侧随时可能在读这份文件，
+    //    截断式写入会让人读到半截 JSON（快照瞬态「未登录」的另一半根因）。
+    const tmp = `${SNAPSHOT_PATH}.tmp`
+    writeFileSync?.(tmp, `window.__PROVIDERS_HUB_SNAPSHOT__ = ${JSON.stringify(snap)};\n`, 'utf8')
+    renameSync?.(tmp, SNAPSHOT_PATH)
   } catch {
     /* 写不进去就算了 */
+  }
+}
+
+/** 读回上一份快照（兜底用；读不到返回 undefined）。 */
+function readPreviousSnapshot() {
+  try {
+    const text = readFileSync?.(SNAPSHOT_PATH, 'utf8')
+    if (typeof text !== 'string' || text.length === 0) return undefined
+    const body = text.replace(/^window\.__PROVIDERS_HUB_SNAPSHOT__\s*=\s*/, '').replace(/;\s*$/, '')
+    const obj = JSON.parse(body)
+    return obj && typeof obj === 'object' ? obj : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -327,10 +459,11 @@ export function tierSummarize(rows) {
     const expiry = expiryOf(pointer)
     out.push({
       ...pointer,
-      name: `临期 · 剩 ${pointer.amount}`,
+      // 长小数收口（LobsterAI 的 creditItems 是浮点流水：72.01688…）
+      name: `临期 · 剩 ${tidyNumber(pointer.amount)}`,
       // ⚠️ display 只放倒计时 —— 剩余量已在 name 里（重复了用户会看到两遍）；
       //    倒计时必须进**亮色主文本**：「将于 X 过期」辅助行浅灰看不清（用户报障）
-      display: untilText(expiry) ?? `剩 ${pointer.amount}`,
+      display: untilText(expiry) ?? `剩 ${tidyNumber(pointer.amount)}`,
     })
     // ⚠️ 刻意不挂 runsOutAt/runsOut：亮色行已带倒计时，再挂会让 magpie 渲染
     //    出第三行浅灰「N 将于 X 过期」（用户报障：重复）。
@@ -341,24 +474,27 @@ export function tierSummarize(rows) {
   const longTerm = expiring.slice(1)
   if (longTerm.length > 0) {
     const earliest = longTerm[0]
-    const amount = longTerm.reduce((s, r) => s + r.amount, 0)
+    // ⚠️ 浮点流水求和会有漂移（2158.4905040000003）—— 先求和再收口到两位
+    const amount = tidyNumber(longTerm.reduce((s, r) => s + r.amount, 0))
     const expiry = expiryOf(earliest)
+    // ⚠️ untilText() 本身已带「…后作废」，不要再拼「作废」（否则出「作废作废」）
+    const untilEarliest = untilText(expiry)
     out.push({
       ...earliest,
       name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
-      amount,
-      display: untilText(expiry) !== undefined ? `最早 ${untilText(expiry)}作废` : `剩 ${amount} · ${longTerm.length} 批`,
+      amount: Number(amount),
+      display: untilEarliest !== undefined ? `最早 ${untilEarliest}` : `剩 ${amount} · ${longTerm.length} 批`,
     })
     delete out[out.length - 1].runsOutAt
     delete out[out.length - 1].runsOut
     delete out[out.length - 1].resetsAt
   }
   if (permanent.length > 0) {
-    const amount = permanent.reduce((s, r) => s + r.amount, 0)
+    const amount = tidyNumber(permanent.reduce((s, r) => s + r.amount, 0))
     out.push({
       name: permanent.length === 1 && typeof permanent[0].name === 'string' ? permanent[0].name : `永久 · 剩 ${amount}`,
       used: 0,
-      amount,
+      amount: Number(amount),
       display: `剩 ${amount}`,
     })
   }
@@ -407,8 +543,58 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
    * 非法值静默直连（填错的体验是「仍被分流」，geo 报错文案教他核对）。
    */
   const minimaxProxy = typeof options.minimaxProxy === 'string' ? options.minimaxProxy : undefined
+  // 快照写入开关（模块层 writeSnapshot 读这个变量 —— 见其定义处的说明）
+  snapshotWritesDisabled = options.notify === false
+  /**
+   * Windows 系统通知（PowerShell WinRT toast）—— 登录/签到结果的**可靠反馈**：
+   * magpie 桌面 GUI 没有 toast 渲染端（TUI 才显示），系统通知是绕开它的正解。
+   *
+   * 实现：spawn PowerShell `-EncodedCommand`（base64 UTF-16LE，免一切引号转义），
+   * AppId 用 PowerShell 自己的 AUMID（无需注册）；fire-and-forget（不阻塞、不等待）。
+   * ⚠️ 测试进程不弹：显式 options.notify === false 关闭（**不用** NODE_TEST_CONTEXT
+   *    判断 —— 真机实证 magpie 给 bun 宿主的环境里它有值，会把生产通知全吞掉）。
+   * 非 Windows 平台静默跳过。
+   */
+  const notifyDisabled = options.notify === false
+  const notify = (title, message) => {
+    if (notifyDisabled) return
+    if (process.platform !== 'win32') return
+    debugLog(`notify entered: ${title}`)
+    try {
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const ps = [
+        // ⚠️ 两个 WinRT 程序集**都要先加载**：只加载 Notifications 的话，
+        //    XmlDocument 解析不到（New-Object TypeNotFound）→ 整条链失败
+        //    （真机 2026-10-27：toast 静默失败，一条通知都弹不出来）。
+        '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+        '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
+        '$d = New-Object Windows.Data.Xml.Dom.XmlDocument',
+        `$d.LoadXml('<toast><visual><binding template="ToastGeneric"><text>${esc(title)}</text><text>${esc(message)}</text></binding></visual></toast>')`,
+        '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(\'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe\').Show([Windows.UI.Notifications.ToastNotification]::new($d))',
+      ].join('; ')
+      // ⚠️ **spawnSync + 捕获输出**：detached+ignore 让 PowerShell 的报错完全
+      //    不可见（真机排查两天找不到原因）——同步跑、把退出码/stderr 记进日志。
+      //    阻塞 ~1-2 秒可接受（登录/签到反馈是低频操作）。
+      const psExe = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+      const r = spawnSync(psExe, ['-NoProfile', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], {
+        windowsHide: true, timeout: 20_000,
+      })
+      debugLog(`notify spawn: status=${r.status} err=${(r.stderr?.toString() ?? '').slice(0, 200) || '(空)'}`)
+    } catch (e) {
+      debugLog(`notify threw: ${e.message}`)
+    }
+  }
   /** magpie 的 auth 存储（社区插件同款 `client.auth.set`；不可用则只写旁路）。 */
   const authSet = typeof input?.client?.auth?.set === 'function' ? input.client.auth.set : undefined
+  /**
+   * 宿主 toast（登录结果反馈 —— 用户报障「登录后一点提示都没有」）。
+   * ⚠️ 形状是 OpenCode 的 `tui.showToast({body:{message, variant}})`；调用全部
+   *    包 try —— toast 失败不致命（GUI/TUI 的接受形状可能随版本变化）。
+   */
+  const toast = (message, variant = 'info') => {
+    try { void input?.client?.tui?.showToast?.({ body: { message, variant } }) } catch { /* 忽略 */ }
+    try { void input?.client?.app?.log?.({ level: 'info', message }) } catch { /* 忽略 */ }
+  }
   const saveAuth = async (auth) => {
     try {
       await authSet?.({ path: { id: PROVIDER }, body: auth })
@@ -435,6 +621,23 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
     return channel ? { channel, model: inner } : undefined
   }
 
+  // ── 宿主侧定时刷新快照 ──
+  //
+  // magpie 只在用量页/目录刷新时调 usage —— 页面快照可能一小时都不更新
+  // （用户报障：等半天没刷新）。宿主是常驻进程：**自己定时**查一遍已登录
+  // 渠道并写快照，侧边栏页的「刷新周期」才有新东西可读。
+  //
+  // ⚠️ 测试进程不弹通知（options.notify:false），但 sweep 定时器**无条件启动**
+  //    （unref 不驻留进程，node --test 不会假死；生产靠它保证快照新鲜 ——
+  //    ⚠️ 不能用 NODE_TEST_CONTEXT 判断测试：magpie 的 bun 宿主环境里它有值，
+  //    会把生产 sweep 整个关掉）。可用 options.snapshotRefreshMinutes 调（默认 5 分钟，0 = 关闭）。
+  const sweepMinutes = Number(options.snapshotRefreshMinutes)
+  const sweepEveryMs = (Number.isFinite(sweepMinutes) && sweepMinutes > 0 ? sweepMinutes : 5) * 60_000
+  const sweepTimer = setInterval(() => {
+    void sweepAllUsage().then(() => writeSnapshot()).catch(() => {})
+  }, sweepEveryMs)
+  sweepTimer.unref?.()
+
   return {
     async config(cfg) {
       cfg.provider ??= {}
@@ -445,6 +648,15 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         models: {},
       }
     },
+
+    /**
+     * ⚠️⚠️ **没有 read 钩子，也不该有**：magpie 的页面读通道只服务两个内建项
+     *    （usage:summary / providers:list，见 docs/subsystems/plugin-runtime.md
+     *    「Nothing secret is readable」）—— 自造的 read('login')/read('refresh')
+     *    会被服务端拒绝（页面沙盒连窗口都开不了，登录取代方案是供应商编辑器的
+     *    auth.methods 按钮，magpie 原生渲染）。页面的「刷新周期」只重读快照文件，
+     *    数据新鲜度跟随 magpie 自己的 usage 刷新节奏。
+     */
 
     auth: {
       provider: PROVIDER,
@@ -460,29 +672,90 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
         async authorize() {
           // xff 只对 minimaxintl 有意义，其余渠道忽略该参数
           const started = await channel.beginLogin(openBrowser, { xff: minimaxXff, proxy: minimaxProxy })
+          // 登录前的账号槽状态（accountId → 此前凭据是否已过期）—— 判据见下
+          const preSlots = new Map(
+            readMagpieAuthSlots(PROVIDER)
+              .filter((s) => s.channel === channel.id)
+              .map((s) => [s.accountId, { expired: s.expires !== undefined && s.expires <= Date.now() }]),
+          )
+          const resolveAccountId = (credential) =>
+            (typeof credential?.nickname === 'string' && credential.nickname !== ''
+              ? credential.nickname
+              : channel.displayName)
+          /** 是否「重复登录一个仍然有效的账号」= 该弹「账号重复」且**不覆盖原槽**。 */
+          const isHealthyDuplicate = (credential) => {
+            const pre = preSlots.get(resolveAccountId(credential))
+            return pre !== undefined && !pre.expired
+          }
+          // ⚠️⚠️ 通知/快照挂在**自己的完成链**上，不挂在 callback 里 ——
+          //    真机实证（2026-10-27 微信扫码重登）：登录落盘后 magpie 弹了
+          //    「已添加」但 **callback 从未被调用**（notify 日志不存在）——
+          //    magpie 对 auto 流程只监听 auth.set 事件即认定完成，未必回调。
+          //    started.result 由载体服务自己 settle，必触发。
+          //
+          //    ⚠️⚠️ 通知规则（用户定案）：
+          //    · 新账号                                    → 弹「登录成功（新增账号）」
+          //    · 已有账号且**未过期**（重复登录）           → 弹「⚠️ 账号重复」，
+          //                                                  **且不覆盖原账号槽**（callback 里跳过写入）
+          //    · 已有账号但**已过期**（重新登录/续期）       → 弹「已更新登录（已续期）」+ 写入
+          //    · 登录失败                                  → 弹失败
+          void started.result.then((credential) => {
+            try {
+              debugLog(`chain fired: ${channel.id}`)
+              const accountId = resolveAccountId(credential)
+              writeSnapshot() // 快照立即跟上（不等 magpie 的 usage 轮询）
+              const pre = preSlots.get(accountId)
+              if (pre === undefined) {
+                debugLog(`chain: 新账号 ${channel.id} ${accountId}`)
+                notify('Providers Hub', `${channel.displayName}：登录成功（新增账号）`)
+                toast(`${channel.displayName}：登录成功（新增账号）`)
+              } else if (pre.expired) {
+                debugLog(`chain: 过期账号重新登录 ${channel.id} ${accountId}`)
+                notify('Providers Hub', `${channel.displayName}：已更新登录（已续期）`)
+                toast(`${channel.displayName}：已更新登录（已续期）`)
+              } else {
+                debugLog(`chain: 账号重复（保留原槽，不覆盖）${channel.id} ${accountId}`)
+                notify('⚠️ 账号重复', `${channel.displayName} 的「${accountId}」此前已登录且仍有效 —— 本次未覆盖原账号槽`)
+                toast(`${channel.displayName}：账号重复 —— 已保留原账号（未覆盖）`, 'warning')
+              }
+            } catch (e) { debugLog(`chain threw: ${e.message}`) }
+          }).catch((e) => { debugLog(`chain rejected: ${e.message}`) })
           return {
             url: started.url,
             method: 'auto',
             instructions: started.instructions
               ?? `在打开的页面里完成 ${channel.displayName} 登录，本窗口会自动继续。`,
             async callback() {
-              const credential = await started.result
-              const expires = expiresMsOf(credential)
-              // 双写：账号槽（主，magpie 按 auth.channel 归属这个账号）+ 旁路（兜底）。
-              // accountId 优先用渠道带回的账号名（minimaxintl 登录时查真名）——
-              // 多账号时卡片显示真名而不是同一个渠道名。
-              const auth = {
-                type: 'success',
-                channel: channel.id,
-                ...credential,
-                ...(expires !== undefined ? { expires } : {}),
-                accountId: typeof credential?.nickname === 'string' && credential.nickname !== ''
-                  ? credential.nickname
-                  : channel.displayName,
+              debugLog(`magpie callback invoked: ${channel.id}`)
+              try {
+                const credential = await started.result
+                const expires = expiresMsOf(credential)
+                // 双写：账号槽（主，magpie 按 auth.channel 归属这个账号）+ 旁路（兜底）。
+                // accountId 优先用渠道带回的账号名（minimaxintl 登录时查真名）——
+                // 多账号时卡片显示真名而不是同一个渠道名。
+                const auth = {
+                  type: 'success',
+                  channel: channel.id,
+                  ...credential,
+                  ...(expires !== undefined ? { expires } : {}),
+                  accountId: resolveAccountId(credential),
+                }
+                // ⚠️ 防重复：重复登录一个仍然有效的账号 → **不覆盖原账号槽**
+                //    （保留原凭据/账号；仍把 auth 返回给 magpie 以免流程报错）。
+                if (isHealthyDuplicate(credential)) {
+                  debugLog(`callback: 账号重复，跳过写入（保留原槽）${channel.id} ${auth.accountId}`)
+                  return auth
+                }
+                writeSidecar(channel, { type: 'oauth', channel: channel.id, ...credential })
+                await saveAuth(auth)
+                return auth
+              } catch (error) {
+                // 登录失败也弹（否则「在等流程」和「失败了」分不清）
+                const message = error instanceof Error ? error.message : String(error)
+                notify(`${channel.displayName} 登录失败`, message)
+                toast(`${channel.displayName} 登录失败：${message}`, 'error')
+                throw error
               }
-              writeSidecar(channel, { type: 'oauth', channel: channel.id, ...credential })
-              await saveAuth(auth)
-              return auth
             },
           }
         },
@@ -560,22 +833,7 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
           writeSnapshot()
           return { plan: PROVIDER_NAME, windows }
         }
-        const windows = []
-        for (const each of CHANNELS) {
-          if (!signedIn(each)) continue
-          // ⚠️ 走 ensure（临期软续期）：AutoClaw 的 access_token 只活 24h，
-          //    旁路凭据不续期的话卡片第二天就报「额度查询失败」。
-          let credential
-          try {
-            credential = await ensure(each)
-          } catch {
-            credential = sidecarCredentialOf(each)
-          }
-          if (credential === undefined) continue
-          const eachWindows = await usageWindowsOf(each, credential)
-          snapshotCache.buckets.set(each.id, eachWindows)
-          windows.push(...eachWindows)
-        }
+        const windows = await sweepAllUsage()
         writeSnapshot()
         return { plan: PROVIDER_NAME, windows }
       },
@@ -725,5 +983,29 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       used: 0,
       display: channel.expired?.(credential) ? '已过期，请重新登录' : '已登录',
     }]
+  }
+
+  /**
+   * 旁路口径的全渠道扫（auth.usage 无账号上下文时 / 页面 read('refresh') 共用）。
+   * 每个已登录渠道走 ensure（临期软续期）再查桶；结果同步进快照缓存。
+   */
+  async function sweepAllUsage() {
+    const windows = []
+    for (const each of CHANNELS) {
+      if (!signedIn(each)) continue
+      // ⚠️ 走 ensure（临期软续期）：AutoClaw 的 access_token 只活 24h，
+      //    旁路凭据不续期的话卡片第二天就报「额度查询失败」。
+      let credential
+      try {
+        credential = await ensure(each)
+      } catch {
+        credential = sidecarCredentialOf(each)
+      }
+      if (credential === undefined) continue
+      const eachWindows = await usageWindowsOf(each, credential)
+      snapshotCache.buckets.set(each.id, eachWindows)
+      windows.push(...eachWindows)
+    }
+    return windows
   }
 }

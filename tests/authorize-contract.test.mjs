@@ -35,7 +35,9 @@ for (const channel of REGISTERED_CHANNELS) {
 }
 
 const build = async () => {
-  const plugin = await DshProvidersHubPlugin({}, {})
+  // ⚠️ notify:false —— 这个测试会把全部渠道各「登录」一遍，每遍都触发
+  //    Windows 系统通知；测试里必须关掉，否则跑一轮 npm test 连环弹屏。
+  const plugin = await DshProvidersHubPlugin({}, { notify: false })
   const cfg = {}
   await plugin.config(cfg)
   return plugin

@@ -5,8 +5,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { DshProvidersHubPlugin } from '../index.mjs'
 import { tierSummarize } from '../src/aggregate.mjs'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const build = async (options = {}) => {
   const plugin = await DshProvidersHubPlugin({}, options)
@@ -45,7 +50,7 @@ test('未登录也不返回空目录（回落兜底，选择器不会空掉）',
 test('登录入口每渠道一个（不是每渠道一个供应商）', async () => {
   const { plugin } = await build()
   const labels = plugin.auth.methods.map((m) => m.label)
-  assert.equal(labels.length, 7)
+  assert.equal(labels.length, 8)
   assert.ok(labels.some((l) => l.includes('OfficeAce')))
   assert.ok(labels.some((l) => l.includes('AStudio')))
   assert.ok(labels.some((l) => l.includes('MiniMax')))
@@ -53,6 +58,7 @@ test('登录入口每渠道一个（不是每渠道一个供应商）', async ()
   assert.ok(labels.some((l) => l.includes('AutoClaw (智谱)')), '国内 AutoClaw 登录入口')
   assert.ok(labels.some((l) => l.includes('AutoClaw (国际版)')), '国际 AutoClaw 登录入口')
   assert.ok(labels.some((l) => l.includes('Loomy')), 'Loomy 登录入口')
+  assert.ok(labels.some((l) => l.includes('LobsterAI')), 'LobsterAI 登录入口')
 })
 
 test('无法识别的 model 返回 404 而不是抛异常炸掉会话', async () => {
@@ -71,6 +77,43 @@ test('astudio 明确声明不支持自动续期（不假装能刷新）', async 
     () => astudioChannel.refresh({ accessToken: 'x' }),
     /不支持自动续期|重新登录/,
   )
+})
+
+test('页面只读快照，不调 magpie.read（magpie 的 read 只服务两个内建项，自造名被拒）', () => {  const app = readFileSync(join(ROOT, 'page/app.js'), 'utf8')
+  assert.doesNotMatch(app, /magpie\.read\s*\(/, '页面不得调用 magpie.read（服务端只认 usage:summary / providers:list）')
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  assert.equal(pkg.magpie.reads, undefined, '不应声明自造 read 名（会被服务端拒绝）')
+  // 页面不提供假登录按钮：登录入口是供应商编辑器的 auth.methods（magpie 原生）
+  assert.doesNotMatch(app, /magpie\.read\("login"/)
+})
+
+test('账号槽的 type=' + "'success'" + ' 也要认（否则每个槽都显示全部渠道的额度）', async () => {
+  // 真机 bug：登录回调写 type:'success'，而 authOfChannel 只判 'oauth'
+  // → 永不匹配 → 每个账号槽掉进「旁路全渠道扫」→ 每张卡额度都一样。
+  const { plugin } = await build({ notify: false })
+  const { officeaceChannel } = await import('../src/officeace.mjs')
+  const original = officeaceChannel.beginLogin
+  officeaceChannel.beginLogin = async () => ({
+    url: 'https://auth.example',
+    result: Promise.resolve({ access: 'a', expiresAt: new Date(Date.now() + 3600_000).toISOString() }),
+  })
+  try {
+    const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+    const handle = await method.authorize()
+    const auth = await handle.callback()
+    assert.equal(auth.type, 'success')
+    assert.equal(auth.channel, 'officeace')
+    // 该 auth 必须能被「属于本渠道」判定认出来
+    const usage = await plugin.auth.usage(async () => auth)
+    assert.ok(usage.windows.length > 0)
+    // 且只显示**该渠道**的桶（不是全渠道扫）
+    assert.ok(
+      usage.windows.every((w) => w.name.startsWith('OfficeAce')),
+      `账号槽只应显示本渠道的桶，实际：${usage.windows.map((w) => w.name).join(' | ')}`,
+    )
+  } finally {
+    officeaceChannel.beginLogin = original
+  }
 })
 
 // ── 三档汇总（指针方案 A）───────────────────────────────────────────────

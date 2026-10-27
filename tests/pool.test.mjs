@@ -273,11 +273,121 @@ test('无账号上下文 → 旁路口径全渠道扫（迁移前行为保持）
 
 // ── 登录回调写账号槽（saveAuth 透传给 magpie client）─────────────────────
 
+test('重复登录仍未过期的账号 → 弹「账号重复」且**不覆盖原账号槽**', async () => {
+  await isolated(async ({ build, sandbox }) => {
+    const toasts = []
+    const saved = []
+    const { officeaceChannel } = await import('../src/officeace.mjs')
+    const stubCred = bareOf(officeaceAuth())
+    // 预置：magpie 里已有同一渠道的账号槽（accountId 同为 OfficeAce，凭据仍有效）
+    const fakeAuthJson = JSON.stringify({
+      'providers-hub': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() + 3600_000 },
+    })
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    const authDir = join(sandbox, '.config', 'magpie')
+    mkdirSync(authDir, { recursive: true })
+    writeFileSync(join(authDir, 'plugin-auth.json'), fakeAuthJson, 'utf8')
+
+    const plugin = await build({
+      notify: false, // 不弹 Windows 系统通知（TUI toast 照常，供断言）
+      client: {
+        auth: { set: async (call) => { saved.push(call) } },
+        tui: { showToast: async (p) => toasts.push(p) },
+      },
+    })
+    const original = officeaceChannel.beginLogin
+    officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
+    try {
+      const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+      const handle = await method.authorize()
+      await handle.callback()
+      assert.equal(toasts.length, 1, '重复登录必须提示「账号重复」')
+      const msg = toasts[0]?.body?.message ?? ''
+      assert.match(msg, /OfficeAce/, 'toast 带渠道名')
+      assert.match(msg, /账号重复/, '同账号重登 = 明确的「账号重复」提示')
+      // ⚠️ 核心：未过期的重复登录**不覆盖原账号槽**（不写 magpie auth）
+      assert.equal(saved.length, 0, '未过期的重复登录不能覆盖原账号槽')
+    } finally {
+      officeaceChannel.beginLogin = original
+    }
+  })
+})
+
+test('重复登录已过期的账号 → 弹「已更新登录（已续期）」且**覆盖写入**', async () => {
+  await isolated(async ({ build, sandbox }) => {
+    const toasts = []
+    const saved = []
+    const { officeaceChannel } = await import('../src/officeace.mjs')
+    const stubCred = bareOf(officeaceAuth())
+    // 预置：账号槽存在，但凭据已过期
+    const fakeAuthJson = JSON.stringify({
+      'providers-hub': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() - 3600_000 },
+    })
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    const authDir = join(sandbox, '.config', 'magpie')
+    mkdirSync(authDir, { recursive: true })
+    writeFileSync(join(authDir, 'plugin-auth.json'), fakeAuthJson, 'utf8')
+
+    const plugin = await build({
+      notify: false,
+      client: {
+        auth: { set: async (call) => { saved.push(call) } },
+        tui: { showToast: async (p) => toasts.push(p) },
+      },
+    })
+    const original = officeaceChannel.beginLogin
+    officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
+    try {
+      const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+      const handle = await method.authorize()
+      await handle.callback()
+      assert.equal(toasts.length, 1, '过期账号重新登录要提示')
+      assert.match(toasts[0]?.body?.message ?? '', /已更新登录|已续期/)
+      assert.equal(saved.length, 1, '过期的账号要正常写入续期')
+    } finally {
+      officeaceChannel.beginLogin = original
+    }
+  })
+})
+
+test('登录新账号 → 弹「登录成功（新增账号）」（不误报重复）', async () => {
+  await isolated(async ({ build, sandbox }) => {
+    const toasts = []
+    const { officeaceChannel } = await import('../src/officeace.mjs')
+    const stubCred = bareOf(officeaceAuth())
+    // 账号槽为空 —— 这是新账号
+    const fakeAuthJson = JSON.stringify({})
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    const authDir = join(sandbox, '.config', 'magpie')
+    mkdirSync(authDir, { recursive: true })
+    writeFileSync(join(authDir, 'plugin-auth.json'), fakeAuthJson, 'utf8')
+
+    const plugin = await build({
+      notify: false,
+      client: {
+        auth: { set: async () => {} },
+        tui: { showToast: async (p) => toasts.push(p) },
+      },
+    })
+    const original = officeaceChannel.beginLogin
+    officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
+    try {
+      const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+      const handle = await method.authorize()
+      await handle.callback()
+      assert.equal(toasts.length, 1, '新账号登录也要提示')
+      assert.match(toasts[0]?.body?.message ?? '', /新增账号/)
+    } finally {
+      officeaceChannel.beginLogin = original
+    }
+  })
+})
+
 test('登录回调把 auth 交给 magpie 的 client.auth.set（账号槽为主存储）', async () => {
   await isolated(async ({ build }) => {
     const saved = []
     const { officeaceChannel } = await import('../src/officeace.mjs')
-    const plugin = await build({ client: { auth: { set: async (call) => { saved.push(call) } } } })
+    const plugin = await build({ notify: false, client: { auth: { set: async (call) => { saved.push(call) } } } })
     const stubCred = bareOf(officeaceAuth())
     const originalBegin = officeaceChannel.beginLogin
     officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
