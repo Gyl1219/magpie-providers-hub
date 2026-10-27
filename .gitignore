@@ -12,3 +12,5 @@ node_modules/
 
 # 运行时生成的快照数据（宿主每次刷新都会重写）
 page/snapshot.js
+
+.probe*
