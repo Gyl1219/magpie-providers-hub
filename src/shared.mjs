@@ -163,3 +163,44 @@ export function assignExpiryBands(buckets, now = Date.now()) {
   }
   return buckets
 }
+
+/**
+ * 【新渠道必用】把「额度桶」一步变成 magpie 窗口数组（滚动指针全套）。
+ *
+ * 所有渠道的 usage() 都该走这里，别自己拼 window —— 手工拼漏了档位名，
+ * `tests/expiry-bands-required.test.mjs` 会红。
+ *
+ * 入参 bucket：
+ *   {
+ *     label: string,          // 展示名（如 '每日赠送' / '积分包' / '会员积分'）
+ *     remaining: number,      // 剩余量
+ *     expireMs?: number,      // 到期毫秒；undefined = 永久
+ *     poolTotal?: number,     // 该池总量（给 used% 用；缺省按 remaining 视为满额）
+ *     expireRaw?: string,     // 原始到期串（取 MM-DD 显示用）
+ *   }
+ *
+ * 出参：magpie window[]，每项 name 形如 `{label} · {临期·N天|长期|永久|已耗尽}`，
+ *       display 形如 `剩余 {N}[ · MM-DD 到期]`，剩 0 的桶 aside 折叠。
+ */
+export function expiryBandedWindows(buckets, now = Date.now()) {
+  assignExpiryBands(buckets, now)
+  const windows = []
+  for (const bucket of buckets) {
+    const expiryShort = typeof bucket.expireRaw === 'string' && bucket.expireRaw !== ''
+      ? String(bucket.expireRaw).replace(/^(\d{4})-(\d{2})-(\d{2}).*/, '$2-$3')
+      : undefined
+    // used%：有 poolTotal 按实际算，否则满额=0 / 剩0=100
+    const used = Number.isFinite(bucket.poolTotal) && bucket.poolTotal > 0
+      ? Math.max(0, Math.min(100, Math.round(((bucket.poolTotal - bucket.remaining) / bucket.poolTotal) * 100)))
+      : (Number.isFinite(bucket.remaining) && bucket.remaining > 0 ? 0 : 100)
+    windows.push({
+      name: `${bucket.label} · ${bucket.band}`,
+      used,
+      // ⚠️ 刻意不挂 runsOutAt：档位名（临期·N天）+ display 绝对日期已够，
+      //   多挂会多一行浅灰重复（AStudio/officeace 同款去重，用户报障过）。
+      ...(Number.isFinite(bucket.remaining) && bucket.remaining <= 0 ? { aside: true } : {}),
+      display: `剩余 ${bucket.remaining}${expiryShort !== undefined ? ` · ${expiryShort} 到期` : ''}`,
+    })
+  }
+  return windows
+}
