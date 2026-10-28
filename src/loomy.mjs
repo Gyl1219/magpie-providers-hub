@@ -585,6 +585,19 @@ async function chat(credential, { body: openaiBody, signal, renew }) {
   const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
   if (!contentType.includes('text/event-stream')) {
     const text = await response.text().catch(() => '')
+    // ① **非流式成功**就是 OpenAI 的 chat.completion JSON（没有 {code,…} 信封）
+    //    —— 真机：stream:false 上游回了 200 + content:"OK"，这里却把它读成
+    //    「业务错误（缺少 code）」→ 502。看得懂的成功必须原样回传。
+    try {
+      const parsed = JSON.parse(text)
+      if (Array.isArray(parsed?.choices)) {
+        return new Response(text, {
+          status: response.status,
+          headers: { 'content-type': contentType || 'application/json; charset=utf-8' },
+        })
+      }
+    } catch { /* 不是 JSON → 下面按信封/原文报错 */ }
+    // ② 业务失败恒 HTTP 200 + {code,…}（100002 = 登录失效）
     let message = text.slice(0, 200)
     try {
       const envelope = parseEnvelope(JSON.parse(text))

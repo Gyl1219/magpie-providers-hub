@@ -240,6 +240,45 @@ test('无 refresh 端点（诚实标记）；过期判据=到期即过（无过�
   assert.equal(loomyChannel.expired({ expires_at: String(Date.now() - 1000) }), true)
 })
 
+test('chat 非流式：上游是 chat.completion JSON → 原样回传（不是 502）', async () => {
+  // 真机 bug：Loomy 的非流式响应**没有** {code,…} 信封，就是 OpenAI 的
+  // chat.completion JSON。旧代码读不到 code 就判「业务错误（缺少 code）」→ 502，
+  // 把上游已经答对的 "OK" 丢掉（只影响显式 stream:false 的调用方）。
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => new Response(JSON.stringify({
+      id: 'cht-1', object: 'chat.completion', created: 1, model: 'spark-x2.6',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } }),
+  }])
+  try {
+    const res = await loomyChannel.chat(CRED, {
+      body: { model: 'spark-x2.6', messages: [{ role: 'user', content: 'say OK' }], stream: false },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.choices[0].message.content, 'OK', '成功的上游回答不能被当成错误吞掉')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('chat 非流式：真正的业务错误（缺 token 信封）仍要报错', async () => {
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => new Response(JSON.stringify({ code: '100002', message: '缺少 token' }), { status: 200 }),
+  }])
+  try {
+    const res = await loomyChannel.chat(CRED, {
+      body: { model: 'spark-x2.6', messages: [{ role: 'user', content: 'x' }], stream: false },
+    })
+    assert.equal(res.status, 401)
+    assert.match((await res.json()).error.message, /已失效/)
+  } finally {
+    stub.restore()
+  }
+})
+
 // ── 载体页门禁（页面 JS 藏在模板串里，node --check 查不到）──────────────
 
 test('载体页：script 可解析、元素齐全、无未定义顶层调用', () => {
