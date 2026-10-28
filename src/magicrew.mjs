@@ -26,6 +26,9 @@
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
 
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { assignExpiryBands } from './shared.mjs'
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -206,6 +209,59 @@ async function fetchModels(site, credential) {
     name: String(m.label || m.value || '').trim(),
     vision: !!m.vision,
   })).filter((m) => m.id)
+}
+
+// ── 上下文窗口：向 magpie 自己的模型库查（**别自己编**）──────────────
+// magicrew 的两个模型接口都不返回 context —— 早前一律填 256K，后果是反的：
+// agent 拿 256K 判断「放不下了」，而实际窗口是 1M，白砍掉四分之三
+// （pi-ai "context overflow" 就是这么来的）。查不到才兜底 1M：
+//   给大了超限上游会报错（用户看得到）；给小了 agent 静默拒绝 —— 更难查。
+const FALLBACK_CONTEXT = 1_048_576
+let ctxCache = null
+let ctxCacheAt = 0
+const CTX_CACHE_MS = 10 * 60_000
+
+function loadModelLibrary() {
+  if (ctxCache && Date.now() - ctxCacheAt < CTX_CACHE_MS) return ctxCache
+  const idx = new Map()
+  try {
+    const raw = readFileSync(join(homedir(), '.cache', 'magpie', 'models.json'), 'utf8')
+    const walk = (o) => {
+      if (Array.isArray(o)) { for (const v of o) walk(v); return }
+      if (!o || typeof o !== 'object') return
+      const id = typeof o.id === 'string' ? o.id : ''
+      const ctx = o.limit?.context ?? o.context_length ?? o.context_window
+      if (id && Number(ctx) > 0) {
+        idx.set(id.toLowerCase(), Number(ctx))
+        // 同一模型可能挂多个厂商前缀下，只留最大值（那才是它真能收的）
+        const tail = id.toLowerCase().split('/').pop()
+        if (tail) {
+          const prev = idx.get(`~${tail}`) || 0
+          if (Number(ctx) > prev) idx.set(`~${tail}`, Number(ctx))
+        }
+      }
+      for (const v of Object.values(o)) walk(v)
+    }
+    walk(JSON.parse(raw))
+  } catch { /* 模型库不存在 → 兜底 */ }
+  ctxCache = idx
+  ctxCacheAt = Date.now()
+  return idx
+}
+
+/** 模型的上下文窗口：全名命中 → 尾段命中 → 同模型跨厂商最大值 → 兜底 1M。 */
+function contextOf(modelId) {
+  const id = String(modelId || '').toLowerCase()
+  if (!id) return FALLBACK_CONTEXT
+  const idx = loadModelLibrary()
+  if (idx.has(id)) return idx.get(id)
+  if (idx.has(`~${id}`)) return idx.get(`~${id}`)
+  let best = 0
+  for (const [k, v] of idx) {
+    if (k.startsWith('~')) continue
+    if (k.endsWith(`/${id}`) && v > best) best = v
+  }
+  return best || FALLBACK_CONTEXT
 }
 
 // ── 签到（每日登录赠送 + 新手福利任务）───────────────────────────────
@@ -634,9 +690,33 @@ $('go-jwt').addEventListener('click', async () => {
     return next
   }
 
-  async function catalog() {
-    // 无凭据时的兜底：给一张最小语言模型表（登录后会被实时列表替换）
-    return {}
+  /**
+   * 模型目录：`GET /api/v1/flows/models`（网页模型选择器里能选的那些）。
+   * ⚠️ 别用 /v1/models —— 那个混着 VIP 锁定、生图、embedding，用户会选到调不动的。
+   * 上下文窗口向 magpie 模型库查（接口不返回 context）。
+   */
+  async function catalog(credential) {
+    const models = await fetchModels(site, credential)
+    const out = {}
+    for (const m of models) {
+      out[m.id] = {
+        name: m.name,
+        limit: { context: contextOf(m.id), output: 64_000 },
+        tool_call: true,
+        capabilities: {
+          temperature: true,
+          reasoning: true,
+          attachment: m.vision,
+          input: { text: true, image: m.vision },
+          output: { text: true },
+        },
+        options: {},
+        headers: {},
+        status: 'active',
+        release_date: '',
+      }
+    }
+    return out
   }
 
   /** 直传网关：<host>/v1/chat/completions（Bearer mgw_ api_key）。 */
