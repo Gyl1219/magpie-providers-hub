@@ -1,7 +1,7 @@
 {
   "name": "magpie-providers-hub",
-  "version": "0.3.2",
-  "description": "dsh-providers-hub（作者 JetLi）的第三方 Magpie 适配：一个供应商聚合多个独立渠道——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱），均不依赖 DSH 运行",
+  "version": "0.3.3",
+  "description": "dsh-providers-hub（作者 JetLi）的第三方 Magpie 适配：一个供应商聚合 10 个独立渠道——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy（讯飞）、LobsterAI（有道）、超级麦吉/MagiCrew（国内 letsmagic.cn + 国际 magicrew.ai），均不依赖 DSH 运行",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -30,7 +30,11 @@
     "minimax",
     "accio",
     "autoclaw",
-    "loomy"
+    "loomy",
+    "lobsterai",
+    "magicrew",
+    "magicrew-intl",
+    "letsmagic"
   ],
   "author": "JetLi (原项目 https://github.com/iJetLi/dsh-providers-hub) — 本仓库为第三方 Magpie 适配",
   "license": "MIT",

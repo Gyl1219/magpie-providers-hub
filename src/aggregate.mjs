@@ -517,8 +517,8 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
     providers: [PROVIDER],
     community: true,
     summary: {
-      en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one provider aggregating 7 channels — OfficeAce, AStudio, MiniMax Code Intl, Accio, AutoClaw CN/Intl, Loomy. Runs without DSH.',
-      zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：一个供应商聚合七个渠道——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy，不依赖 DSH 运行。',
+      en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one provider aggregating 10 channels — OfficeAce, AStudio, MiniMax Code Intl, Accio, AutoClaw CN/Intl, Loomy, LobsterAI, Magicrew CN/Intl. Runs without DSH.',
+      zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：一个供应商聚合十个渠道——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy（讯飞）、LobsterAI（有道）、超级麦吉/MagiCrew（国内+国际），不依赖 DSH 运行。',
     },
   }, {
     configDir: typeof input?.directory === 'string' ? input.directory : undefined,

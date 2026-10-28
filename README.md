@@ -6,8 +6,8 @@
 > 账号渠道、EAC 授权流程、本地服务与管理界面来自原项目，这些功能的主要实现归
 > 原作者及其上游贡献者。本仓库新增 Magpie 供应商接口、自动服务管理、浏览器管理入口和兼容测试。
 
-Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里 Magpie 社区和 Our Free Model
-（ofm）都没有的渠道**做成**独立实现**。
+Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的 10 个渠道**做成**独立实现**
+（优先覆盖 Magpie 社区包和 Our Free Model（ofm）还没有的那些）。
 
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
@@ -34,6 +34,10 @@ astudio/spark-x
 | `accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调 | `POST /api/llm/config/v2` | ✅ refresh（⚠️ 轮换 refresh_token，已串行化） |
 | `autoclaw` | 智谱 AutoClaw 国内 | 本地载体页（**一键导入桌面端凭据** / 短信验证码） | `/autoclaw-proxy/proxy/autoclaw-model-config` | ✅ 标准 refresh_token 轮换 |
 | `autoclawintl` | 智谱 AutoClaw 国际版 | Z.ai OAuth（授权页回调）+ 本地导入 | 同上（两站同协议） | ✅ 同左 |
+| `loomy` | 讯飞 Loomy | 本地载体页（短信验证码） | `GET /models` | ❌ 无 refresh 端点（session 14 天） |
+| `lobsterai` | 有道 LobsterAI（龙虾） | 官方门户 OAuth + 本机 loopback 回调 | `/api/models/available` | ✅ 标准 refresh_token 轮换 |
+| `magicrew` | 超级麦吉（letsmagic.cn） | 载体页：CDP 浏览器登录 / 手机号密码 / 粘贴 JWT | `/api/v1/flows/models` | ✅ refresh_token（⚠️ PUT 一次轮换一次）+ `mgw_` api_key 2h 自续 |
+| `magicrew-intl` | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
 
 ### autoclaw / autoclawintl
 
@@ -108,6 +112,42 @@ PKCE + **本地 loopback 回调**（Accio 对 `return_url` 无白名单校验，
 另：`system_instruction` 必须是**字符串**（照 Gemini 包成对象恒 400）；思考档位
 仅作展示（上游无任何受控字段，实测四类字段全部无效）。
 
+### loomy
+
+讯飞 Loomy（`loomyad.xunfei.cn`）。OpenAI 兼容直传，无翻译层；登录走本地载体页的
+短信三步表单流（`sendMsgCode → msgid → checkCode`）。
+
+⚠️ 四个实测坑：**两套认证头**（chat 只认 `Authorization: Bearer`，models/points
+只认小写 `token`，带错的那个回 HTTP 200 + `缺少 token`）；**业务失败恒 HTTP 200**
+（成败只能读 body 的 `code`）；**没有 refresh 端点**（session 14 天，过期只能重登）；
+短信 `msgid` 必须原样带回。额度是「永久积分 + 每日重置」，属余额/重置型，
+**不适用**滚动指针档位（见 AGENTS.md §1）。
+
+### lobsterai
+
+有道 LobsterAI（龙虾，`lobsterai-server.youdao.com`）。登录是官方门户 OAuth +
+**本机 loopback 回调**换 token。三个坑：**信封统一 `{code,msg,data}`**，`code !== 0`
+即失败 —— 唯一例外是 chat，它返回**裸 SSE 不套信封**；**refresh 不带
+Authorization**（带着会被拒，匿名头只有 Accept/Content-Type/User-Agent 三个）；
+**模型列表必须带 `X-LobsterAI-Client-Capabilities` + `X-LobsterAI-Client-Version`**，
+否则只回 25 个模型且缺 `kimi-k3`。
+
+### magicrew / magicrew-intl（超级麦吉）
+
+超级麦吉：**国内 `letsmagic.cn` 与国际 `magicrew.ai` 是两个渠道**（账号体系隔离，
+同 autoclaw 的两个站点）。模型网关是 OpenAI 兼容，但要先换 `mgw_` api_key。
+
+凭据是**三段式**：登录 JWT → `POST /api/v1/model-gateway/tokens` 签发 `mgw_` api_key
+（**只活 2 小时**，提前 10 分钟自续）→ 续期用 `PUT` 同一个端点，**refresh_token 7 天、
+PUT 一次轮换一次（一次性，必须串行 + 立即落盘）**。登录三种方式：CDP 浏览器登录
+（复用本机 Edge/Chrome 登录态，一次性 profile 用完即删）、手机号+密码、粘贴 JWT 与
+组织码。签到 = 每日登录赠送（+200/+50 积分，幂等）+ 新手福利任务。
+
+⚠️ 上游网关有两条协议债，已在 `chat` 里改写：**`max_tokens` < 512 会被 reasoning
+吃光导致返回空 content**（统一抬到 512）；**可用积分不足时上游回 HTTP 400**（改写成
+402，否则 magpie 不会换账号重试）。另 `tool` schema 的 `additionalProperties: {}` /
+`items: {}` 会被网关拒（分别改成 `true` / 删除）。
+
 ## 安装与使用
 
 ```bash
@@ -138,11 +178,16 @@ Z.ai OAuth 的完整登录、与其它渠道统一的三档用量汇总，只有
 ⚠️ hub 的 `aggregate` / `jet-hub-auto` 是**池路由**（hub 内部把请求分派给其它渠道），不是真实
 渠道，独立实现等于重写整个调度层 ⇒ **不在范围内**，那部分仍需依赖 DSH Hub 网关的桥接插件。
 
+**Loomy / LobsterAI / 超级麦吉**（`loomy` / `lobsterai` / `magicrew` / `magicrew-intl`）虽与
+ofm、社区包有覆盖重叠，仍收进本仓库：它们各自有必须真机取证才能通的协议坑（见上两节），
+且收进来后**登录载体页、凭据续期、三档用量、签到**四件事是同一套形态 —— 一个供应商里
+一次配齐，不用为每个站点各装一个包、各学一套交互。
+
 ## 已知边界
 
 ### 聚合形态的两个取舍（有意为之，但要知道）
 
-一个 provider id 意味着 magpie 把六个渠道当成**一个**供应商，由此有两点与
+一个 provider id 意味着 magpie 把十个渠道当成**一个**供应商，由此有两点与
 「每渠道一个独立包」的形态不同（[#1](https://github.com/Gyl1219/magpie-providers-hub/issues/1)
 里由 [@MYCF711](https://github.com/MYCF711) 指出，属实）：
 
@@ -182,7 +227,9 @@ npm test
 
 覆盖签名三处坑、前缀分派、未登录回落、单渠道失败隔离、无续期声明、
 OfficeAce 续期五缺口、MiniMax 传输（307 保凭据/白名单/地理路由）、
-OpenAI↔Anthropic 翻译、目录口径、设备码认证。
+OpenAI↔Anthropic 翻译、目录口径、设备码认证、额度到期分档（滚动指针门禁）、
+超级麦吉凭据三段式（api_key 自续 / `isoMs` 过期判定 / 内嵌 base64 JWT）、
+签到归属与判定顺序、AutoClaw 的 chat body 清洗（tidyWire）。
 
 ## 结构
 
@@ -196,6 +243,10 @@ src/minimax-transport.mjs  MiniMax 传输层（307 保凭据跟随、传输重�
 src/minimax-bridge.mjs     OpenAI↔Anthropic 翻译桥（含 SSE）
 src/accio.mjs              Accio（阿里）渠道（Gemini 风格信封 + 工具分片合并）
 src/autoclaw.mjs           AutoClaw 国内+国际渠道（MD5 签名 / 406 白名单 / Z.ai OAuth / 凭据导入）
+src/loomy.mjs              Loomy（讯飞）渠道（双认证头 / 短信三步流 / 每日额度签到）
+src/lobsterai.mjs          LobsterAI（有道）渠道（信封 + 裸 SSE 对话 / 门户 OAuth 回调）
+src/magicrew.mjs           超级麦吉国内+国际渠道（三段式凭据 / 积分到期分档 / 签到与新手任务）
+src/magicrew-browser.mjs   超级麦吉 CDP 浏览器登录（复用本机 Edge/Chrome 登录态）
 src/shared.mjs             凭据存取、信封解析、到期分档
 tests/                     node --test
 NOTICE.md                  协议来源与边界声明
