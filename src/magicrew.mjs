@@ -523,7 +523,9 @@ $('go-jwt').addEventListener('click', async () => {
   /** 若 api_key 快过期（或没签过），续期/签发。refresh_token 一次性，串行。 */
   async function ensureApiKey(credential) {
     const now = Date.now()
-    const exp = Number(credential?.apiKeyExpiresAt)
+    // ⚠️ apiKeyExpiresAt 是**日期字符串**（"2026-10-28 03:37:02"），Number() 得 NaN
+    //    → 永远判成「没过期」→ 拿死 key 打网关（真机：403 token无效）。必须 isoMs。
+    const exp = isoMs(credential?.apiKeyExpiresAt)
     const hasKey = typeof credential?.apiKey === 'string' && credential.apiKey !== ''
     const fresh = hasKey && (!Number.isFinite(exp) || exp - now > REFRESH_LEAD_MS)
     if (fresh) return credential
@@ -719,32 +721,48 @@ $('go-jwt').addEventListener('click', async () => {
     return out
   }
 
-  /** 直传网关：<host>/v1/chat/completions（Bearer mgw_ api_key）。 */
-  async function chat(credential, request) {
-    const withKey = await ensureApiKey(credential)
-    const url = `${site.host}/v1/chat/completions`
+  /**
+   * 直传网关：<host>/v1/chat/completions（Bearer mgw_ api_key）。
+   * ⚠️ 契约（聚合层 loader）：`chat(credential, { body, signal, renew })` → **Response 原样返回**
+   *   —— body 在第二参的 body 字段里；错误转 Response.json(provider_error)，不抛不包。
+   *   api_key 只活 2 小时：临期/缺失先走 renew（gatedRenew：落盘 + 去重闸 ——
+   *   refresh_token 轮换不落盘就是 STS5.1806 同款死法）。
+   */
+  async function chat(credential, { body, signal, renew }) {
+    let cred = credential
+    // ⚠️ 同上：日期字符串必须 isoMs（Number() = NaN → 永远「没过期」→ 死 key）
+    const exp = isoMs(cred?.apiKeyExpiresAt)
+    const fresh = cred?.apiKey && (!Number.isFinite(exp) || exp - Date.now() > REFRESH_LEAD_MS)
+    if (!fresh) {
+      cred = typeof renew === 'function'
+        ? await renew(cred)
+        : (cred?.refreshToken ? { ...cred, ...(await refreshGatewayKey(site, cred)) } : cred)
+    }
     const headers = {
-      authorization: `Bearer ${withKey.apiKey}`,
+      authorization: `Bearer ${cred.apiKey}`,
       'content-type': 'application/json',
       'user-agent': UA,
       origin: site.web,
-      accept: request?.stream ? 'text/event-stream' : 'application/json',
+      accept: body?.stream ? 'text/event-stream' : 'application/json',
     }
     // ⚠ 国际站 /v1/* **强制**要求 organization-code（不带 → HTTP 500 裸文本）。
     //   国内站带不带都行；统一带上更稳。
-    const org = withKey.organizationCode
-    if (org) headers['organization-code'] = org
-    const res = await fetch(url, {
+    if (cred.organizationCode) headers['organization-code'] = cred.organizationCode
+    const res = await fetch(`${site.host}/v1/chat/completions`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(request),
-      signal: AbortSignal.timeout(120_000),
+      body: JSON.stringify(body),
+      signal, // 流生命周期交给 magpie（不挂硬超时，长对话会被 120s 掐断）
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
-      throw new MagicrewError(`网关 HTTP ${res.status}：${text.slice(0, 160)}`, { status: res.status })
+      return Response.json(
+        { error: { type: 'provider_error', message: `${DISPLAY_NAME} 网关（HTTP ${res.status}）：${text.slice(0, 160)}` } },
+        { status: res.status >= 400 ? res.status : 502 },
+      )
     }
-    return { response: res }
+    // OpenAI 兼容（含 SSE）原样透传
+    return res
   }
 
   return {
@@ -754,7 +772,8 @@ $('go-jwt').addEventListener('click', async () => {
     beginLogin,
     refresh,
     expired: (credential) => {
-      const raw = Number(credential?.refreshTokenExpiresAt)
+      // ⚠️ refreshTokenExpiresAt 同样是日期字符串 —— Number() = NaN（见 ensureApiKey）
+      const raw = isoMs(credential?.refreshTokenExpiresAt)
       return Number.isFinite(raw) && raw > 0 && raw <= Date.now()
     },
     catalog,

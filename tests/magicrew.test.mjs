@@ -262,3 +262,34 @@ test('usage：长期多批合并成一个窗口（共 K 批 · 最早到期）',
     },
   )
 })
+
+test('chat：请求体走 body 字段；过期的字符串日期触发 renew 换新 key', async () => {
+  // 真机 502 两连：① chat 把 loader 信封（{body,renew}）整个当请求体发了；
+  // ② apiKeyExpiresAt 是日期字符串，Number()=NaN → 永远判「没过期」→ 死 key 打网关（403 token无效）。
+  const stale = {
+    token: 'J', organizationCode: 'O',
+    apiKey: 'mgw_old', refreshToken: 'rt', apiKeyExpiresAt: '2026-10-28 03:37:02', // 已过期
+  }
+  let renewed = null
+  await withFetch(
+    (url, init = {}) => {
+      if (url.includes('/api/v1/model-gateway/tokens')) return { body: { code: 1000, data: { api_key: 'mgw_new', refresh_token: 'rt2', api_key_expires_at: '2026-10-28 05:37:02' } } }
+      if (url.includes('/v1/chat/completions')) return { body: { id: 'x', choices: [{ message: { role: 'assistant', content: '通了' } }] } }
+      return { body: { code: 1000, data: {} } }
+    },
+    async (calls) => {
+      const res = await magicrewChannel.chat(stale, {
+        body: { model: 'deepseek-v4.1-flash', messages: [] },
+        renew: async (c) => { renewed = c; return { ...c, apiKey: 'mgw_new', refreshToken: 'rt2', apiKeyExpiresAt: '2026-10-28 05:37:02' } },
+      })
+      assert.equal(res.status, 200)
+      assert.ok(renewed, '过期的 api_key 必须触发 renew 续期')
+      const chat = calls.find((c) => String(c.url).includes('/v1/chat/completions'))
+      assert.equal(chat.method, 'POST')
+      const sent = JSON.parse(chat.body)
+      assert.equal(sent.model, 'deepseek-v4.1-flash', '请求体 = body 字段（不是 loader 信封）')
+      assert.equal(sent.renew, undefined, '信封字段不能混进请求体')
+      assert.equal(sent.body, undefined, '同上 —— 不能嵌套 body')
+    },
+  )
+})
