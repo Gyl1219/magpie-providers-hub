@@ -120,7 +120,32 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
   `display` 是 magpie 一定渲染的兜底（结构化字段 resetsAt/runsOutAt 实测会被
   quotas.json 丢掉，重要时间要写进 display）。
 
-## 5. 其它既有约定（简记）
+## 5. 渠道 chat 契约（真机 502 踩过）
+
+- 签名是 `chat(credential, { body, signal, renew })` → **返回原始 Response**。
+  ⚠️ 不要返回 `{ response: res }` 之类的包装（magpie 会取 `res.headers.forEach`
+  → undefined → 502 `undefined is not an object`）；错误转
+  `Response.json({error:{type:'provider_error',...}}, {status})`，不要抛。
+- 请求体在**第二参的 `body` 字段**里 —— 别把整个第二参当请求体（会把 loader 信封
+  `{body,renew,signal}` 一起发给上游）。
+- `signal` 透传，**不要挂硬超时**（120s 会把长对话掐断）。
+- **过期时间是日期字符串时用 `isoMs`，别用 `Number()`**：`Number("2026-10-28 03:37:02")`
+  = NaN → `!isFinite(NaN)` 恒真 → 永远判「没过期」→ 拿死 key 打上游
+  （magicrew 真机：HTTP 200 + 业务 403 token无效）。
+- **新渠道的 chat 必须真机发一条对话验证**：登录/额度/模型/签到都测了 ≠ chat 通了
+  （magicrew 的 502 就是这么漏出去的）。
+
+### magicrew 网关的四条 body 改写（上游 0.3.23–0.3.26 实测，已移植）
+
+① `max_tokens` < 512 → 512（reasoning 会吃光小额，content 返回空串）
+② `stream:true` → 补 `stream_options.include_usage`（magicrew 流式不返回 usage，
+   magpie 新版靠收尾 chunk 判定流结束，缺了会重试）
+③ tools 的 `additionalProperties: {}` → `true`；④ `items: {}` → 删除
+   （只走真正的 schema 位置，不碰 properties 键名 / enum / default 值）
+另：上游用 **HTTP 400 报「可用积分不足」** → 改写成 **402**，否则 magpie 的
+`retryable()` 不换账号（整轮失败 + 账号不 rest）。
+
+## 6. 其它既有约定（简记）
 
 - 渠道 `id` = magpie 供应商 id，一旦发布不能改（用户登录态按它认领）
 - 登录走 `beginLogin(openBrowser)` → `{ url, result }`；`authorize()` 立刻返回，

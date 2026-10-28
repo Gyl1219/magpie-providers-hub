@@ -196,6 +196,104 @@ async function fetchPoints(site, credential) {
   }
 }
 
+// ── 请求体改写（四条实测，来自 MYCF711/magpie-magicrew-auth 0.3.23–0.3.26）─────
+// ① max_tokens < 512 → 512：推理模型的 reasoning 会把小额度吃光，content 返回空串
+//    （实测 glm-5.3-flash：64 → finish_reason:"length" 且 content:""）
+// ② stream:true → 补 stream_options.include_usage：magicrew 流式默认不返回 usage，
+//    magpie 新版靠收尾 chunk 判定「流正常结束」，缺了报「Stream ended without
+//    finish_reason」然后重试
+// ③ ④ tools 的 schema：additionalProperties:{} → true；items:{} → 删除
+//    （上游网关不认这两个空对象；只走真正的 schema 位置，不碰 properties 键名/
+//     enum/default 值 —— 旧写法递归一切对象会误改同名的工具参数）
+const SCHEMA_MAPS = new Set(['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas'])
+const SCHEMA_ONE = new Set([
+  'additionalProperties', 'unevaluatedProperties', 'propertyNames', 'contains', 'not',
+  'if', 'then', 'else', 'contentSchema', 'items', 'additionalItems', 'unevaluatedItems',
+])
+const SCHEMA_LIST = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems'])
+
+function walkSchema(node, visit) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return false
+  let changed = visit(node)
+  for (const [k, v] of Object.entries(node)) {
+    if (!v || typeof v !== 'object') continue
+    if (SCHEMA_MAPS.has(k) && !Array.isArray(v)) {
+      for (const child of Object.values(v)) if (walkSchema(child, visit)) changed = true
+      continue
+    }
+    if (SCHEMA_LIST.has(k) && Array.isArray(v)) {
+      for (const child of v) if (walkSchema(child, visit)) changed = true
+      continue
+    }
+    if (SCHEMA_ONE.has(k)) {
+      if (Array.isArray(v)) {
+        for (const child of v) if (walkSchema(child, visit)) changed = true
+      } else if (walkSchema(v, visit)) changed = true
+      continue
+    }
+    if (k === 'dependencies' && !Array.isArray(v)) {
+      for (const child of Object.values(v)) {
+        if (child && typeof child === 'object' && !Array.isArray(child) && walkSchema(child, visit)) changed = true
+      }
+    }
+  }
+  return changed
+}
+
+/** additionalProperties: {} → true（布尔值原样留着：false 是「不许额外属性」，语义相反） */
+function loosenAdditionalProperties(node) {
+  return walkSchema(node, (n) => {
+    if (!Object.hasOwn(n, 'additionalProperties')) return false
+    if (typeof n.additionalProperties === 'boolean') return false
+    const v = n.additionalProperties
+    const emptyObject = v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0
+    if (!emptyObject) return false
+    n.additionalProperties = true
+    return true
+  })
+}
+
+/** items: {} 或 items: true → 删除 items（上游不认空 items） */
+function loosenEmptyItems(node) {
+  return walkSchema(node, (n) => {
+    if (!Object.hasOwn(n, 'items')) return false
+    const v = n.items
+    const emptyObject = v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0
+    if (!emptyObject && v !== true) return false
+    delete n.items
+    return true
+  })
+}
+
+/** 就地改写发往 magicrew 网关的请求体（正文是 object，不是字符串）。 */
+function sanitizeChatBody(body) {
+  if (!body || typeof body !== 'object') return body
+  const max = Number(body.max_tokens)
+  if (Number.isFinite(max) && max > 0 && max < 512) body.max_tokens = 512
+  if (body.stream === true && !body.stream_options) body.stream_options = { include_usage: true }
+  if (Array.isArray(body.tools)) {
+    for (const t of body.tools) {
+      const p = t?.function?.parameters
+      if (!p || typeof p !== 'object') continue
+      loosenAdditionalProperties(p)
+      loosenEmptyItems(p)
+    }
+  }
+  return body
+}
+
+// ── 上游「积分不足」的 400 → 402（0.3.26 实测）────────────────────────
+// 上游用 HTTP 400 报「可用积分已不足」；magpie 的 retryable() 的 400 分支只查
+// quotaWords（quota|余额|额度|欠费），不含「积分」「充值」⇒ 判成不可重试 ⇒
+// 整轮直接失败、账号也不 rest、同 provider 的其它账号一次都不问。
+// 改写成 402 Payment Required（retryable 无条件 true + failCredit 会 rest 30 分钟
+// 并换下一个账号），body 原样保留。
+const CREDIT_EXHAUSTED = /(?:积分|余额)(?:已|额度)?不足|可用积分不足|insufficient\s+(?:credit|credits|balance|fund|funds|point|points)|(?:credit|credits|point|points|balance)\s+(?:is\s+|are\s+)?(?:insufficient|exhausted)|out\s+of\s+(?:credit|credits|points?|balance)/i
+
+function isCreditExhausted(text) {
+  return CREDIT_EXHAUSTED.test(String(text ?? ''))
+}
+
 // ── 模型 ─────────────────────────────────────────────────────────────
 
 async function fetchModels(site, credential) {
@@ -748,6 +846,8 @@ $('go-jwt').addEventListener('click', async () => {
     // ⚠ 国际站 /v1/* **强制**要求 organization-code（不带 → HTTP 500 裸文本）。
     //   国内站带不带都行；统一带上更稳。
     if (cred.organizationCode) headers['organization-code'] = cred.organizationCode
+    // 请求体改写（max_tokens / stream_options / tools schema —— 见上方四条的实测出处）
+    sanitizeChatBody(body)
     const res = await fetch(`${site.host}/v1/chat/completions`, {
       method: 'POST',
       headers,
@@ -756,6 +856,14 @@ $('go-jwt').addEventListener('click', async () => {
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
+      // 「可用积分不足」的 400/422 → 402：让 magpie 的 retryable() 换下一个账号
+      if ((res.status === 400 || res.status === 422) && isCreditExhausted(text)) {
+        const h2 = new Headers(res.headers)
+        // body 已解压，原 length/encoding 不再成立
+        h2.delete('content-length')
+        h2.delete('content-encoding')
+        return new Response(text, { status: 402, statusText: 'Payment Required', headers: h2 })
+      }
       return Response.json(
         { error: { type: 'provider_error', message: `${DISPLAY_NAME} 网关（HTTP ${res.status}）：${text.slice(0, 160)}` } },
         { status: res.status >= 400 ? res.status : 502 },

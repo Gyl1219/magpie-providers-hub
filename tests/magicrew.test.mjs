@@ -293,3 +293,44 @@ test('chat：请求体走 body 字段；过期的字符串日期触发 renew 换
     },
   )
 })
+
+test('chat：请求体四条改写（max_tokens/stream_options/tools schema）', async () => {
+  await withFetch(
+    (url) => {
+      if (url.includes('/v1/chat/completions')) return { body: { id: 'x', choices: [] } }
+      return { body: { code: 1000, data: {} } }
+    },
+    async (calls) => {
+      const cred = { token: 'J', organizationCode: 'O', apiKey: 'mgw_ok', apiKeyExpiresAt: new Date(Date.now() + 3600_000).toISOString() }
+      await magicrewChannel.chat(cred, {
+        body: {
+          model: 'm',
+          max_tokens: 64,
+          stream: true,
+          tools: [{ type: 'function', function: { name: 'f', parameters: {
+            type: 'object',
+            additionalProperties: {},
+            properties: { list: { type: 'array', items: {} } },
+          } } }],
+        },
+      })
+      const sent = JSON.parse(calls.find((c) => String(c.url).includes('/v1/chat/completions')).body)
+      assert.equal(sent.max_tokens, 512, 'max_tokens 低于 512 抬到 512（reasoning 会吃光小额）')
+      assert.deepEqual(sent.stream_options, { include_usage: true }, '流式补 include_usage（magpie 靠收尾 chunk 判定流结束）')
+      const p = sent.tools[0].function.parameters
+      assert.equal(p.additionalProperties, true, 'additionalProperties:{} → true')
+      assert.equal(p.properties.list.items, undefined, 'items:{} 删除')
+    },
+  )
+})
+
+test('chat：上游 400「可用积分不足」→ 改写成 402（让 magpie 换下一个账号）', async () => {
+  await withFetch(
+    () => ({ status: 400, body: { message: '超级麦吉: 当前对话需要调用大模型，您的可用积分已不足，请通过充值补充' } }),
+    async () => {
+      const cred = { token: 'J', organizationCode: 'O', apiKey: 'mgw_ok', apiKeyExpiresAt: new Date(Date.now() + 3600_000).toISOString() }
+      const res = await magicrewChannel.chat(cred, { body: { model: 'm', messages: [] } })
+      assert.equal(res.status, 402, '积分不足必须是 402，否则 magpie 不换账号')
+    },
+  )
+})
