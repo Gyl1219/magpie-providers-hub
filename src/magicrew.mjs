@@ -770,7 +770,9 @@ $('go-jwt').addEventListener('click', async () => {
       }
       // ③ 永久余额单独
       for (const b of buckets.filter((x) => x.band === '永久')) {
-        windows.push({ name: `${b.label} · 永久`, used: 0, display: `剩余 ${b.remaining}` })
+        // balance/unit：magpie ≥0.1.1790 的一等「还剩多少」读数（路由按它认识账号，
+        // 池子大的排前、花光的垫底）；旧宿主不认识该字段，忽略无副作用。
+        windows.push({ name: `${b.label} · 永久`, used: 0, display: `剩余 ${b.remaining}`, balance: b.remaining, unit: '积分' })
       }
       // ④ 已耗尽 → aside 折叠（不占主位）
       for (const b of buckets.filter((x) => x.band === '已耗尽')) {

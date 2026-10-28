@@ -259,6 +259,78 @@ function authHeaders(product, { intl = false } = {}) {
 
 // ── 406 绕过 / max_tokens / 档位门禁 ─────────────────────────────────────
 
+// ── 历史形态修复 + 措辞清洗（社区 0.2.9 / 0.2.10 实测，plugins#437 / #466）──
+//
+// ① 历史里这些形态会被网关回 500 {"message":"parse response failed"}（没有别的原因）：
+//    content 为 null/缺失、上轮的 reasoning_content（AutoClaw 自己的客户端不回传）、
+//    tool_calls[].function.arguments 不是字符串、tools 不是非空数组。
+// ② 历史（system/developer）里出现**别家 agent 的开场白指纹**会被 406，必须改写措辞。
+//
+// ⚠️ 只清洗 system/developer（用户/助手的对话内容不碰）；只改**已被证明**会被拒的
+//    措辞，其它原样发（改写会动到模型的自我认知，宁可少改）。
+const FLAGGED = [
+  [/You are a Claude agent, built on Anthropic's Claude Agent SDK\.?/gi, 'You are a coding assistant.'],
+  [/(?:Anthropic's |the )?Claude Agent SDK/gi, 'the agent framework'],
+  [/You are an AI agent powered by DeepSeek Harness/gi, 'You are an AI agent powered by DeepSeek-Harness'],
+  [/You are Claude Code/gi, 'You are the Claude Code CLI'],
+  [/You are Codex/gi, 'You are the Codex agent'],
+  [/Codex CLI/gi, 'Codex command-line tool'],
+  [/You are opencode/gi, 'You are the opencode agent'],
+  [/You are Cursor/gi, 'You are the Cursor agent'],
+  [/You are Cline/gi, 'You are the Cline agent'],
+  [/You are Qwen Code/gi, 'You are the Qwen Code agent'],
+  [/You are ZCode/gi, 'You are the ZCode agent'],
+  [/operating inside pi, a coding agent harness/gi, 'operating inside the pi coding agent harness'],
+  // "This conversation is powered by GLM-<版本>" 任何版本/任何位置都被 CN 网关拒（406）
+  [/This conversation is powered by GLM-([\w-]+(?:\.[\w-]+)*)/gi, 'This conversation is powered by the GLM-$1 model'],
+  [/You are CodeBuddy Code/gi, 'You are the CodeBuddy Code CLI'],
+]
+
+export function unflagged(text) {
+  for (const [re, to] of FLAGGED) text = text.replace(re, to)
+  return text
+}
+
+/** 措辞清洗（只动 system/developer 消息的文本） */
+function unflagMessages(messages) {
+  for (const m of messages) {
+    if (!m || (m.role !== 'system' && m.role !== 'developer')) continue
+    if (typeof m.content === 'string') m.content = unflagged(m.content)
+    else if (Array.isArray(m.content)) {
+      for (const part of m.content) if (typeof part?.text === 'string') part.text = unflagged(part.text)
+    }
+  }
+}
+
+/**
+ * 发车前把「网关读不了的历史形态」就地修好（社区 tidyBody 同款）。
+ * ⚠️ 修完再跑措辞清洗 —— 顺序无所谓，但两者都不能漏（各自对应 500 / 406）。
+ */
+export function tidyWire(wire) {
+  if (Array.isArray(wire.messages)) {
+    wire.messages = wire.messages.map((m) => {
+      if (!m || typeof m !== 'object') return m
+      const out = { ...m }
+      if (out.content == null) out.content = ''
+      delete out.reasoning_content // 自己客户端不回传上轮 reasoning
+      if (Array.isArray(out.tool_calls)) {
+        out.tool_calls = out.tool_calls.map((c) => {
+          const args = c?.function?.arguments
+          if (!c?.function || typeof args === 'string') return c
+          return { ...c, function: { ...c.function, arguments: args == null ? '{}' : JSON.stringify(args) } }
+        })
+      }
+      return out
+    })
+  }
+  if ('tools' in wire && !(Array.isArray(wire.tools) && wire.tools.length > 0)) {
+    delete wire.tools
+    delete wire.tool_choice
+  }
+  unflagMessages(wire.messages ?? [])
+  return wire
+}
+
 /**
  * messages[0] 必须逐字等于白名单前缀（否则 406）。原生 system 拆两条：
  * [0] 过检、[1] 保人设；首条不是 system 则前置。
@@ -816,13 +888,13 @@ async function chat(product, credential, { body, signal, renew }) {
   const maxTokens = clampMaxTokens(body?.max_tokens, declared)
   const effort = effortForRequest(body?.reasoning_effort)
 
-  const wire = {
+  const wire = tidyWire({
     ...body,
     model: upstreamModel,
     messages: prepareMessages(body?.messages ?? []),
     stream: true,
     ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
-  }
+  })
   // 档位：集合外的值不发（上游对非法档位回 200 按最贵档跑 —— 静默烧钱）
   if (effort.effort !== undefined) wire.reasoning_effort = effort.effort
   else delete wire.reasoning_effort

@@ -287,3 +287,41 @@ test('usage：display:false 池丢弃；批次守恒成立用批次、不成立�
     stub.restore()
   }
 })
+
+// ── 历史形态修复 + 措辞清洗（社区 0.2.9 / 0.2.10，plugins#437 / #466）──
+test('tidyWire：网关读不了的历史形态就地修好（否则 500 parse response failed）', async () => {
+  const { tidyWire } = await import('../src/autoclaw.mjs')
+  const wire = tidyWire({
+    model: 'x',
+    messages: [
+      { role: 'system', content: 'ok' },
+      { role: 'assistant', content: null, reasoning_content: '上轮思考' , tool_calls: [
+        { id: 'c1', type: 'function', function: { name: 'f', arguments: { a: 1 } } },
+      ] },
+      { role: 'tool', content: 'r', tool_call_id: 'c1' },
+    ],
+    tools: [],
+    tool_choice: 'auto',
+  })
+  assert.equal(wire.messages[1].content, '', 'null content → ""')
+  assert.equal(wire.messages[1].reasoning_content, undefined, '上轮 reasoning_content 去掉')
+  assert.equal(wire.messages[1].tool_calls[0].function.arguments, '{"a":1}', 'arguments 不是字符串 → JSON')
+  assert.equal(wire.tools, undefined, 'tools 空数组 → 删除')
+  assert.equal(wire.tool_choice, undefined, 'tool_choice 一并删除')
+})
+
+test('tidyWire：别家 agent 的开场白指纹被改写（否则 406），用户对话内容不碰', async () => {
+  const { tidyWire } = await import('../src/autoclaw.mjs')
+  const wire = tidyWire({
+    messages: [
+      { role: 'system', content: 'You are Claude Code. This conversation is powered by GLM-5.3. You are CodeBuddy Code.' },
+      { role: 'user', content: 'You are Claude Code 是什么？' },
+    ],
+  })
+  const sys = wire.messages[0].content
+  assert.ok(!/You are Claude Code/.test(sys), 'Claude Code 指纹被改写')
+  assert.ok(!/powered by GLM-5\.3/.test(sys), 'GLM 开场白被改写')
+  assert.ok(!/You are CodeBuddy Code/.test(sys), 'CodeBuddy 指纹被改写')
+  assert.match(sys, /Claude Code CLI|CodeBuddy Code CLI|GLM-5\.3 model/)
+  assert.equal(wire.messages[1].content, 'You are Claude Code 是什么？', '用户消息不动')
+})

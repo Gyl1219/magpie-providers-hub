@@ -482,7 +482,9 @@ async function usage(credential) {
   const dailyUsedPercent = Math.max(0, Math.min(100, Math.round(((DAILY_QUOTA - daily) / DAILY_QUOTA) * 100)))
   const windows = []
   if (permanent !== undefined) {
-    windows.push({ name: '永久积分', used: 0, display: `剩余 ${permanent}` })
+    // balance/unit：magpie ≥0.1.1790 的一等「还剩多少」读数（路由按它认识账号）；
+    // 旧宿主忽略该字段，无副作用。
+    windows.push({ name: '永久积分', used: 0, display: `剩余 ${permanent}`, balance: permanent, unit: '积分' })
   }
   // 每日池重置点 = 下一北京午夜（Asia/Shanghai），span 86400s 让 magpie 识别为周期窗口
   const nowBeijing = new Date(Date.now() + 8 * 3600_000)
