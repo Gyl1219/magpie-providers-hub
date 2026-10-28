@@ -35,7 +35,9 @@
 <body>
   <h2>渠道总览</h2>
   <p class="hint">只读快照：插件宿主在刷新模型目录或用量时写出，页面沙盒没有网络。
-    登录 / 增删账号在「供应商」页点开 Providers Hub 的编辑器 —— 里面有每个渠道的登录按钮。</p>
+    登录 / 增删账号在「供应商」页 —— 本插件注册了<b>十个供应商</b>（渠道名后面那串
+    <code>hub-…</code> 就是它的 id），每个供应商卡片里一个登录按钮，关掉某个供应商
+    就等于关掉对应渠道。</p>
   <p class="hint" id="summary">读取中…</p>
   <table id="channelsTable" hidden>
     <thead><tr><th>渠道</th><th>登录</th><th>模型</th><th>额度（到期分档）</th><th>签到</th><th>操作</th></tr></thead>

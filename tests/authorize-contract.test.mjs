@@ -23,8 +23,7 @@ const { officeaceChannel } = await import('../src/officeace.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
 const { minimaxintlChannel } = await import('../src/minimaxintl.mjs')
 const { accioChannel } = await import('../src/accio.mjs')
-const { REGISTERED_CHANNELS } = await import('../src/aggregate.mjs')
-const { DshProvidersHubPlugin } = await import('../index.mjs')
+const { REGISTERED_CHANNELS, makeHubPlugin } = await import('../src/aggregate.mjs')
 
 const FAKE = { fake: true }
 const stubBeginLogin = async () => ({ url: 'https://example.com/authorize', result: Promise.resolve(FAKE) })
@@ -34,10 +33,11 @@ for (const channel of REGISTERED_CHANNELS) {
   channel.beginLogin = stubBeginLogin
 }
 
-const build = async () => {
+/** 每个渠道一个供应商 ⇒ 拿它的插件实例。 */
+const build = async (channel) => {
   // ⚠️ notify:false —— 这个测试会把全部渠道各「登录」一遍，每遍都触发
   //    Windows 系统通知；测试里必须关掉，否则跑一轮 npm test 连环弹屏。
-  const plugin = await DshProvidersHubPlugin({}, { notify: false })
+  const plugin = await makeHubPlugin(channel)({}, { notify: false })
   const cfg = {}
   await plugin.config(cfg)
   return plugin
@@ -59,34 +59,38 @@ test('每个注册渠道都实现了 beginLogin', async () => {
 })
 
 test('authorize 立刻返回（不 await 用户登录）', async () => {
-  const plugin = await build()
-  for (const method of plugin.auth.methods) {
-    const started = Date.now()
-    const handle = await method.authorize()
-    const elapsed = Date.now() - started
-    assert.ok(elapsed < 5_000, `${method.label}: authorize 耗时 ${elapsed}ms，说明仍在等用户登录（死锁）`)
-    assert.equal(typeof handle.url, 'string')
-    assert.ok(handle.url.length > 0, `${method.label}: 缺少 url`)
-    assert.equal(handle.method, 'auto')
-    assert.equal(typeof handle.callback, 'function', `${method.label}: 缺少 callback`)
+  for (const channel of REGISTERED_CHANNELS) {
+    const plugin = await build(channel)
+    assert.equal(plugin.auth.methods.length, 1, `${channel.id}: 一个供应商只有一个登录入口`)
+    for (const method of plugin.auth.methods) {
+      const started = Date.now()
+      const handle = await method.authorize()
+      const elapsed = Date.now() - started
+      assert.ok(elapsed < 5_000, `${method.label}: authorize 耗时 ${elapsed}ms，说明仍在等用户登录（死锁）`)
+      assert.equal(typeof handle.url, 'string')
+      assert.ok(handle.url.length > 0, `${method.label}: 缺少 url`)
+      assert.equal(handle.method, 'auto')
+      assert.equal(typeof handle.callback, 'function', `${method.label}: 缺少 callback`)
+    }
   }
 })
 
 test('callback 兑现凭据：success + channel 归属 + 双写落盘', async () => {
-  const plugin = await build()
   const { loadCredential } = await import('../src/shared.mjs')
-  for (const method of plugin.auth.methods) {
-    const handle = await method.authorize()
-    const outcome = await handle.callback()
-    assert.equal(outcome.type, 'success')
-    // ⚠️ channel 字段是账号槽归属的唯一判据（loader/refresh/checkin 都按它分发）
-    assert.ok(typeof outcome.channel === 'string' && outcome.channel.length > 0,
-      `${method.label}: 登录回调缺 channel 字段`)
-    assert.ok(REGISTERED_CHANNELS.some((c) => c.id === outcome.channel), `${method.label}: channel 未注册`)
-    // 旁路双写（兜底路径的凭据源）
-    assert.notEqual(loadCredential(outcome.channel), null, `${outcome.channel}: 旁路凭据未落盘`)
-    // FAKE 凭据字段被完整带进账号槽（magpie 存的就是这个对象）
-    assert.equal(outcome.fake, true, `${method.label}: 凭据字段未随账号槽存储`)
+  for (const channel of REGISTERED_CHANNELS) {
+    const plugin = await build(channel)
+    for (const method of plugin.auth.methods) {
+      const handle = await method.authorize()
+      const outcome = await handle.callback()
+      assert.equal(outcome.type, 'success')
+      // ⚠️ channel 字段是账号槽归属的唯一判据（loader/refresh/checkin 都按它分发）
+      assert.equal(outcome.channel, channel.id, `${method.label}: 登录回调的 channel 应是本渠道`)
+      assert.ok(REGISTERED_CHANNELS.some((c) => c.id === outcome.channel), `${method.label}: channel 未注册`)
+      // 旁路双写（兜底路径的凭据源）
+      assert.notEqual(loadCredential(outcome.channel), null, `${outcome.channel}: 旁路凭据未落盘`)
+      // FAKE 凭据字段被完整带进账号槽（magpie 存的就是这个对象）
+      assert.equal(outcome.fake, true, `${method.label}: 凭据字段未随账号槽存储`)
+    }
   }
 })
 

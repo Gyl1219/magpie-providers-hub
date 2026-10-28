@@ -29,14 +29,19 @@ let seq = 0
  */
 async function isolated(fn) {
   const sandbox = mkdtempSync(join(tmpdir(), 'dsh-hub-pool-'))
+  const previousAuthPath = process.env.DSH_HUB_AUTH_PATH
   process.env.USERPROFILE = sandbox
   process.env.HOME = sandbox
+  // 账号槽路径同时跟着沙箱走（setup.mjs 设过 env，env 优先级高于 HOME）
+  process.env.DSH_HUB_AUTH_PATH = join(sandbox, '.config', 'magpie', 'plugin-auth.json')
   const q = `?v=${++seq}-${Date.now()}`
   const url = pathToFileURL(join(import.meta.dirname, '..', 'src', 'aggregate.mjs')).href + q
   try {
     const mod = await import(url)
-    const build = async (input = {}, options = {}) => {
-      const plugin = await mod.DshProvidersHubPlugin(input, options)
+    /** 建某个供应商实例（默认 officeace；一个渠道一个供应商）。 */
+    const build = async (input = {}, options = {}, channelId = 'officeace') => {
+      const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === channelId)
+      const plugin = await mod.makeHubPlugin(channel)(input, options)
       const cfg = {}
       await plugin.config(cfg)
       return plugin
@@ -45,6 +50,8 @@ async function isolated(fn) {
   } finally {
     process.env.USERPROFILE = originalHome
     process.env.HOME = originalHome
+    if (previousAuthPath === undefined) delete process.env.DSH_HUB_AUTH_PATH
+    else process.env.DSH_HUB_AUTH_PATH = previousAuthPath
     rmSync(sandbox, { recursive: true, force: true })
   }
 }
@@ -248,26 +255,26 @@ test('checkin 按账号槽的渠道分发（officeace 账号 → V11 bonus/claim
   })
 })
 
-test('usage 按账号槽的渠道出窗口（astudio 账号只出 AStudio 的）', async () => {
+test('usage 只出本供应商渠道的窗口（astudio 供应商 → AStudio 的窗口）', async () => {
   await isolated(async ({ build }) => {
     const stub = stubFetch(() => new Response('{"code":0,"data":{}}', { status: 200, headers: { 'content-type': 'application/json' } }))
     try {
-      const plugin = await build()
+      const plugin = await build({}, {}, 'astudio')
       const usage = await plugin.auth.usage(async () => ({ type: 'oauth', channel: 'astudio', accessToken: 'x', ssoSessionId: 's' }))
-      assert.equal(usage.windows.length, 1)
-      assert.match(usage.windows[0].name, /AStudio/)
+      assert.ok(usage.windows.length > 0)
+      for (const w of usage.windows) assert.match(w.name, /AStudio/, `不该出现别的渠道的桶：${w.name}`)
     } finally {
       stub.restore()
     }
   })
 })
 
-test('无账号上下文 → 旁路口径全渠道扫（迁移前行为保持）', async () => {
+test('无账号也无旁路 → 签到报 inactive（不把卡片涂红）', async () => {
   await isolated(async ({ build }) => {
     const plugin = await build()
     const checkin = await plugin.auth.checkin()
-    assert.equal(checkin.outcome, 'inactive', '独立沙箱无旁路凭据 → inactive')
-    assert.match(checkin.message, /无已登录渠道/)
+    assert.equal(checkin.outcome, 'inactive', '独立沙箱无凭据 → inactive')
+    assert.match(checkin.message, /未登录/)
   })
 })
 
@@ -281,7 +288,7 @@ test('重复登录仍未过期的账号 → 弹「账号重复」且**不覆盖�
     const stubCred = bareOf(officeaceAuth())
     // 预置：magpie 里已有同一渠道的账号槽（accountId 同为 OfficeAce，凭据仍有效）
     const fakeAuthJson = JSON.stringify({
-      'providers-hub': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() + 3600_000 },
+      'hub-officeace': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() + 3600_000 },
     })
     const { writeFileSync, mkdirSync } = await import('node:fs')
     const authDir = join(sandbox, '.config', 'magpie')
@@ -298,7 +305,7 @@ test('重复登录仍未过期的账号 → 弹「账号重复」且**不覆盖�
     const original = officeaceChannel.beginLogin
     officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
     try {
-      const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+      const method = plugin.auth.methods[0]
       const handle = await method.authorize()
       await handle.callback()
       assert.equal(toasts.length, 1, '重复登录必须提示「账号重复」')
@@ -321,7 +328,7 @@ test('重复登录已过期的账号 → 弹「已更新登录（已续期）」
     const stubCred = bareOf(officeaceAuth())
     // 预置：账号槽存在，但凭据已过期
     const fakeAuthJson = JSON.stringify({
-      'providers-hub': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() - 3600_000 },
+      'hub-officeace': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() - 3600_000 },
     })
     const { writeFileSync, mkdirSync } = await import('node:fs')
     const authDir = join(sandbox, '.config', 'magpie')
@@ -338,7 +345,7 @@ test('重复登录已过期的账号 → 弹「已更新登录（已续期）」
     const original = officeaceChannel.beginLogin
     officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
     try {
-      const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+      const method = plugin.auth.methods[0]
       const handle = await method.authorize()
       await handle.callback()
       assert.equal(toasts.length, 1, '过期账号重新登录要提示')
@@ -372,7 +379,7 @@ test('登录新账号 → 弹「登录成功（新增账号）」（不误报重
     const original = officeaceChannel.beginLogin
     officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
     try {
-      const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+      const method = plugin.auth.methods[0]
       const handle = await method.authorize()
       await handle.callback()
       assert.equal(toasts.length, 1, '新账号登录也要提示')
@@ -392,11 +399,11 @@ test('登录回调把 auth 交给 magpie 的 client.auth.set（账号槽为主�
     const originalBegin = officeaceChannel.beginLogin
     officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
     try {
-      const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
+      const method = plugin.auth.methods[0]
       const handle = await method.authorize()
       const outcome = await handle.callback()
       assert.equal(saved.length, 1, 'client.auth.set 必须被调（账号槽存储）')
-      assert.equal(saved[0].path.id, 'providers-hub')
+      assert.equal(saved[0].path.id, 'hub-officeace')
       assert.equal(saved[0].body.channel, 'officeace')
       assert.ok(Number.isFinite(saved[0].body.expires), '带 expires（magpie 的到期管理靠它）')
       assert.equal(outcome.channel, 'officeace')

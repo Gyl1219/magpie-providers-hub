@@ -107,8 +107,8 @@ test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async
       secretAccessKey: 'SECRET_SK_SHOULD_NOT_LEAK',
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     })
-    const { DshProvidersHubPlugin } = await import('../index.mjs')
-    const plugin = await DshProvidersHubPlugin({}, {})
+    const { HUB_PLUGINS } = await import('../index.mjs')
+    const plugin = await HUB_PLUGINS.HubOfficeAcePlugin({}, {})
     await plugin.config({})
     // 触发 provider.models（会写快照）—— 用临时 provider.props 空对象
     await plugin.provider.models({ models: {} })
@@ -127,6 +127,9 @@ test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async
     const obj = JSON.parse(body)
     assert.ok(Array.isArray(obj.channels))
     assert.ok(obj.channels.length >= 5, '应含全部渠道')
+    // 拆成十个供应商后，每个渠道都标着自己的供应商 id（页面上「关掉哪个会关掉它」）
+    assert.ok(obj.channels.every((c) => typeof c.provider === 'string' && c.provider.startsWith('hub-')),
+      `渠道行缺 provider 字段：${JSON.stringify(obj.channels.map((c) => c.provider))}`)
   } finally {
     delete process.env.DSH_HUB_SNAPSHOT_PATH
     process.env.USERPROFILE = home

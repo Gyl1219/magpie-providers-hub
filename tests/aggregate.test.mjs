@@ -1,6 +1,6 @@
-// 聚合层的行为契约。
+// 多供应商层的行为契约。
 //
-// 只测「错了会静默出错」的地方：模型前缀分派、未登录回落、单渠道失败隔离。
+// 只测「错了会静默出错」的地方：供应商 id 映射、模型分派、未登录回落、登录入口。
 // 不测「能 import」这类没有诊断价值的断言。
 
 import { test } from 'node:test'
@@ -8,37 +8,56 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DshProvidersHubPlugin } from '../index.mjs'
-import { tierSummarize } from '../src/aggregate.mjs'
+import { HUB_PLUGINS, REGISTERED_CHANNELS, PROVIDER_IDS } from '../index.mjs'
+import { tierSummarize, providerIdOf, providerNameOf } from '../src/aggregate.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-const build = async (options = {}) => {
-  const plugin = await DshProvidersHubPlugin({}, options)
+/** 建一个供应商实例（默认 officeace）。 */
+const build = async (options = {}, exportName = 'HubOfficeAcePlugin') => {
+  const plugin = await HUB_PLUGINS[exportName]({}, options)
   const cfg = {}
   await plugin.config(cfg)
-  return { plugin, provider: cfg.provider['providers-hub'] }
+  return { plugin, cfg, provider: cfg.provider[plugin.provider.id] }
 }
 
-test('一个插件只注册一个供应商：providers-hub', async () => {
-  const plugin = await DshProvidersHubPlugin({}, {})
-  const cfg = {}
-  await plugin.config(cfg)
-  assert.deepEqual(Object.keys(cfg.provider), ['providers-hub'])
+test('一个插件，十个供应商：每个实例只注册自己那一条', async () => {
+  assert.equal(PROVIDER_IDS.length, REGISTERED_CHANNELS.length, '每个渠道一个供应商')
+  assert.equal(new Set(PROVIDER_IDS).size, PROVIDER_IDS.length, '供应商 id 必须唯一')
+  for (const id of PROVIDER_IDS) assert.match(id, /^hub-[a-z0-9-]+$/, `供应商 id 必须是 ASCII：${id}`)
+  for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
+    const plugin = await makePlugin({}, {})
+    const cfg = {}
+    await plugin.config(cfg)
+    const keys = Object.keys(cfg.provider)
+    assert.equal(keys.length, 1, `${exportName} 只能注册一个供应商，实际：${keys.join(',')}`)
+    assert.ok(PROVIDER_IDS.includes(keys[0]), `${exportName} 注册的 id 不在名单里：${keys[0]}`)
+    assert.equal(plugin.provider.id, keys[0], `${exportName} 的 provider.id 与 config 键不一致`)
+    assert.equal(plugin.auth.provider, keys[0], `${exportName} 的 auth.provider 与 provider.id 不一致`)
+  }
 })
 
-test('目录里的模型 id 带渠道前缀（渠道/模型）', async () => {
-  const { plugin, provider } = await build()
-  const models = await plugin.provider.models(provider)
-  const ids = Object.keys(models)
-  assert.ok(ids.length > 0)
-  for (const id of ids) assert.match(id, /^[a-z0-9-]+\/.+/, `模型 id 缺少渠道前缀：${id}`)
-  // 至少含已注册的每个渠道
-  const channels = new Set(ids.map((id) => id.split('/')[0]))
-  assert.ok(channels.has('officeace'))
-  assert.ok(channels.has('astudio'))
-  assert.ok(channels.has('minimaxintl'))
-  assert.ok(channels.has('accio'))
+test('每个供应商一个登录入口（不是每渠道一个供应商时代的十个）', async () => {
+  for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
+    const plugin = await makePlugin({}, {})
+    assert.equal(plugin.auth.methods.length, 1, `${exportName} 应只有一个登录入口`)
+    assert.match(plugin.auth.methods[0].label, /^登录 .+$/)
+  }
+})
+
+test('目录里的模型 id 不再带渠道前缀（一个供应商只有一个渠道）', async () => {
+  for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
+    const plugin = await makePlugin({}, {})
+    const cfg = {}
+    await plugin.config(cfg)
+    const models = await plugin.provider.models(cfg.provider[plugin.provider.id])
+    const ids = Object.keys(models)
+    // 未登录且渠道没有兜底目录时可以是空的（登录后由 catalog 填充）——
+    // 但只要非空，key 就是裸模型名。
+    for (const id of ids) {
+      assert.doesNotMatch(id, /\//, `${exportName} 的模型 id 不该带前缀：${id}`)
+    }
+  }
 })
 
 test('未登录也不返回空目录（回落兜底，选择器不会空掉）', async () => {
@@ -47,30 +66,46 @@ test('未登录也不返回空目录（回落兜底，选择器不会空掉）',
   assert.ok(Object.keys(models).length > 0, '未登录时目录不应为空')
 })
 
-test('登录入口每渠道一个（不是每渠道一个供应商）', async () => {
-  const { plugin } = await build()
-  const labels = plugin.auth.methods.map((m) => m.label)
-  assert.equal(labels.length, 10)
-  assert.ok(labels.some((l) => l.includes('OfficeAce')))
-  assert.ok(labels.some((l) => l.includes('AStudio')))
-  assert.ok(labels.some((l) => l.includes('MiniMax')))
-  assert.ok(labels.some((l) => l.includes('Accio')))
-  assert.ok(labels.some((l) => l.includes('AutoClaw (智谱)')), '国内 AutoClaw 登录入口')
-  assert.ok(labels.some((l) => l.includes('AutoClaw (国际版)')), '国际 AutoClaw 登录入口')
-  assert.ok(labels.some((l) => l.includes('Loomy')), 'Loomy 登录入口')
-  assert.ok(labels.some((l) => l.includes('LobsterAI')), 'LobsterAI 登录入口')
-  assert.ok(labels.some((l) => l.includes('超级麦吉')), '超级麦吉登录入口')
-  assert.ok(labels.some((l) => l.includes('MagiCrew')), 'MagiCrew 国际版登录入口')
-})
-
-test('无法识别的 model 返回 404 而不是抛异常炸掉会话', async () => {
+test('别的供应商的模型打到本供应商 → 404（不静默转发到本渠道）', async () => {
   const { plugin } = await build()
   const { fetch: pluginFetch } = await plugin.auth.loader()
-  const response = await pluginFetch('http://127.0.0.1/x', {
-    method: 'POST',
-    body: JSON.stringify({ model: '不存在的渠道/模型' }),
-  })
-  assert.equal(response.status, 404)
+  for (const model of ['hub-autoclaw/glm-5.3', '不存在的渠道/模型']) {
+    const response = await pluginFetch('http://127.0.0.1/x', {
+      method: 'POST',
+      body: JSON.stringify({ model }),
+    })
+    assert.equal(response.status, 404, `${model} 应 404`)
+  }
+})
+
+test('三种模型写法都认得：裸名 / hub-<渠道>/名 / 旧 officeace/名', async () => {
+  const { plugin } = await build()
+  const { officeaceChannel } = await import('../src/officeace.mjs')
+  const seen = []
+  const original = officeaceChannel.chat
+  officeaceChannel.chat = async (credential, { body }) => {
+    seen.push(body.model)
+    return Response.json({ ok: true })
+  }
+  const originalEnsure = officeaceChannel.expired
+  officeaceChannel.expired = () => false
+  try {
+    const { fetch: pluginFetch } = await plugin.auth.loader(async () => ({
+      type: 'success', channel: officeaceChannel.id, access: 'a',
+    }))
+    for (const model of ['glm-5.3', 'hub-officeace/glm-5.3', 'officeace/glm-5.3']) {
+      const res = await pluginFetch('http://127.0.0.1/x', {
+        method: 'POST',
+        body: JSON.stringify({ model }),
+      })
+      assert.equal(res.status, 200, `${model} 应被接受`)
+    }
+  } finally {
+    officeaceChannel.chat = original
+    officeaceChannel.expired = originalEnsure
+  }
+  // 发给上游的 model 必须是裸名
+  assert.deepEqual(seen, ['glm-5.3', 'glm-5.3', 'glm-5.3'])
 })
 
 test('astudio 明确声明不支持自动续期（不假装能刷新）', async () => {
@@ -81,7 +116,8 @@ test('astudio 明确声明不支持自动续期（不假装能刷新）', async 
   )
 })
 
-test('页面只读快照，不调 magpie.read（magpie 的 read 只服务两个内建项，自造名被拒）', () => {  const app = readFileSync(join(ROOT, 'page/app.js'), 'utf8')
+test('页面只读快照，不调 magpie.read（magpie 的 read 只服务两个内建项，自造名被拒）', () => {
+  const app = readFileSync(join(ROOT, 'page/app.js'), 'utf8')
   assert.doesNotMatch(app, /magpie\.read\s*\(/, '页面不得调用 magpie.read（服务端只认 usage:summary / providers:list）')
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.magpie.reads, undefined, '不应声明自造 read 名（会被服务端拒绝）')
@@ -89,33 +125,41 @@ test('页面只读快照，不调 magpie.read（magpie 的 read 只服务两个�
   assert.doesNotMatch(app, /magpie\.read\("login"/)
 })
 
-test('账号槽的 type=' + "'success'" + ' 也要认（否则每个槽都显示全部渠道的额度）', async () => {
+test('账号槽的 type=' + "'success'" + ' 也要认，且只出本渠道的桶', async () => {
   // 真机 bug：登录回调写 type:'success'，而 authOfChannel 只判 'oauth'
-  // → 永不匹配 → 每个账号槽掉进「旁路全渠道扫」→ 每张卡额度都一样。
+  // → 永不匹配 → 每个账号槽掉进旁路兜底 → 每张卡额度都一样。
   const { plugin } = await build({ notify: false })
   const { officeaceChannel } = await import('../src/officeace.mjs')
-  const original = officeaceChannel.beginLogin
+  const originalLogin = officeaceChannel.beginLogin
+  const originalUsage = officeaceChannel.usage
+  const originalExpired = officeaceChannel.expired
   officeaceChannel.beginLogin = async () => ({
     url: 'https://auth.example',
     result: Promise.resolve({ access: 'a', expiresAt: new Date(Date.now() + 3600_000).toISOString() }),
   })
+  officeaceChannel.usage = async () => [{ name: 'officeace-only', used: 0, amount: 42 }]
+  officeaceChannel.expired = () => false
   try {
-    const method = plugin.auth.methods.find((m) => m.label.includes('OfficeAce'))
-    const handle = await method.authorize()
+    const handle = await plugin.auth.methods[0].authorize()
     const auth = await handle.callback()
     assert.equal(auth.type, 'success')
-    assert.equal(auth.channel, 'officeace')
-    // 该 auth 必须能被「属于本渠道」判定认出来
+    assert.equal(auth.channel, officeaceChannel.id)
     const usage = await plugin.auth.usage(async () => auth)
-    assert.ok(usage.windows.length > 0)
-    // 且只显示**该渠道**的桶（不是全渠道扫）
-    assert.ok(
-      usage.windows.every((w) => w.name.startsWith('OfficeAce')),
-      `账号槽只应显示本渠道的桶，实际：${usage.windows.map((w) => w.name).join(' | ')}`,
-    )
+    assert.equal(usage.windows.length, 1)
+    assert.equal(usage.windows[0].name, 'officeace-only', '桶名不该再带渠道前缀')
+    assert.equal(usage.windows[0].amount, 42)
   } finally {
-    officeaceChannel.beginLogin = original
+    officeaceChannel.beginLogin = originalLogin
+    officeaceChannel.usage = originalUsage
+    officeaceChannel.expired = originalExpired
   }
+})
+
+test('供应商 id / 显示名映射：hub- 前缀 + 中文名', () => {
+  const byId = Object.fromEntries(REGISTERED_CHANNELS.map((c) => [providerIdOf(c), providerNameOf(c)]))
+  assert.equal(byId['hub-officeace'], '华为云 OfficeAce')
+  assert.equal(byId['hub-astudio'], 'AStudio（讯飞）')
+  assert.ok(Object.values(byId).every((name) => typeof name === 'string' && name.length > 0))
 })
 
 // ── 三档汇总（指针方案 A）───────────────────────────────────────────────

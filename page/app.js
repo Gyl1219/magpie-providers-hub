@@ -94,7 +94,9 @@ function renderSnapshot() {
   for (const ch of s.channels) {
     const tr = el("tr");
     const nameTd = el("td", ch.displayName || ch.id);
-    if (ch.backend) nameTd.appendChild(el("span", " " + ch.backend, "muted"));
+    // 所属 magpie 供应商 id（一个渠道一个供应商：关掉它 = 关掉这个渠道）
+    if (ch.provider) nameTd.appendChild(el("span", " " + ch.provider, "muted"));
+    else if (ch.backend) nameTd.appendChild(el("span", " " + ch.backend, "muted"));
     tr.appendChild(nameTd);
 
     const signTd = el("td");

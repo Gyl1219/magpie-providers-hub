@@ -14,7 +14,6 @@ process.env.HOME = sandbox
 const { minimaxintlChannel } = await import('../src/minimaxintl.mjs')
 const { accioChannel } = await import('../src/accio.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
-const { DshProvidersHubPlugin } = await import('../index.mjs')
 
 test.after = () => {
   process.env.USERPROFILE = originalHome
@@ -228,14 +227,15 @@ test('assignExpiryBands：指针随最早桶耗尽/过期而滚动（12天桶接
   assert.equal(round3[0].band, '永久')
 })
 
-// ── 聚合层分发 ──────────────────────────────────────────────────────────
+// ── 供应商层分发 ────────────────────────────────────────────────────────
 
-test('聚合 usage：有分桶的渠道出桶、没有的出状态条、失败不吞', async () => {
-  const plugin = await DshProvidersHubPlugin({}, {})
+test('未登录的供应商：usage 出「未登录」状态条（不报成查询失败）', async () => {
+  const { HUB_PLUGINS } = await import('../index.mjs')
+  const plugin = await HUB_PLUGINS.HubOfficeAcePlugin({}, {})
   const cfg = {}
   await plugin.config(cfg)
   const result = await plugin.auth.usage()
-  assert.equal(result.plan, 'Providers Hub')
-  // 沙箱 HOME 无凭据 → 全部渠道未登录 → 空 windows
-  assert.deepEqual(result.windows, [])
+  assert.equal(result.plan, '华为云 OfficeAce')
+  assert.equal(result.windows.length, 1)
+  assert.match(result.windows[0].display, /未登录/)
 })

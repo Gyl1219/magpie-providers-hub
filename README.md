@@ -12,32 +12,42 @@ Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的 10 个�
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个供应商，内部聚合多个渠道
+## 形态：一个插件，十个供应商（v0.4.0）
 
-与 ofm 同款 —— **Magpie 的供应商列表里只有 `providers-hub` 一个条目**，而不是每个渠道
-一个条目。模型 id 带渠道前缀：
+**装一次，Magpie 里出现十个供应商**，一个渠道一条：
 
 ```
-officeace/glm-5.3        ← 目录里的形态（渠道/模型）
-astudio/spark-x
+hub-officeace   hub-astudio     hub-minimaxintl  hub-accio     hub-autoclaw
+hub-autoclawintl hub-loomy      hub-lobsterai    hub-<麦吉国内> hub-<麦吉国际>
 ```
 
-请求进来时按前缀分派到对应渠道，发给上游时**去掉**前缀。
+- 一个 git 仓库 / 一个 npm 包 / 一条安装命令 —— provider id 不是包，插件包可以注册任意多个
+  （社区 `opencode-trae-auth` 一个包两个供应商、`opencode-qoder-auth` 一个包四个，同理）；
+- 每个供应商有自己的登录按钮、额度卡、rpm 与开关，**可以单独关掉**；
+- magpie 的故障转移是 provider 粒度 ⇒ 现在**能跨渠道切**了（`hub-officeace` 被限流时可以换到
+  `hub-autoclaw` 的账号）；
+- 模型 id 由 magpie 拼成 `hub-officeace/glm-5.3`（目录里我们返回的是裸模型名 `glm-5.3`）。
+
+> **从 0.3.x 升级**：旧版是「一个供应商 `providers-hub` 内部聚合十渠道」，模型 id 形如
+> `providers-hub/officeace/glm-5.3`。升级后旧模型名一律失效（magpie 没有别名表），
+> 需要在模型选择器里重选；已登录账号会由插件**自动搬**到新的供应商槽
+> （`providers-hub*` → `hub-*`，`migrateLegacySlots`，幂等、可关），搬不动的旁路凭据照常供
+> 对话/额度/签到使用，只是卡片显示「未登录」，重登一次即可。
 
 ## 当前渠道
 
-| 渠道 | 归属 | 登录方式 | 模型 | 续期 |
-|---|---|---|---|---|
-| `officeace` | 华为云 AgentArts | 华为云 OAuth（PKCE + DPoP + 云侧轮询） | `/v2/models` | ✅ STS（⚠️ refresh_token 一次性） |
-| `astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `/api/v1/model-manager/models` | ❌ 不支持（会话一年，不滑动） |
-| `minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（浏览器确认 user_code） | `/mavis/api/v1/models?region=en` | ✅ 标准 refresh_token 轮换 |
-| `accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调 | `POST /api/llm/config/v2` | ✅ refresh（⚠️ 轮换 refresh_token，已串行化） |
-| `autoclaw` | 智谱 AutoClaw 国内 | 本地载体页（**一键导入桌面端凭据** / 短信验证码） | `/autoclaw-proxy/proxy/autoclaw-model-config` | ✅ 标准 refresh_token 轮换 |
-| `autoclawintl` | 智谱 AutoClaw 国际版 | Z.ai OAuth（授权页回调）+ 本地导入 | 同上（两站同协议） | ✅ 同左 |
-| `loomy` | 讯飞 Loomy | 本地载体页（短信验证码） | `GET /models` | ❌ 无 refresh 端点（session 14 天） |
-| `lobsterai` | 有道 LobsterAI（龙虾） | 官方门户 OAuth + 本机 loopback 回调 | `/api/models/available` | ✅ 标准 refresh_token 轮换 |
-| `magicrew` | 超级麦吉（letsmagic.cn） | 载体页：CDP 浏览器登录 / 手机号密码 / 粘贴 JWT | `/api/v1/flows/models` | ✅ refresh_token（⚠️ PUT 一次轮换一次）+ `mgw_` api_key 2h 自续 |
-| `magicrew-intl` | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
+| 渠道 id | 供应商 id | 归属 | 登录方式 | 模型 | 续期 |
+|---|---|---|---|---|---|
+| `officeace` | `hub-officeace` | 华为云 AgentArts | 华为云 OAuth（PKCE + DPoP + 云侧轮询） | `/v2/models` | ✅ STS（⚠️ refresh_token 一次性） |
+| `astudio` | `hub-astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `/api/v1/model-manager/models` | ❌ 不支持（会话一年，不滑动） |
+| `minimaxintl` | `hub-minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（浏览器确认 user_code） | `/mavis/api/v1/models?region=en` | ✅ 标准 refresh_token 轮换 |
+| `accio` | `hub-accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调 | `POST /api/llm/config/v2` | ✅ refresh（⚠️ 轮换 refresh_token，已串行化） |
+| `autoclaw` | `hub-autoclaw` | 智谱 AutoClaw 国内 | 本地载体页（**一键导入桌面端凭据** / 短信验证码） | `/autoclaw-proxy/proxy/autoclaw-model-config` | ✅ 标准 refresh_token 轮换 |
+| `autoclawintl` | `hub-autoclawintl` | 智谱 AutoClaw 国际版 | Z.ai OAuth（授权页回调）+ 本地导入 | 同上（两站同协议） | ✅ 同左 |
+| `loomy` | `hub-loomy` | 讯飞 Loomy | 本地载体页（短信验证码） | `GET /models` | ❌ 无 refresh 端点（session 14 天） |
+| `lobsterai` | `hub-lobsterai` | 有道 LobsterAI（龙虾） | 官方门户 OAuth + 本机 loopback 回调 | `/api/models/available` | ✅ 标准 refresh_token 轮换 |
+| 超级麦吉（国内） | `hub-` + 渠道 id | 超级麦吉（letsmagic.cn） | 载体页：CDP 浏览器登录 / 手机号密码 / 粘贴 JWT | `/api/v1/flows/models` | ✅ refresh_token（⚠️ PUT 一次轮换一次）+ `mgw_` api_key 2h 自续 |
+| MagiCrew（国际） | `hub-` + 渠道 id | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
 
 ### autoclaw / autoclawintl
 
@@ -152,8 +162,11 @@ PUT 一次轮换一次（一次性，必须串行 + 立即落盘）**。登录�
 
 ```bash
 magpie plugin add <本仓库路径或 github:Gyl1219/magpie-providers-hub>
-magpie plugin login providers-hub     # 选渠道登录
+magpie plugin login hub-officeace     # 登录某个渠道（十个供应商各登各的）
 ```
+
+模型在选择器里长这样（magpie 自动补供应商名）：`hub-officeace/glm-5.3`、
+`hub-loomy/spark-x`、`hub-autoclaw/zai_auto`…
 
 改代码后重载（终端每次按文件夹当前内容加载；应用里需关掉再打开）：
 
@@ -161,6 +174,9 @@ magpie plugin login providers-hub     # 选渠道登录
 magpie plugin off "<目录>"
 magpie plugin on  "<目录>"
 ```
+
+⚠️ 插件选项（如 minimax 的绕行 IP/代理）仍是**插件级**：
+`magpie plugin options providers-hub '{"minimaxXff":"<海外IP>"}'` —— 十個实例都会收到。
 
 ## 为什么做这些
 
@@ -185,25 +201,22 @@ ofm、社区包有覆盖重叠，仍收进本仓库：它们各自有必须真�
 
 ## 已知边界
 
-### 聚合形态的两个取舍（有意为之，但要知道）
+### 为什么从「聚合」改成「一个插件十个供应商」
 
-一个 provider id 意味着 magpie 把十个渠道当成**一个**供应商，由此有两点与
-「每渠道一个独立包」的形态不同（[#1](https://github.com/Gyl1219/magpie-providers-hub/issues/1)
-里由 [@MYCF711](https://github.com/MYCF711) 指出，属实）：
+0.3.x 是一个 provider id 包住十个渠道（ofm 同款）。问题出在 magpie 的粒度
+（[#1](https://github.com/Gyl1219/magpie-providers-hub/issues/1) 里由
+[@MYCF711](https://github.com/MYCF711) 指出，属实）：
 
-- **故障转移不跨渠道**：magpie 的 failover（换账号/换模型）按 provider 粒度运作 ——
-  OfficeAce 被限流时不会自动切到 AStudio，而是原样返回该渠道的错误。
-- **设置按 provider 粒度**：关掉一个渠道 = 关掉整个 `providers-hub`；
-  fallback / preset 也无法只针对单渠道。
+- **故障转移不跨渠道**：failover 按 provider 粒度运作 —— OfficeAce 被限流时不会切到
+  AStudio，而是原样返回错误；
+- **设置按 provider 粒度**：关掉一个渠道 = 关掉全部；fallback / preset 无法只针对单渠道。
 
-对应的补偿：渠道级的配额冷却/轮换在**聚合层内部**按渠道区分（`gatedRenew` 去重闸、
-单渠道失败不拖垮其它渠道的目录与转发）；需要跨渠道转移会话时，在模型选择器里
-换 `providers-hub/<另一个渠道>/…` 即可。
+v0.4.0 拆开后这两点都没了（每渠道一条供应商），代价是**模型名一次性变化**
+（`providers-hub/officeace/x` → `hub-officeace/x`）与旧账号槽需要迁移（插件自动做）。
 
-如果你更需要「单渠道独立开关 + 原生 failover」，社区有独立包可选
-（如 [@MYCF711/magpie-officeace](https://github.com/MYCF711/magpie-officeace)，
+社区仍有独立包可选（如 [@MYCF711/magpie-officeace](https://github.com/MYCF711/magpie-officeace)，
 它在本插件 officeace 实现的基础上补了 V11 签名订阅 API 与 bonus 签到）。
-两条路线 provider id 不同，可以共存。
+我们用 `hub-` 前缀就是为了**不与它们抢 provider id**，两条路线可以同时装、同时用。
 
 - **officeace 需先开通 ModelArts MaaS**：未开通时 `permission-validate` 不返回
   `model_app_key`，插件会明确提示去华为云控制台开通。
@@ -211,13 +224,18 @@ ofm、社区包有覆盖重叠，仍收进本仓库：它们各自有必须真�
   失败会 `console.warn` 留痕，**绝不静默吞掉**。
 - **astudio 无程序化续期**：`refresh()` 直接抛错说明要人工重登，不假装有。
 - 极验**不破解**：加载官方 `gt.js`，把回调给的 `challenge`/`validate`/`seccode` 原样提交。
+- **旁路-only 渠道的签到**：一键导入的 AutoClaw 这类没有 magpie 账号（magpie 不会为它调
+  checkin）⇒ 由插件的 5 分钟 sweep **每日补签一次**，结果只进页面快照。
 
 ## 加一个新渠道
 
 1. 写 `src/<channel>.mjs`，导出渠道对象：`{ id, displayName, fallbackModels, login, refresh, expired, catalog, chat }`
 2. 在 `src/aggregate.mjs` 的 `CHANNELS` 里加一项
+3. 在 `index.mjs` 加一个 `export const Hub<名字>Plugin = makeHubPlugin(channel)` + 塞进 `HUB_PLUGINS`
 
-不需要新建目录，不需要新建插件条目。
+⚠️ 入口模块里**每个函数导出都是一个供应商**：工厂/工具函数不能从 `index.mjs` 导出。
+供应商 id 自动是 `hub-<渠道 id>`，显示名默认取渠道的 `displayName`（可在
+`PROVIDER_NAME_OVERRIDES` 覆盖）。
 
 ## 测试
 
@@ -234,8 +252,8 @@ OpenAI↔Anthropic 翻译、目录口径、设备码认证、额度到期分档�
 ## 结构
 
 ```
-index.mjs                  导出插件函数
-src/aggregate.mjs          聚合层：一个供应商，按前缀分派（含聚合级续期去重闸）
+index.mjs                  十个具名插件导出（每个渠道一个供应商）+ HUB_PLUGINS
+src/aggregate.mjs          供应商工厂：makeHubPlugin(channel)、模块级快照/sweep/迁移
 src/officeace.mjs          华为云渠道
 src/astudio.mjs            讯飞渠道
 src/minimaxintl.mjs        MiniMax 国际版渠道（设备码 + PKCE）

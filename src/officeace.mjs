@@ -540,6 +540,12 @@ async function signAndRequest(url, credential, method, body) {
   const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders.join(';'), payloadHash].join('\n')
   const scope = `${xdate.slice(0, 8)}/${region}/${service}`
   const stringToSign = ['V11-HMAC-SHA256', xdate, scope, createHash('sha256').update(canonicalRequest).digest('hex')].join('\n')
+  // ⚠️ 残缺凭据（只落了 access、没有 secret —— 例：登录走到一半的旁路文件）会让
+  //    下面 HMAC 抛 Node 的 ERR_INVALID_ARG_TYPE，卡片显示成看不懂的英文报错。
+  //    这里先拦一道，给一句能照做的提示。
+  if (!credential?.access || !credential?.secret) {
+    throw new Error('凭据不完整（缺 access/secret），请重新登录华为云 OfficeAce')
+  }
   const u1 = createHmac('sha256', credential.access).update(credential.secret).digest()
   const derivedKey = createHmac('sha256', u1)
     .update(Buffer.concat([Buffer.from(scope, 'utf8'), Buffer.from([1])]))

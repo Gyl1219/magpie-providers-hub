@@ -15,7 +15,7 @@ process.env.HOME = sandbox
 
 const { parseSigninPanel, checkin: minimaxCheckin, minimaxintlChannel } = await import('../src/minimaxintl.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
-const { DshProvidersHubPlugin, REGISTERED_CHANNELS } = await import('../src/aggregate.mjs')
+const { makeHubPlugin, REGISTERED_CHANNELS } = await import('../src/aggregate.mjs')
 
 test.after = () => {
   process.env.USERPROFILE = originalHome
@@ -266,40 +266,47 @@ test('astudio 签到：新用户礼包一并领取（多弹窗积分求和）', 
   }
 })
 
-// ── 聚合层分发 ──────────────────────────────────────────────────────────
+// ── 供应商层分发 ────────────────────────────────────────────────────────
 
-test('聚合 checkin：无凭据 → inactive（旁路口径不臆造渠道明细）', async () => {
-  const plugin = await DshProvidersHubPlugin({}, {})
+test('无凭据的供应商 → inactive（不臆造渠道明细，也不涂红）', async () => {
+  const plugin = await makeHubPlugin(REGISTERED_CHANNELS[0])({}, {})
   const cfg = {}
   await plugin.config(cfg)
   // 凭据存档在沙箱 HOME：全未登录 → inactive 且不发请求
   const outcome = await plugin.auth.checkin()
   assert.equal(outcome.outcome, 'inactive')
-  assert.match(outcome.message, /无已登录渠道/)
+  assert.match(outcome.message, /未登录/)
   assert.equal(outcome.credit, undefined)
 })
 
-test('聚合 checkin：有渠道的账号只返回自己渠道的结果（谁失败在谁下面）', async () => {
+test('签到只报自己：别的渠道失败不会串到本账号（谁失败在谁下面）', async () => {
   // 真机报障：全渠道的签到明细被怼到每个账号底下（Loomy 卡片挂着 OfficeAce /
-  // MiniMax / AutoClaw… 一整屏）。正确语义：账号卡片只显示自己渠道的签到结果；
-  // 旁路渠道（无账号槽）的结果只进页面快照。
-  const plugin = await DshProvidersHubPlugin({}, { notify: false })
-  const cfg = {}
-  await plugin.config(cfg)
+  // MiniMax / AutoClaw… 一整屏）。拆成十个供应商后，每个实例只签自己的渠道。
   const channels = REGISTERED_CHANNELS
   const [own, other] = channels
+  const ownPlugin = await makeHubPlugin(own)({}, { notify: false })
+  const otherPlugin = await makeHubPlugin(other)({}, { notify: false })
+  for (const p of [ownPlugin, otherPlugin]) {
+    const cfg = {}
+    await p.config(cfg)
+  }
   for (const c of channels) c.checkin = async () => ({ outcome: 'done', message: `${c.displayName} OK` })
   // other 渠道签到失败
   other.checkin = async () => ({ outcome: 'failed', message: `${other.displayName} 炸了` })
-  // 让 other 有旁路凭据（sweep 才会签它 —— 生产里 minimaxintl 就是这种形态）
+  // 让 other 有旁路凭据 —— 生产里「一键导入」的渠道就是这种形态
   const { saveCredential } = await import('../src/shared.mjs')
   saveCredential(other.id, { access_token: 't' })
   try {
-    const outcome = await plugin.auth.checkin(async () => ({ type: 'success', channel: own.id }))
+    const outcome = await ownPlugin.auth.checkin(async () => ({ type: 'success', channel: own.id }))
     assert.equal(outcome.outcome, 'done', '本账号渠道的结果')
     assert.match(outcome.message, /OK/, '只含自己渠道的信息')
     assert.equal(outcome.message.includes(other.displayName), false,
       '别的渠道的签到结果不能怼到这个账号下面')
+
+    // 别的供应商卡片自己红自己 —— 不影响上面那个
+    const otherOutcome = await otherPlugin.auth.checkin()
+    assert.equal(otherOutcome.outcome, 'failed')
+    assert.match(otherOutcome.message, /炸了/)
   } finally {
     for (const c of channels) delete c.checkin
   }

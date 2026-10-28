@@ -5,24 +5,61 @@
 //   来自原项目：账号渠道、EAC 授权流程、本地服务与管理界面。
 //   本仓库新增：Magpie 供应商接口、自动服务管理、浏览器管理入口、兼容测试。
 //
-// **一个供应商，内部聚合多个渠道**（与 ofm 同款形态）。
+// **一个插件，十个供应商**（v0.4.0 起）：每个渠道是 magpie 里一条独立供应商
+// （`hub-officeace`、`hub-astudio`…），各自登录 / 额度 / 开关 / 故障转移。
+// 模型 id 由 magpie 拼成 `hub-officeace/glm-5.3`（渠道前缀不再出现在我们返回的目录里）。
 //
-// 模型 id 带渠道前缀（渠道/模型），例：`officeace/glm-5.3`；
-// magpie 展示时会补供应商名，呈现为 `providers-hub/officeace/glm-5.3`。
-// 请求进来时按前缀分派到对应渠道，发给上游时去掉前缀。
+// v0.3.x 是「一个供应商 `providers-hub` 内部聚合十渠道」，模型 id 形如
+// `providers-hub/officeace/glm-5.3` —— 拆分原因：magpie 的 failover 与单渠道开关
+// 都是 provider 粒度，聚合形态下二者都做不到（见 README「已知边界」）。
+//
+// ⚠️ 入口模块里**每个函数导出都是一个插件**（社区包同款：`opencode-trae-auth`
+//    一个模块导出两个插件函数 = 两个供应商）。所以：
+//    · 只能导出 `makeHubPlugin()` 造出来的成品函数；
+//    · 工厂/工具函数不要从本文件导出（放 src/，或塞进 `HUB_PLUGINS` 这类对象里）。
 //
 // 全部**独立实现**：登录、续期、转发都在本插件里，不依赖 DSH，不依赖 DSH 桌面版。
 //
-// ## 只做 ofm（our-free-model）没有的渠道
-//
-// ofm 已覆盖 13 个（CodeArts / WorkBuddy 国内+国际 / LobsterAI / Qoder 国内+国际 /
-// TRAE / Cline / Loomy / Raccoon / MiniMax Code / ZCode / Gemini），
-// 故 lobsterai、loomy **不做** —— 做了就是和 ofm 重复。
-//
-// 加渠道 = 在 `src/aggregate.mjs` 的 `CHANNELS` 里加一项（渠道文件导出渠道对象）。
-// 待补：accio（阿里，登录页有「请升级客户端」校验 + 实测 502）、deepseek-account。
+// 加渠道 = 在 `src/aggregate.mjs` 的 `CHANNELS` 里加一项（渠道文件导出渠道对象），
+//          再在下面补一个具名导出 + `HUB_PLUGINS` 条目。
 //
 // ⚠️ hub 的 `aggregate` / `jet-hub-auto` 是**池路由**（hub 内部把请求分给其它渠道），
 //    不是真实渠道，无法独立实现 —— 那部分只能走依赖 hub 网关的桥接插件。
 
-export { DshProvidersHubPlugin } from './src/aggregate.mjs'
+import { makeHubPlugin } from './src/aggregate.mjs'
+import { officeaceChannel } from './src/officeace.mjs'
+import { astudioChannel } from './src/astudio.mjs'
+import { minimaxintlChannel } from './src/minimaxintl.mjs'
+import { accioChannel } from './src/accio.mjs'
+import { autoclawChannel, autoclawIntlChannel } from './src/autoclaw.mjs'
+import { loomyChannel } from './src/loomy.mjs'
+import { lobsteraiChannel } from './src/lobsterai.mjs'
+import { magicrewChannel, magicrewIntlChannel } from './src/magicrew.mjs'
+
+export const HubOfficeAcePlugin = makeHubPlugin(officeaceChannel)
+export const HubAStudioPlugin = makeHubPlugin(astudioChannel)
+export const HubMiniMaxIntlPlugin = makeHubPlugin(minimaxintlChannel)
+export const HubAccioPlugin = makeHubPlugin(accioChannel)
+export const HubAutoClawPlugin = makeHubPlugin(autoclawChannel)
+export const HubAutoClawIntlPlugin = makeHubPlugin(autoclawIntlChannel)
+export const HubLoomyPlugin = makeHubPlugin(loomyChannel)
+export const HubLobsterAIPlugin = makeHubPlugin(lobsteraiChannel)
+export const HubMagicrewPlugin = makeHubPlugin(magicrewChannel)
+export const HubMagicrewIntlPlugin = makeHubPlugin(magicrewIntlChannel)
+
+/** provider id → 插件函数（测试用；**对象**导出不会被 magpie 当插件）。 */
+export const HUB_PLUGINS = {
+  HubOfficeAcePlugin,
+  HubAStudioPlugin,
+  HubMiniMaxIntlPlugin,
+  HubAccioPlugin,
+  HubAutoClawPlugin,
+  HubAutoClawIntlPlugin,
+  HubLoomyPlugin,
+  HubLobsterAIPlugin,
+  HubMagicrewPlugin,
+  HubMagicrewIntlPlugin,
+}
+
+// ⚠️ 只导出**数组/对象**这类非函数值（测试用）。函数导出 = 一个供应商，别乱加。
+export { REGISTERED_CHANNELS, PROVIDER_IDS } from './src/aggregate.mjs'

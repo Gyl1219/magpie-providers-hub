@@ -1,11 +1,21 @@
-// 聚合层：一个供应商，内部聚合多个渠道；凭据进 **magpie 账号槽**（多账号）。
+// 多供应商层：**一个插件，十个供应商**（每个供应商 = 一个渠道）。
 //
-// ## 形态：一个供应商，多渠，多账号
+// ## 形态：一个渠道一个供应商（v0.4.0 起）
 //
-// 参照 ofm（our-free-model）：**一个供应商条目**覆盖多个渠道，模型 id 带渠道前缀
-// （`officeace/glm-5.3`）。在此之上，凭据按 magpie 的**账号槽**存放（社区插件同款）：
+// `makeHubPlugin(channel)` 为每个渠道造一个插件函数；`index.mjs` 导出十个
+// ⇒ magpie 里出现十条供应商（`hub-officeace`、`hub-astudio`…），各自登录/额度/
+// 开关/故障转移。模型 id 由 magpie 拼成 `hub-officeace/glm-5.3`（**渠道前缀已去掉**，
+// 因为一个供应商只服务一个渠道）。
+//
+// 历史：v0.3.x 是「一个供应商 `providers-hub` 内部聚合十渠道」，模型 id 形如
+// `providers-hub/officeace/glm-5.3`。拆开的原因：magpie 的 failover / 单渠道开关
+// 都是 **provider 粒度**，聚合形态下二者都做不到（见 README「已知边界」）。
+//
+// ## 凭据：magpie 账号槽（多账号）
+//
 // 每次登录 = 一个账号条目，auth 里带 `channel` 字段标记归属渠道 ——
 // 同渠道可挂多个账号（不再互相覆盖），magpie 网关在额度耗尽时自动换槽。
+// 旧版（聚合形态）在 `providers-hub*` 槽里的账号由 `migrateLegacySlots()` 一次性搬过来。
 //
 // ## 存储：账号槽为主，旁路文件为兜底（双写）
 //
@@ -26,7 +36,7 @@ import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mk
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
-import { loadCredential, saveCredential, notSignedIn, untilText, readMagpieAuthSlots, debugLog } from './shared.mjs'
+import { loadCredential, saveCredential, notSignedIn, untilText, readMagpieAuthEntries, readMagpieAuthSlots, debugLog } from './shared.mjs'
 import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
@@ -38,27 +48,42 @@ import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { startSelfRegister } from './self-register.mjs'
 import { sanitizeXff } from './minimax-transport.mjs'
 
-const PROVIDER = 'providers-hub'
-const PROVIDER_NAME = 'Providers Hub'
+/** 旧版（聚合形态）的供应商 id —— 账号槽迁移的读来源，别再拿去注册。 */
+const LEGACY_PROVIDER = 'providers-hub'
+
+/** 新供应商 id 前缀：`hub-<渠道 id>`。⚠️ ASCII、发布后不可改（登录态/模型名按它认领）。 */
+const HUB_PREFIX = 'hub-'
+
+/**
+ * 渠道显示名的少量覆盖（其余用渠道自己的 displayName）。
+ * 供应商名会出现在 magpie 供应商列表、登录按钮、用量卡标题上。
+ */
+const PROVIDER_NAME_OVERRIDES = {
+  officeace: '华为云 OfficeAce',
+}
+
+/** 所有注册进来的渠道。加渠道 = 往这里加一项（并在上面 import + index.mjs 导出）。 */
+const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel]
+
+/** 供应商 id / 显示名（一个渠道一个供应商）。 */
+export const providerIdOf = (channel) => `${HUB_PREFIX}${channel.id}`
+export const providerNameOf = (channel) => PROVIDER_NAME_OVERRIDES[channel.id] ?? channel.displayName
+export const PROVIDER_IDS = CHANNELS.map(providerIdOf)
+
+// 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
+export { CHANNELS as REGISTERED_CHANNELS }
 
 /** magpie 在到期前这么多毫秒调 auth.refresh（对齐各渠道 10 分钟临期口径）。 */
 const REFRESH_LEAD_MS = 10 * 60 * 1000
 
 /**
- * loader 的占位 baseURL。
+ * loader 的占位 baseURL（每个供应商一个 `.invalid` 保留域）。
  *
  * ⚠️ 不能留空串：magpie 会据此判「无处可发」（`nowhere to send its requests`）。
- *    本插件的请求全部在 `loader().fetch` 里按渠道前缀改写到各上游，这个域名不会被真正访问；
- *    用 `.invalid` 保留域（RFC 2606）保证即使漏拦截也不会打到真实主机。
+ *    本插件的请求全部在 `loader().fetch` 里改写到各上游，这个域名不会被真正访问；
+ *    用 `.invalid`（RFC 2606）保证即使漏拦截也不会打到真实主机。
  */
-const PLACEHOLDER_BASE = 'https://providers-hub.invalid'
-
-/** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
-/** 注册进来的渠道。加渠道 = 往这里加一项（并在上面 import）。 */
-const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel]
-
-// 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
-export { CHANNELS as REGISTERED_CHANNELS }
+const placeholderBaseOf = (providerId) => `https://${providerId}.invalid`
 
 // ── 账号（auth）与凭据的形状工具 ──────────────────────────────────────────
 
@@ -199,42 +224,28 @@ async function ensureAuth(channel, auth) {
 /** 已登录渠道（旁路口径 —— 目录合并用；账号槽由 magpie 自管）。 */
 const signedIn = (channel) => Boolean(sidecarCredentialOf(channel))
 
-// ── 目录：合并渠道目录，模型 id 加渠道前缀 ────────────────────────────────
+// ── 目录：单渠道目录，key 不带渠道前缀 ────────────────────────────────────
 
 /**
- * 目录里的模型 id 只带**渠道**前缀：`officeace/glm-5.3`
- * （与 jethub 同形态：那里 `loomy/GLM-5.3-Flash` 的 `loomy` 也是渠道）。
- * magpie 展示/选择时会自动补供应商名前缀，呈现为 `providers-hub/officeace/glm-5.3`。
+ * 一个供应商只有一个渠道 ⇒ 模型 id 就是**渠道自己的模型名**（`glm-5.3`）。
+ * magpie 展示/选择时自动补供应商名前缀，呈现为 `hub-officeace/glm-5.3`。
+ * ⚠️ 别再加渠道前缀：那会变成 `hub-officeace/officeace/glm-5.3`。
  */
-function prefixed(channelId, modelId) {
-  return `${channelId}/${modelId}`
-}
-
-/**
- * 合并所有渠道的目录。⚠️ **按渠道分别回落**：已登录渠道拉真实目录、
- * 未登录渠道用兜底目录（否则「officeace 登录后 astudio 的模型凭空消失」）。
- */
-async function discoverModels(fallback) {
-  const merged = {}
-  for (const channel of CHANNELS) {
-    let models
-    if (signedIn(channel)) {
-      try {
-        const credential = await ensure(channel)
-        models = await channel.catalog(credential)
-      } catch {
-        // 单渠道失败不影响其它渠道；退回该渠道自己的兜底目录
-        models = undefined
-      }
-    }
-    if (!models || Object.keys(models).length === 0) {
-      models = channel.fallbackModels ?? {}
-    }
-    for (const [id, def] of Object.entries(models)) {
-      merged[prefixed(channel.id, id)] = def
+async function discoverModels(channel, fallback) {
+  let models
+  if (signedIn(channel)) {
+    try {
+      const credential = await ensure(channel)
+      models = await channel.catalog(credential)
+    } catch {
+      // 拉目录失败退回该渠道自己的兜底目录（选择器不会空掉）
+      models = undefined
     }
   }
-  return Object.keys(merged).length > 0 ? merged : fallback
+  if (!models || Object.keys(models).length === 0) {
+    models = channel.fallbackModels ?? {}
+  }
+  return Object.keys(models).length > 0 ? models : fallback
 }
 
 // ── 页面快照（侧边栏 Providers Hub 页用的只读数据）──────────────────────
@@ -350,10 +361,10 @@ function sanitizeWindows(windows) {
  */
 function buildSnapshot() {
   const previous = readPreviousSnapshot()
-  // 每渠道的 magpie 账号槽数：accountId 相同 = 原地更新（同账号重登不重复，
-  // magpie 原生语义）；不同 accountId 并存 = 真多账号。槽数 >1 说明该渠道
-  // 登了多个账号，>0 且旁路也有 = 正常。
-  const slots = readMagpieAuthSlots(PROVIDER)
+  // 每渠道的 magpie 账号槽数：一个渠道一个供应商，槽的 key 形如 `hub-<渠道>` /
+  // `hub-<渠道>#<slot>`。accountId 相同 = 原地更新（magpie 原生语义）；
+  // 不同 accountId 并存 = 真多账号。
+  const slots = readMagpieAuthEntries()
   const channels = CHANNELS.map((channel) => {
     const credential = sidecarCredentialOf(channel)
     const signedInNow = Boolean(credential)
@@ -370,11 +381,12 @@ function buildSnapshot() {
     const accountSlots = slots.filter((s) => s.channel === channel.id).length
     return {
       id: channel.id,
+      // 该渠道对应的 magpie 供应商 id（页面上「关掉哪个供应商会关掉它」）
+      provider: providerIdOf(channel),
       displayName: channel.displayName,
       signedIn: signedInNow,
       ...(expired ? { expired: true } : {}),
       ...(accountSlots > 0 ? { accounts: accountSlots } : {}),
-      // 逐渠道模型数：从合并目录按 `<channel>/` 前缀统计（没有则 0）
       modelCount: snapshotCache.perChannelModelCount?.[channel.id] ?? 0,
       buckets,
       ...(ck ? { checkin: { outcome: ck.outcome, credit: ck.credit, message: ck.message } }
@@ -383,7 +395,7 @@ function buildSnapshot() {
   })
   return {
     at: Date.now(),
-    provider: PROVIDER_NAME,
+    provider: 'Providers Hub',
     models: snapshotCache.modelCount,
     channels,
   }
@@ -502,7 +514,174 @@ export function tierSummarize(rows) {
   return [...out, ...rest]
 }
 
-export const DshProvidersHubPlugin = async (input, options = {}) => {
+/** 自注册只需一次（十个供应商实例共用同一张市场卡片）。 */
+let selfRegistered = false
+
+/** 模块级 sweep 状态（十个实例共用一个定时器）。 */
+const sweepState = { timer: undefined, everyMs: undefined, xff: undefined, proxy: undefined }
+
+/** 当日签到记账（十个实例共享 —— 同一渠道不会重复签）。 */
+const dailyCheckin = { day: '', map: new Map() }
+
+function checkinTallyOf() {
+  const day = new Date().toDateString()
+  if (dailyCheckin.day !== day) {
+    dailyCheckin.day = day
+    dailyCheckin.map.clear()
+  }
+  return dailyCheckin.map
+}
+
+/**
+ * 一个渠道的用量窗口（有 usage() 出分桶，没有出登录状态条；失败带原因）。
+ *
+ * ⚠️ 不加渠道名前缀：一个供应商卡片只有一个渠道，前缀是重复信息（旧聚合形态下
+ *   才有「一张卡平铺全部渠道」的归属问题）。
+ * ⚠️ **桶过多时按「指针方案」汇总成三档**（用户定的方案 A，不用上游 15 天窗口口径）：
+ *   - 临期 = **当前最早到期的那一批**（指针桶，display 即真实倒计时，200 天的桶
+ *     轮到它也标真实天数 —— 自解释，无假警报）；
+ *   - 长期 = 其余有到期批次的合计，指向其中最早 —— 指针桶一死它自动转正；
+ *   - 永久 = 无到期批次合计。
+ *   AutoClaw 的流水批次一次能出 8+ 条，逐条平铺把卡片刷满（用户报障）。
+ */
+async function usageWindowsOf(channel, credential, extras = {}) {
+  if (typeof channel.usage === 'function') {
+    try {
+      const rows = await channel.usage(credential, { xff: extras.xff, proxy: extras.proxy })
+      if (Array.isArray(rows) && rows.length > 0) return tierSummarize(rows)
+    } catch (error) {
+      return [{
+        name: channel.displayName,
+        used: 0,
+        display: `额度查询失败：${error instanceof Error ? error.message : String(error)}`,
+      }]
+    }
+  }
+  return [{
+    name: channel.displayName,
+    used: 0,
+    display: channel.expired?.(credential) ? '已过期，请重新登录' : '已登录',
+  }]
+}
+
+/** 该渠道在 magpie 里有没有账号槽（有 = 签到由 magpie 按账号调；没有 = 得自己补签）。 */
+function hasAccountSlot(channel) {
+  return readMagpieAuthEntries().some((entry) => entry.channel === channel.id)
+}
+
+/**
+ * 旁路-only 渠道的每日补签（模块级 sweep 调用）。
+ *
+ * 一键导入的 AutoClaw 这类渠道没有走过 magpie 登录 ⇒ 没有账号槽 ⇒
+ * magpie 永远不会为它调 checkin。旧版靠「任意账号签到顺带扫全渠道」兜住，
+ * 拆成十个供应商后每个实例只看自己 —— 这条兜底必须搬到定时器里。
+ * 结果只写页面快照（不进任何账号的返回信息）。
+ */
+async function sweepCheckins() {
+  const tally = checkinTallyOf()
+  for (const channel of CHANNELS) {
+    if (typeof channel.checkin !== 'function') continue
+    if (!signedIn(channel)) continue
+    if (hasAccountSlot(channel)) continue
+    const cached = tally.get(channel.id)
+    if (cached !== undefined && cached.outcome !== 'failed') continue
+    try {
+      const outcome = await channel.checkin(sidecarCredentialOf(channel), { xff: sweepState.xff, proxy: sweepState.proxy })
+      tally.set(channel.id, {
+        channel: channel.displayName,
+        outcome: outcome.outcome,
+        credit: Number.isFinite(outcome.credit) ? outcome.credit : undefined,
+        message: outcome.message,
+      })
+    } catch (error) {
+      tally.set(channel.id, {
+        channel: channel.displayName,
+        outcome: 'failed',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+    const row = tally.get(channel.id)
+    snapshotCache.checkin.set(channel.id, row)
+  }
+}
+
+/** 迁移只做一次的 promise 缓存（每个供应商一条）。 */
+const migrationsStarted = new Map()
+
+/** 仅供测试：模块级 sweep / 迁移入口（不从 index.mjs 导出）。 */
+export const _internal = {
+  sweepAllChannels: async () => {
+    await sweepAllChannels()
+    writeSnapshot()
+  },
+  resetMigrations: () => migrationsStarted.clear(),
+  /** 测试里前面用过 notify:false（会关掉快照写入），这里显式打开。 */
+  enableSnapshotWrites: () => { snapshotWritesDisabled = false },
+}
+
+/**
+ * 旧版（聚合形态 v0.3.x）账号槽 → 新供应商槽的一次性迁移。
+ *
+ * 旧槽 key = `providers-hub` / `providers-hub#<slot>`，槽里有 `channel` 字段；
+ * 新槽 key = `hub-<渠道 id>`。不迁移的话，用户升级后每张卡都显示「未登录」
+ * （旁路凭据还在，对话其实还能用，但账号槽丢了 magpie 的换号/签到）。
+ *
+ * 幂等：新槽已有内容就跳过；写的是 magpie 的地盘，但只经 `client.auth.set`。
+ */
+async function migrateLegacySlots(authSet, channel, providerId) {
+  if (typeof authSet !== 'function') return
+  const started = migrationsStarted.get(providerId)
+  if (started !== undefined) return started
+  const task = (async () => {
+    try {
+      if (readMagpieAuthSlots(providerId).length > 0) return
+      const legacy = readMagpieAuthEntries(LEGACY_PROVIDER).filter((entry) => entry.channel === channel.id)
+      for (const entry of legacy) {
+        try {
+          await authSet({ path: { id: providerId }, body: entry.value })
+          debugLog(`migrated slot ${entry.key} → ${providerId}`)
+        } catch (e) {
+          debugLog(`migrate failed ${entry.key}: ${e.message}`)
+        }
+      }
+    } catch { /* 迁移失败不影响启动：旁路兜底 */ }
+  })()
+  migrationsStarted.set(providerId, task)
+  return task
+}
+
+/**
+ * 全渠道扫描（模块级定时器专用）：每渠道查额度桶 + 旁路-only 渠道补签。
+ * 结果同步进快照缓存，供侧边栏页读取。
+ */
+async function sweepAllChannels() {
+  for (const each of CHANNELS) {
+    if (!signedIn(each)) continue
+    // ⚠️ 走 ensure（临期软续期）：AutoClaw 的 access_token 只活 24h，
+    //    旁路凭据不续期的话卡片第二天就报「额度查询失败」。
+    let credential
+    try {
+      credential = await ensure(each)
+    } catch {
+      credential = sidecarCredentialOf(each)
+    }
+    if (credential === undefined) continue
+    const eachWindows = await usageWindowsOf(each, credential, { xff: sweepState.xff, proxy: sweepState.proxy })
+    snapshotCache.buckets.set(each.id, eachWindows)
+  }
+  await sweepCheckins()
+}
+
+/**
+ * 一个渠道 → 一个插件函数（= magpie 的一个供应商）。
+ *
+ * ⚠️ `index.mjs` 只能导出本工厂**造出来的成品函数**；工厂本身不能从入口导出 ——
+ *    magpie 把入口模块里的**每个函数导出**都当成一个插件（社区包同款：
+ *    `opencode-trae-auth` 一个模块导出两个插件函数 = 两个供应商）。
+ */
+export const makeHubPlugin = (channel) => async (input, options = {}) => {
+  const PROVIDER = providerIdOf(channel)
+  const PROVIDER_NAME = providerNameOf(channel)
   const openBrowser = typeof options.openBrowser === 'function' ? options.openBrowser : undefined
   /**
    * 自注册：把本插件写进 magpie 的本地市场缓存（`~/.cache/magpie/plugin-market.json`）。
@@ -511,23 +690,27 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
    * magpie 只在启动时整体重写这个缓存、静默期间不碰（模板作者实测），故写一次即稳、
    * 绝不轮询。移植自 MYCF711/magpie-plugin-template（MIT），见 src/self-register.mjs 头注。
    */
-  startSelfRegister({
-    package: 'magpie-providers-hub',
-    name: 'Providers Hub',
-    providers: [PROVIDER],
-    community: true,
-    summary: {
-      en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one provider aggregating 10 channels — OfficeAce, AStudio, MiniMax Code Intl, Accio, AutoClaw CN/Intl, Loomy, LobsterAI, Magicrew CN/Intl. Runs without DSH.',
-      zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：一个供应商聚合十个渠道——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy（讯飞）、LobsterAI（有道）、超级麦吉/MagiCrew（国内+国际），不依赖 DSH 运行。',
-    },
-  }, {
-    configDir: typeof input?.directory === 'string' ? input.directory : undefined,
-    log: (msg) => {
-      try {
-        input?.client?.app?.log?.({ service: 'providers-hub', level: 'info', message: msg })
-      } catch { /* 日志失败不影响注册 */ }
-    },
-  })
+  if (!selfRegistered) {
+    selfRegistered = true
+    startSelfRegister({
+      package: 'magpie-providers-hub',
+      name: 'Providers Hub',
+      // 一个插件，十个供应商（插件行的「承载 …」就是这个列表）
+      providers: PROVIDER_IDS,
+      community: true,
+      summary: {
+        en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one plugin with 10 providers, each a separate channel you can sign in to, meter and switch off on its own — OfficeAce, AStudio, MiniMax Code Intl, Accio, AutoClaw CN/Intl, Loomy, LobsterAI, Magicrew CN/Intl. Runs without DSH.',
+        zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：一个插件注册十个供应商（每个渠道一条，可各自登录/看额度/单独关闭）——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy（讯飞）、LobsterAI（有道）、超级麦吉/MagiCrew（国内+国际），不依赖 DSH 运行。',
+      },
+    }, {
+      configDir: typeof input?.directory === 'string' ? input.directory : undefined,
+      log: (msg) => {
+        try {
+          input?.client?.app?.log?.({ service: 'providers-hub', level: 'info', message: msg })
+        } catch { /* 日志失败不影响注册 */ }
+      },
+    })
+  }
   /**
    * MiniMax 国际版的可选绕行 IP（`magpie plugin options providers-hub
    * '{"minimaxXff":"<海外IP>"}'` 设置）。⚠️ 默认关闭；`sanitizeXff` 白名单
@@ -609,35 +792,52 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       return undefined
     }
   }
-  /** 当日签到记账（checkin 的全渠道合并 —— 见 auth.checkin 注释）。 */
-  const checkinTally = { day: '', map: new Map() }
 
-  /** 请求体里的 model 是 `<channel>/<model>`（可能带供应商前缀）；拆出渠道。 */
+  /** 请求体里的 model 可能是 `glm-5.3` / `hub-officeace/glm-5.3` / 旧 `officeace/glm-5.3`。 */
   const resolve = (modelId) => {
-    const raw = String(modelId ?? '')
-    const parts = raw.split('/')
-    const channelId = parts.length >= 2 ? parts[parts.length - 2] : ''
-    const inner = parts[parts.length - 1] ?? ''
-    const channel = CHANNELS.find((c) => c.id === channelId)
-    return channel ? { channel, model: inner } : undefined
+    const parts = String(modelId ?? '').trim().split('/').filter((s) => s !== '')
+    if (parts.length === 0) return undefined
+    const model = parts[parts.length - 1]
+    if (model === '') return undefined
+    if (parts.length === 1) return { channel, model }
+    // 前缀必须属于本供应商（magpie 供应商前缀 / 渠道 id / 旧聚合形态），
+    // 别的供应商的模型打到我们头上 → 404，别静默转发到本渠道。
+    const prefix = parts[parts.length - 2]
+    const outer = parts.length >= 3 ? parts[parts.length - 3] : undefined
+    const ours = prefix === PROVIDER || prefix === channel.id || outer === PROVIDER || outer === LEGACY_PROVIDER
+    return ours ? { channel, model } : undefined
   }
 
-  // ── 宿主侧定时刷新快照 ──
+  // ── 宿主侧定时刷新快照（模块级唯一的定时器，十个实例共用）──
   //
   // magpie 只在用量页/目录刷新时调 usage —— 页面快照可能一小时都不更新
   // （用户报障：等半天没刷新）。宿主是常驻进程：**自己定时**查一遍已登录
   // 渠道并写快照，侧边栏页的「刷新周期」才有新东西可读。
   //
+  // ⚠️ 定时器必须 only-once（十个供应商实例各起一个就是十个定时器）；放模块级。
   // ⚠️ 测试进程不弹通知（options.notify:false），但 sweep 定时器**无条件启动**
   //    （unref 不驻留进程，node --test 不会假死；生产靠它保证快照新鲜 ——
   //    ⚠️ 不能用 NODE_TEST_CONTEXT 判断测试：magpie 的 bun 宿主环境里它有值，
   //    会把生产 sweep 整个关掉）。可用 options.snapshotRefreshMinutes 调（默认 5 分钟，0 = 关闭）。
   const sweepMinutes = Number(options.snapshotRefreshMinutes)
+  sweepState.xff = minimaxXff
+  sweepState.proxy = minimaxProxy
   const sweepEveryMs = (Number.isFinite(sweepMinutes) && sweepMinutes > 0 ? sweepMinutes : 5) * 60_000
-  const sweepTimer = setInterval(() => {
-    void sweepAllUsage().then(() => writeSnapshot()).catch(() => {})
-  }, sweepEveryMs)
-  sweepTimer.unref?.()
+  if (sweepMinutes !== 0 && sweepState.everyMs === undefined) {
+    sweepState.everyMs = sweepEveryMs
+    sweepState.timer = setInterval(() => {
+      void sweepAllChannels().then(() => writeSnapshot()).catch(() => {})
+    }, sweepEveryMs)
+    sweepState.timer.unref?.()
+  }
+
+  /** 本渠道的用量窗口（带本实例的 xff/proxy 选项）。 */
+  const windowsOf = (credential) => usageWindowsOf(channel, credential, { xff: minimaxXff, proxy: minimaxProxy })
+
+  // 旧版账号槽 → 本供应商槽（一次性、幂等；见函数注释）。失败不影响启动。
+  if (options.migrateLegacySlots !== false) {
+    await migrateLegacySlots(authSet, channel, PROVIDER)
+  }
 
   return {
     async config(cfg) {
@@ -664,10 +864,11 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       // magpie 在到期前 LEAD 调 refresh（多账号时按各账号自己的 auth 调）
       refreshLead: REFRESH_LEAD_MS,
 
-      // 每渠道一个登录入口。⚠️ 约定（对齐社区插件）：authorize() 必须**立刻**
-      // 返回 { url, method, callback } —— 在这里 await 用户完成登录会与 magpie
-      // 双向死锁；真正等登录的是 callback()。渠道契约 beginLogin() → { url, result }。
-      methods: CHANNELS.map((channel) => ({
+      // 本供应商唯一的登录入口（一个渠道一个供应商）。⚠️ 约定（对齐社区插件）：
+      // authorize() 必须**立刻**返回 { url, method, callback } —— 在这里 await
+      // 用户完成登录会与 magpie 双向死锁；真正等登录的是 callback()。
+      // 渠道契约 beginLogin() → { url, result }。
+      methods: [((channel) => ({
         type: 'oauth',
         label: `登录 ${channel.displayName}`,
         async authorize() {
@@ -760,20 +961,19 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
             },
           }
         },
-      })),
+      }))(channel)],
 
       /**
        * 按账号发请求：`getAuth()` 拿**当前账号槽**的 auth。
        *
-       * - auth 属于目标渠道 → 用它（同渠道多账号：magpie 换槽即换号）；
-       * - auth 属于**别的**渠道（多渠供应商轮到别的账号）或读不到 →
-       *   旁路兜底（旁路 = 最近一次成功使用的该渠道凭据）；
+       * - auth 属于本渠道 → 用它（同渠道多账号：magpie 换槽即换号）；
+       * - 读不到（如旁路-only 的账号）→ 旁路兜底（最近一次成功使用的凭据）；
        * - 都没有 → 明确的未登录响应（不炸会话）。
        */
       async loader(getAuth) {
         return {
           // ⚠️ baseURL 不能是空串：magpie 会据此判「无处可发」；真正上游在 fetch 里改写。
-          baseURL: PLACEHOLDER_BASE,
+          baseURL: placeholderBaseOf(PROVIDER),
           async fetch(input, init) {
             let body
             try {
@@ -821,29 +1021,34 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
       },
 
       /**
-       * 用量卡：**按账号**（getAuth 的渠道）出该渠道的桶；读不到账号时
-       * 退回「旁路口径的全渠道扫」（迁移前/异常路径的行为保持不变）。
+       * 用量卡：**按账号**出本渠道的桶；读不到账号（旁路-only）走旁路兜底。
        */
       async usage(getAuth) {
         const auth = await safeGetAuth(getAuth)
-        const channel = CHANNELS.find((c) => authOfChannel(auth, c))
-        if (channel !== undefined) {
-          const credential = await ensureAuth(channel, auth)
-          const windows = await usageWindowsOf(channel, credential)
-          snapshotCache.buckets.set(channel.id, windows)
-          writeSnapshot()
-          return { plan: PROVIDER_NAME, windows }
+        let credential
+        if (authOfChannel(auth, channel)) {
+          credential = await ensureAuth(channel, auth)
+        } else {
+          try {
+            credential = await ensure(channel)
+          } catch {
+            // 没账号也没旁路 → 状态条「未登录」，不要报成额度查询失败
+            return {
+              plan: PROVIDER_NAME,
+              windows: [{ name: channel.displayName, used: 0, display: `未登录（${PROVIDER}）` }],
+            }
+          }
         }
-        const windows = await sweepAllUsage()
+        const windows = await windowsOf(credential)
+        snapshotCache.buckets.set(channel.id, windows)
         writeSnapshot()
         return { plan: PROVIDER_NAME, windows }
       },
 
-      // magpie 的显式/提前续期入口：**按 auth.channel 分发**（多账号各续各的）。
+      // magpie 的显式/提前续期入口（**本供应商的账号各续各的**）。
       // astudio 无 refresh_token → 返回 undefined（magpie 保持原登录不动）。
       async refresh(auth) {
-        const channel = CHANNELS.find((c) => authOfChannel(auth, c))
-        if (channel === undefined) return undefined
+        if (!authOfChannel(auth, channel)) return undefined
         if (identityOf(auth) === '') return undefined
         const next = await gatedRenew(channel, auth) // 失败抛出，magpie 如实记失败
         await saveAuth(next)
@@ -852,92 +1057,56 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
 
       /**
        * 每日签到：**按账号**（magpie 对每个账号每天调一次 —— 社区插件同款）。
-       * 该渠道无签到端点 → inactive；读不到账号 → 旁路口径全渠道扫（兼容）。
-       * 返回词汇表：claimed / done / inactive / ineligible / failed（+credit/streak）。
+       * 该渠道无签到端点 → inactive。返回词汇表：claimed / done / inactive /
+       * ineligible / failed（+credit/streak）。
        *
-       * ⚠️⚠️ **当日全渠道记账**（用户真机缺口）：magpie 的每日签到**按账号槽**
-       * 调用 —— 旁路-only 渠道（如一键导入的 AutoClaw，没走过 magpie 登录）
-       * 永远轮不到 ⇒ 它们的签到从没人替它执行（卡片只 +100）。修法：每次
-       * checkin 调用 = 本账号渠道照签 + 顺带扫掉当日还没签的旁路渠道，
-       * 返回**当日合计**（credit 求和）—— 服务端幂等（已签 → done/0），
-       * 与其它账号槽的并发调用也不双计；magpie 无论取最后一次还是求和都对。
-       * 失败的渠道不缓存（下次调用重试）；claimed/done 当日缓存不重打。
+       * ⚠️⚠️ **只报自己**（用户定案：谁的结果在谁的卡片下面）。旧版会顺带扫其余
+       *   十渠并把明细汇总返回，真机报障「Loomy 卡片挂着 OfficeAce/MiniMax 一整屏」。
+       *   现在一个供应商只有一个渠道，汇总分支整个删掉。
+       * ⚠️ 旁路-only 渠道（没有账号槽，magpie 轮不到它）由模块级 sweep 补签，
+       *   见 `sweepCheckins()`。
        */
       async checkin(getAuth) {
         const auth = await safeGetAuth(getAuth)
-        const channel = CHANNELS.find((c) => authOfChannel(auth, c))
-        const day = new Date().toDateString()
-        if (checkinTally.day !== day) {
-          checkinTally.day = day
-          checkinTally.map.clear()
+        const tally = checkinTallyOf()
+        if (typeof channel.checkin !== 'function') {
+          snapshotCache.checkin.set(channel.id, { channel: channel.displayName, outcome: 'inactive', message: `${channel.displayName} 无每日签到` })
+          writeSnapshot()
+          return { outcome: 'inactive', message: `${channel.displayName} 无每日签到` }
         }
-        const tally = checkinTally.map
-
-        if (channel !== undefined && typeof channel.checkin === 'function') {
-          const cached = tally.get(channel.id)
-          if (cached === undefined || cached.outcome === 'failed') {
-            try {
-              const credential = await ensureAuth(channel, auth)
-              const outcome = await channel.checkin(credential, { xff: minimaxXff, proxy: minimaxProxy })
-              tally.set(channel.id, { channel: channel.displayName, outcome: outcome.outcome, credit: Number.isFinite(outcome.credit) ? outcome.credit : undefined, message: outcome.message })
-            } catch (error) {
-              tally.set(channel.id, { channel: channel.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
-            }
-          }
+        const cached = tally.get(channel.id)
+        const signedInHere = authOfChannel(auth, channel) || signedIn(channel)
+        if (!signedInHere) {
+          // 既没有本账号、也没有旁路凭据 → 不是「失败」，只是没登录（别把卡片涂红）
+          return { outcome: 'inactive', message: `未登录 ${channel.displayName}，跳过签到` }
         }
-        // 其余有旁路的渠道：账号槽没覆盖到的在这里补签（含本账号渠道无签到端点的情况）。
-        // ⚠️⚠️ 这些结果**只进页面快照**，绝不进本账号的返回信息 —— 真机报障：
-        //   全渠道的签到明细被怼到**每个**账号底下（Loomy 卡片挂着 OfficeAce /
-        //   MiniMax / AutoClaw… 一整屏），用户原话「谁失败在谁下面啊，你全怼到一块干嘛」。
-        for (const c of CHANNELS) {
-          if (typeof c.checkin !== 'function') continue
-          if (tally.has(c.id)) continue
-          if (!signedIn(c)) continue
+        if (cached === undefined || cached.outcome === 'failed') {
           try {
-            const outcome = await c.checkin(sidecarCredentialOf(c), { xff: minimaxXff, proxy: minimaxProxy })
-            tally.set(c.id, { channel: c.displayName, outcome: outcome.outcome, credit: Number.isFinite(outcome.credit) ? outcome.credit : undefined, message: outcome.message })
+            const credential = authOfChannel(auth, channel)
+              ? await ensureAuth(channel, auth)
+              : await ensure(channel)
+            const outcome = await channel.checkin(credential, { xff: minimaxXff, proxy: minimaxProxy })
+            tally.set(channel.id, {
+              channel: channel.displayName,
+              outcome: outcome.outcome,
+              credit: Number.isFinite(outcome.credit) ? outcome.credit : undefined,
+              message: outcome.message,
+            })
           } catch (error) {
-            tally.set(c.id, { channel: c.displayName, outcome: 'failed', message: error instanceof Error ? error.message : String(error) })
+            tally.set(channel.id, {
+              channel: channel.displayName,
+              outcome: 'failed',
+              message: error instanceof Error ? error.message : String(error),
+            })
           }
         }
-
-        // 快照同步（tally 以 displayName 为 key，反查回 channel.id）—— 全渠道都记，
-        // 旁路渠道的失败在这里可见（Providers Hub 页的签到列），不打扰别的账号。
-        for (const r of tally.values()) {
-          const ch = CHANNELS.find((c) => c.displayName === r.channel)
-          if (ch) snapshotCache.checkin.set(ch.id, r)
-        }
+        const own = tally.get(channel.id)
+        snapshotCache.checkin.set(channel.id, own)
         writeSnapshot()
-
-        // ⚠️⚠️ 返回值：**有渠道的账号只报自己**（谁的结果在谁的卡片下面）。
-        //   无渠道上下文（api key 形态）才返回全渠道汇总。
-        if (channel !== undefined) {
-          const own = tally.get(channel.id)
-            ?? { outcome: 'inactive', message: `${channel.displayName} 无每日签到` }
-          return {
-            outcome: own.outcome,
-            ...(Number.isFinite(own.credit) && own.credit > 0 ? { credit: own.credit } : {}),
-            message: own.message ?? '',
-          }
-        }
-        const all = [...tally.values()]
-        if (all.length === 0) return { outcome: 'inactive', message: '无已登录渠道' }
-        const claimed = all.filter((r) => r.outcome === 'claimed')
-        const failed = all.filter((r) => r.outcome === 'failed')
-        const done = all.filter((r) => r.outcome === 'done')
-        const creditSum = claimed.reduce((s, r) => s + (r.credit ?? 0), 0)
         return {
-          // 判定顺序：claimed（领到新额度）→ done（都签过了）→ failed → inactive
-          outcome: claimed.length > 0
-            ? 'claimed'
-            : done.length > 0
-              ? 'done'
-              : failed.length > 0
-                ? 'failed'
-                : 'inactive',
-          ...(creditSum > 0 ? { credit: creditSum } : {}),
-          message: all.map((r) => `${r.channel}：${r.message ?? (r.outcome === 'claimed' ? `已领 ${r.credit ?? ''}` : r.outcome)}`).join('；'),
-          channels: all,
+          outcome: own.outcome,
+          ...(Number.isFinite(own.credit) && own.credit > 0 ? { credit: own.credit } : {}),
+          message: own.message ?? '',
         }
       },
     },
@@ -945,88 +1114,15 @@ export const DshProvidersHubPlugin = async (input, options = {}) => {
     provider: {
       id: PROVIDER,
       async models(provider) {
-        const models = await discoverModels(provider.models)
-        // 逐渠道模型数（key 形如 `<channel>/<model>`）+ 总数，喂给页面快照
+        const models = await discoverModels(channel, provider.models)
+        // 本渠道模型数 + 总数，喂给页面快照（一个供应商只有一个渠道，计数即全量）
         try {
-          const perChannel = {}
-          for (const key of Object.keys(models ?? {})) {
-            const slash = key.indexOf('/')
-            if (slash <= 0) continue
-            const channelId = key.slice(0, slash)
-            perChannel[channelId] = (perChannel[channelId] ?? 0) + 1
-          }
-          snapshotCache.perChannelModelCount = perChannel
+          snapshotCache.perChannelModelCount = { ...(snapshotCache.perChannelModelCount ?? {}), [channel.id]: Object.keys(models ?? {}).length }
           snapshotCache.modelCount = Object.keys(models ?? {}).length
           writeSnapshot()
         } catch { /* 快照失败不影响目录 */ }
         return models
       },
     },
-  }
-
-  /**
-   * 单渠道的用量窗口（有 usage() 出分桶，没有出登录状态条；失败带原因）。
-   *
-   * ⚠️ **所有桶的 name 统一加渠道前缀**：一张卡平铺全部渠道的桶，
-   *   没前缀时「每日签到 ×7」与别的渠道的桶混在一起无法归属（用户真机报障）。
-   * ⚠️ **桶过多时按「指针方案」汇总成三档**（用户定的方案 A，不用上游
-   *   15 天窗口口径）：
-   *   - 临期 = **当前最早到期的那一批**（指针桶，resetsAt 即真实倒计时，
-   *     200 天的桶轮到它也标真实天数 —— 自解释，无假警报）；
-   *   - 长期 = 其余有到期批次的合计，resetsAt 指向其中最早 —— 指针桶一死
-   *     它自动转正（12 天桶在 3 天桶烧完前显示长期，转正时还剩 9 天，
-   *     来得及看到）；
-   *   - 永久 = 无到期批次合计。
-   *   AutoClaw 的流水批次一次能出 8+ 条，逐条平铺把卡片刷满（用户报障）。
-   */
-  async function usageWindowsOf(channel, credential) {
-    // 已带本渠道前缀的不叠双前缀（防御旧形态旁路/测试夹具）
-    const withPrefix = (name) => name.startsWith(`${channel.displayName} · `)
-      ? name
-      : `${channel.displayName} · ${name}`
-    if (typeof channel.usage === 'function') {
-      try {
-        let rows = await channel.usage(credential, { xff: minimaxXff, proxy: minimaxProxy })
-        if (Array.isArray(rows) && rows.length > 0) {
-          rows = tierSummarize(rows)
-          return rows.map((row) => ({ ...row, name: withPrefix(typeof row?.name === 'string' ? row.name : '') }))
-        }
-      } catch (error) {
-        return [{
-          name: channel.displayName,
-          used: 0,
-          display: `额度查询失败：${error instanceof Error ? error.message : String(error)}`,
-        }]
-      }
-    }
-    return [{
-      name: channel.displayName,
-      used: 0,
-      display: channel.expired?.(credential) ? '已过期，请重新登录' : '已登录',
-    }]
-  }
-
-  /**
-   * 旁路口径的全渠道扫（auth.usage 无账号上下文时 / 页面 read('refresh') 共用）。
-   * 每个已登录渠道走 ensure（临期软续期）再查桶；结果同步进快照缓存。
-   */
-  async function sweepAllUsage() {
-    const windows = []
-    for (const each of CHANNELS) {
-      if (!signedIn(each)) continue
-      // ⚠️ 走 ensure（临期软续期）：AutoClaw 的 access_token 只活 24h，
-      //    旁路凭据不续期的话卡片第二天就报「额度查询失败」。
-      let credential
-      try {
-        credential = await ensure(each)
-      } catch {
-        credential = sidecarCredentialOf(each)
-      }
-      if (credential === undefined) continue
-      const eachWindows = await usageWindowsOf(each, credential)
-      snapshotCache.buckets.set(each.id, eachWindows)
-      windows.push(...eachWindows)
-    }
-    return windows
   }
 }

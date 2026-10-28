@@ -64,14 +64,17 @@ async function usage(credential) {
 
 ### 归属：**谁的结果在谁下面**（用户 2026-10-28 定案）
 
-聚合层 `checkin(getAuth)` 会被 magpie 对**每个账号**各调一次。规则：
+（v0.4.0 起）**一个渠道一个供应商**：magpie 只会对**本供应商**的每个账号各调一次
+`checkin(getAuth)`，所以天然「谁的结果在谁下面」。规则：
 
-- 有渠道的账号 → **只返回自己渠道的结果**（outcome/credit/message 都是自己）。
-  旁路补签（无账号槽的渠道，如 sidecar-only 的 minimaxintl）照跑，但结果
-  **只进页面快照**（`snapshotCache.checkin`），**绝不**进本账号的返回信息。
-  —— 真机报障：全渠道明细怼到每个账号底下（Loomy 卡片挂着 OfficeAce/MiniMax/
-  AutoClaw 一整屏），用户原话「谁失败在谁下面啊，你全怼到一块干嘛」。
-- 无渠道上下文（api key 形态）→ 才返回全渠道汇总。
+- 有账号上下文 → **只返回本渠道的结果**（outcome/credit/message 都是自己）。
+  别的渠道的签到结果**绝不**进本账号的返回信息。
+  —— 真机报障（0.3.x 聚合形态）：全渠道明细怼到每个账号底下（Loomy 卡片挂着
+  OfficeAce/MiniMax/AutoClaw 一整屏），用户原话「谁失败在谁下面啊，你全怼到一块干嘛」。
+- 没账号槽、只有旁路凭据的渠道（一键导入的 AutoClaw 这类，magpie 不会为它调
+  checkin）→ 由**模块级 sweep 每日补签一次**，结果**只进页面快照**
+  （`snapshotCache.checkin`）。
+- 既没账号也没旁路 → `inactive`（不是 failed，别把卡片涂红）。
 
 ### 判定顺序：claimed → done → failed → inactive
 
@@ -147,7 +150,8 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 
 ## 6. 其它既有约定（简记）
 
-- 渠道 `id` = magpie 供应商 id，一旦发布不能改（用户登录态按它认领）
+- 供应商 id = `hub-<渠道 id>`，一旦发布不能改（用户登录态按它认领，改名 = 十个渠道集体掉线）；
+  渠道 `id` 也别改（它是 `<渠道>-credential.json` 与模型前缀的来源）
 - 登录走 `beginLogin(openBrowser)` → `{ url, result }`；`authorize()` 立刻返回，
   真正等登录的是 `callback()`；**通知/快照挂自己的完成链**
   （`started.result.then`）—— magpie 对 auto 流程未必回调 callback（真机实证）
@@ -158,3 +162,30 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 - OfficeAce 的 refresh_token 一次性（STS5.1806）：STS 成功**立即落盘** +
   并发去重闸（refreshInFlight）—— 已消费的救不回，只能重登
 - 提交信息用 `-F <file>`（PowerShell 内联多行会乱）；临时草稿文件进 .gitignore
+
+## 7. 形态：一个插件，十个供应商（v0.4.0）
+
+0.3.x 是「一个 provider id `providers-hub` 内部聚合十渠道」。v0.4.0 拆成
+**每个渠道一条供应商**：magpie 的 failover 与开关都是 provider 粒度，聚合形态下
+跨渠道切换与单渠道关闭都做不到（issue #1）。
+
+- **`index.mjs` 里每个函数导出 = 一个供应商**：只能导出 `makeHubPlugin(channel)`
+  造出来的成品函数；工厂/工具函数不许从入口导出（否则 magpie 会当成一个新供应商，
+  启动时报插件字段缺失）。测试用的映射放**对象/数组**导出（`HUB_PLUGINS`）。
+- 供应商 id = `hub-<渠道 id>`，**必须 ASCII**：它会进模型名、CLI 参数、
+  `<provider>/<account>` 槽 key。中文 id 会让 `magpie plugin login <id>`
+  与模型 id 都出问题（故显示名用中文 `PROVIDER_NAME_OVERRIDES`，不是 id）。
+- 目录返回**裸模型名**（`glm-5.3`），由 magpie 拼成 `hub-officeace/glm-5.3`；
+  `resolve()` 三种写法都认：裸名 / `hub-<渠道>/名` / 旧 `渠道/名`，
+  别的供应商 id → 404（不静默转发）。
+- **共享的模块级状态**（十个实例共用，别塞进工厂）：
+  `snapshotCache`（页面快照）、`sweepState`（5 分钟扫额度 + 旁路渠道补签）、
+  `checkinTally`（当日记账）、`migrationsStarted`（旧槽迁移只做一次）、
+  `selfRegistered`（市场缓存只注册一次）。
+  ⚠️ 定时器只能建**一次**：工厂里 `setInterval` 会随 magpie 加载十个实例起十个。
+- **旧账号槽迁移**：`migrateLegacySlots()` 把 `providers-hub*` 的槽按 `channel`
+  字段搬到 `hub-<渠道>`，幂等（新槽已存在就不动）、可用 `options.migrateLegacySlots:false`
+  关掉。搬不动的旁路 sidecar 凭据照常供对话/额度/签到使用。
+- **测试**：`tests/setup.mjs` 把 HOME 与快照路径都重定向到临时目录 —— 否则测试会读到
+  本机真实凭据，「未登录回落」类用例真的去请求上游（实测每个死凭据等 10s）。
+  单测要改 HOME 的用例，记得同时改 `DSH_HUB_AUTH_PATH`（env 优先级高于 HOME）。

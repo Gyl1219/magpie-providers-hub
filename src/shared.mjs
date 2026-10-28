@@ -35,27 +35,43 @@ export function magpieAuthPath() {
   return process.env.DSH_HUB_AUTH_PATH ?? join(storeDir(), 'plugin-auth.json')
 }
 
-/** 读 magpie 账号槽：`[{key, type, accountId, channel, expires}]`（本插件的槽）。读不到返回 []。 */
-export function readMagpieAuthSlots(providerId) {
+/**
+ * 读 magpie 账号槽的**原始条目**：`[{key, channel, value}]`（value 是 magpie 存的整个 auth）。
+ * 只读，绝不写（那是 magpie 的地盘）；路径可用 env 重定向（测试）。
+ *
+ * @param {string} [providerId] 省略 = 全部槽（调用方自己按 `channel` 过滤归属）
+ */
+export function readMagpieAuthEntries(providerId) {
   try {
     const obj = JSON.parse(readFileSync(magpieAuthPath(), 'utf8'))
     const out = []
     for (const [key, val] of Object.entries(obj ?? {})) {
-      if (key !== providerId && !key.startsWith(`${providerId}#`)) continue
       if (typeof val !== 'object' || val === null) continue
-      const expires = Number(val.expires)
-      out.push({
-        key,
-        type: typeof val.type === 'string' ? val.type : '',
-        accountId: typeof val.accountId === 'string' ? val.accountId : '',
-        channel: typeof val.channel === 'string' ? val.channel : '',
-        expires: Number.isFinite(expires) && expires > 0 ? expires : undefined,
-      })
+      if (providerId !== undefined && key !== providerId && !key.startsWith(`${providerId}#`)) continue
+      const channel = typeof val.channel === 'string' ? val.channel : ''
+      out.push({ key, channel, value: val })
     }
     return out
   } catch {
     return []
   }
+}
+
+/**
+ * 读 magpie 账号槽的摘要：`[{key, type, accountId, channel, expires}]`。
+ * @param {string} [providerId] 省略 = 全部槽（页面快照用，按 `channel` 归属）
+ */
+export function readMagpieAuthSlots(providerId) {
+  return readMagpieAuthEntries(providerId).map(({ key, value: val, channel }) => {
+    const expires = Number(val.expires)
+    return {
+      key,
+      type: typeof val.type === 'string' ? val.type : '',
+      accountId: typeof val.accountId === 'string' ? val.accountId : '',
+      channel,
+      expires: Number.isFinite(expires) && expires > 0 ? expires : undefined,
+    }
+  })
 }
 
 export function loadCredential(name) {
