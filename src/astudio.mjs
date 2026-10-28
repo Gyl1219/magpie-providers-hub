@@ -667,12 +667,19 @@ async function fetchCatalog(credential) {
   if (body?.code !== undefined && body.code !== 0) {
     throw new Error(`AStudio 目录读取失败：${body.message ?? body.desc ?? `code=${body.code}`}`)
   }
-  const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : []
+  // ⚠️ 信封是 `{code,message,data:{models:[…]}}` —— 旧的 `Array.isArray(body.data)`
+  //    判据吃不到（data 是对象、models 才是数组）→ 目录恒空 → 一直用那两个手写
+  //    兜底模型 → 它们早就不存在 → 推理端 404。真机 2026-10-29 实测修正。
+  const rows = Array.isArray(body?.data?.models) ? body.data.models
+    : Array.isArray(body?.data) ? body.data
+      : Array.isArray(body) ? body : []
   const models = {}
   for (const row of rows) {
     // ⚠️ 只认**裸 slug**：`builtin/<base64>` 是 acode 内部别名，发推理端会 502。
-    const id = typeof row?.model === 'string' ? row.model : (typeof row?.id === 'string' ? row.id : '')
+    const id = typeof row?.slug === 'string' && row.slug.length > 0 ? row.slug
+      : (typeof row?.model === 'string' ? row.model : (typeof row?.id === 'string' ? row.id : ''))
     if (id.length === 0 || id.startsWith('builtin/')) continue
+    if (row?.supported_in_api === false) continue
     models[id] = {
       name: typeof row?.display_name === 'string' && row.display_name.length > 0 ? row.display_name : id,
       limit: {
