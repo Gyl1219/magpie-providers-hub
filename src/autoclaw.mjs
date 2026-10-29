@@ -265,6 +265,38 @@ function authHeaders(product, { intl = false } = {}) {
   return headers
 }
 
+/**
+ * 国际版 **OAuth envelope**（oauth-url / oauth-login / captcha-config）专用头组。
+ *
+ * ⚠️⚠️ 不能复用 `authHeaders({intl:true})` 的版本指纹（真机 2026-10-29）：
+ *   上游对 overseasv1 端点有**版本门禁**，`X-Version: 2.1.1` 回人话
+ *   「This version is no longer supported. Download the latest version…」——
+ *   而 chat/refresh 的 2.1.1 是网关硬校验**通过**的。社区包的 envelope 固定用
+ *   `1.18.1` + 补 `Origin/Referer`（回调端口，模拟从本地授权页发出）+
+ *   `X-Trace-Id`（16 hex 随机）+ `Accept` 通配（星杠星），照抄这组已验证值。
+ *   范围只限 envelope 三端点；chat/catalog/refresh 一律不动（已验证 200）。
+ */
+function oauthEnvelopeHeaders(product) {
+  const ts = Math.floor(Date.now() / 1000).toString()
+  const traceId = randomUUID().replaceAll('-', '').slice(0, 16)
+  return {
+    'Content-Type': 'application/json',
+    'Accept': '*/*',
+    'User-Agent': 'AutoClaw/1.18.1 (win-x64)',
+    'X-Version': '1.18.1',
+    'X-Tm': 'win',
+    'X-Product': SOURCE_ID,
+    'X-Auth-Appid': product.appId,
+    'X-Auth-TimeStamp': ts,
+    'X-Auth-Sign': sign(product, ts),
+    'X-Trace-Id': traceId,
+    'X-Lang': 'zh-CN',
+    'X-Channel': 'official',
+    'Origin': 'http://localhost:18432',
+    'Referer': 'http://localhost:18432/',
+  }
+}
+
 // ── 406 绕过 / max_tokens / 档位门禁 ─────────────────────────────────────
 
 // ── 历史形态修复 + 措辞清洗（社区 0.2.9 / 0.2.10 实测，plugins#437 / #466）──
@@ -570,7 +602,7 @@ async function exchangeOAuthCode(product, vendor, code, state, navigateUri, devi
   const label = vendor === 'google' ? 'Google' : 'Z.ai'
   const resp = await fetch(`${product.apiBase}${OAUTH_EXCHANGE_PATH}/${vendor}-oauth-login`, {
     method: 'POST',
-    headers: authHeaders(product, { intl: true }),
+    headers: oauthEnvelopeHeaders(product),
     body: JSON.stringify({ code: code.trim(), state, navigate_uri: navigateUri, source_id: SOURCE_ID, device_id: deviceId }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
@@ -1099,33 +1131,77 @@ async function startIntlFlow(product, openBrowser) {
   }
 
   for (const port of OAUTH_CALLBACK_PORTS) {
-    /** 当前待授权的会话（vendor + oauth-url 给的 state；一页一次只跑一个 vendor）。 */
-    const session = { vendor: undefined, expectedState: undefined }
+    /** 当前待授权的会话（vendor + oauth-url 给的 state + 滑块回执；一页一次一个）。 */
+    const session = { vendor: undefined, expectedState: undefined, captchaReceipt: undefined }
     const candidate = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
       const send = (status, type, body) => {
         res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' })
         res.end(body)
       }
+      const readBodyText = () => new Promise((resolve) => {
+        let text = ''
+        req.on('data', (c) => { text += c })
+        req.on('end', () => resolve(text))
+      })
       try {
-        // 引导页：两个登录按钮（Google 账号 / z.ai 账号）
+        // 引导页：先选 vendor（?vendor=zai|google 为空时是选择页），选完进滑块步骤
         if (url.pathname === '/' || url.pathname === '/guide') {
-          send(200, 'text/html; charset=utf-8', intlGuideHtml(product, session.vendor))
+          const vendor = url.searchParams.get('vendor') === 'google' ? 'google'
+            : url.searchParams.get('vendor') === 'zai' ? 'zai' : undefined
+          send(200, 'text/html; charset=utf-8', intlGuideHtml(product, vendor))
           return
         }
-        // 选择 vendor 并向上游要授权页（上游现发 oauth_url + state）
+        // 滑块配置透传（上游决定要不要滑块 + 阿里 scene_id/region/prefix）
+        if (url.pathname === '/captcha-config') {
+          try {
+            const r = await fetch(`${product.apiBase}${OAUTH_URL_PATH}/oauth-captcha-config`, {
+              method: 'POST',
+              headers: oauthEnvelopeHeaders(product),
+              body: '{}',
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            })
+            const j = await r.json().catch(() => ({}))
+            send(200, 'application/json; charset=utf-8', JSON.stringify(j.data ?? { enabled: false }))
+          } catch {
+            send(502, 'application/json; charset=utf-8', JSON.stringify({ enabled: false, error: 'config fetch failed' }))
+          }
+          return
+        }
+        // 滑块回执落位（引导页的 captchaVerifyCallback POST 过来）
+        if (url.pathname === '/captcha' && req.method === 'POST') {
+          const body = await readBodyText()
+          try {
+            const j = JSON.parse(body || '{}')
+            session.captchaReceipt = typeof j.receipt === 'string' ? j.receipt : JSON.stringify(j.receipt ?? {})
+          } catch { session.captchaReceipt = undefined }
+          send(200, 'application/json; charset=utf-8', JSON.stringify({ ok: session.captchaReceipt !== undefined }))
+          return
+        }
+        // 放弃登录（引导页关闭）——清理会话即可；服务器留给 result 的超时收
+        if (url.pathname === '/abort' && req.method === 'POST') {
+          session.vendor = undefined
+          session.expectedState = undefined
+          session.captchaReceipt = undefined
+          send(204, 'text/plain; charset=utf-8', '')
+          return
+        }
+        // 选定 vendor：校验滑块回执在位 → 向上游要授权页（上游现发 oauth_url + state）
         if (url.pathname === '/open-auth' && req.method === 'POST') {
-          const body = await new Promise((resolve) => {
-            let text = ''
-            req.on('data', (c) => { text += c })
-            req.on('end', () => resolve(text))
-          })
+          const body = await readBodyText()
           const vendor = (() => { try { return JSON.parse(body || '{}').vendor } catch { return '' } })() === 'google' ? 'google' : 'zai'
+          // ⚠️ 滑块回执必须先就位：上游 enabled:true 时缺回执回「当前版本已停止服务」
+          //    （误导性文案，真机 2026-10-29 阶梯实验坐实）——别让用户去下载什么新版。
+          if (session.captchaReceipt === undefined) {
+            send(200, 'application/json; charset=utf-8', JSON.stringify({ error: '请先完成滑块安全验证再继续' }))
+            return
+          }
           const deviceId = resolveDeviceId(product)
+          const bodyObj = { source_id: SOURCE_ID, device_id: deviceId, navigate_uri: navigateUriOf(vendor), ali_captcha_verify_param: session.captchaReceipt }
           const r = await fetch(`${product.apiBase}${OAUTH_URL_PATH}/${vendor}-oauth-url`, {
             method: 'POST',
-            headers: authHeaders(product, { intl: true }),
-            body: JSON.stringify({ source_id: SOURCE_ID, device_id: deviceId, navigate_uri: navigateUriOf(vendor) }),
+            headers: oauthEnvelopeHeaders(product),
+            body: JSON.stringify(bodyObj),
             signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           })
           const json = await r.json().catch(() => ({}))
@@ -1157,9 +1233,9 @@ async function startIntlFlow(product, openBrowser) {
           const code = url.searchParams.get('code') ?? ''
           const state = url.searchParams.get('state') ?? ''
           const accepted = code !== '' && state !== '' && state === session.expectedState
-          send(200, 'text/plain; charset=utf-8', accepted
-            ? `已收到 ${cbVendor === 'google' ? 'Google' : 'Z.ai'} 授权，正在换取凭据…可以关闭此页面。`
-            : '回调校验失败（state 不符或缺 code）——请回到引导页重新发起登录。')
+          send(200, 'text/html; charset=utf-8', accepted
+            ? `<meta charset="utf-8"><p style="font:15px system-ui;padding:24px">已收到 ${cbVendor === 'google' ? 'Google' : 'Z.ai'} 授权，正在换取凭据…可以关闭此页面。</p>`
+            : `<meta charset="utf-8"><p style="font:15px system-ui;padding:24px;color:#b91c1c">回调校验失败（state 不符或缺 code）——请回到引导页重新发起登录。</p>`)
           if (accepted) void settleWith(cbVendor, code, state)
           return
         }
@@ -1186,14 +1262,23 @@ async function startIntlFlow(product, openBrowser) {
   return {
     url: guideUrl,
     result: result.finally(() => clearTimeout(timer)),
-    instructions: '在打开的引导页选 Google 账号或 z.ai 账号，跳到授权页完成后自动继续；桌面端已登录也可关掉它改用一键导入。',
+    instructions: '在打开的引导页选 Google 账号或 z.ai 账号，完成滑块后跳到授权页，完成后自动继续；桌面端已登录也可关掉它改用一键导入。',
     close: closeServer,
   }
 }
 
-/** 国际版引导页：两按钮（Google / z.ai）—— 授权页由上游现发，不在本页拼。 */
-function intlGuideHtml(product) {
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+/**
+ * 国际版引导页：两步形态（对齐社区 packages/autoclaw 的真机验证实现）。
+ *
+ * 第一步选 vendor（Google 账号 / z.ai 账号）；第二步拉 `/captcha-config`：
+ * 上游 enabled:true 时加载**阿里云验证码 2.0 SDK**（o.alicdn.com CDN），
+ * `mode:"popup"` + 隐藏触发按钮（init 后 ≥2.3s 才 click，太快弹空白框 —— 社区踩坑），
+ * `captchaVerifyCallback` 的回执 POST `/captcha` 收着；然后「继续授权」走 `/open-auth`
+ * （带 `ali_captcha_verify_param`）。授权页地址**永远由上游现发**，本页绝不拼。
+ */
+function intlGuideHtml(product, vendor) {
+  if (vendor === undefined) {
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>登录 ${product.displayName}</title>
 <style>
@@ -1205,43 +1290,131 @@ h2{margin:0 0 8px;font-size:20px;color:#38bdf8}
 button{width:100%;background:#0284c7;color:#fff;border:none;border-radius:6px;
        padding:11px 16px;font-size:15px;font-weight:500;cursor:pointer;margin-top:10px}
 button:hover{background:#0369a1}
-button:disabled{background:#475569;cursor:not-allowed}
 .tip{color:#64748b;font-size:12px;margin:16px 0 0;line-height:1.5}
-#msg{margin-top:16px;padding:10px 12px;border-radius:6px;font-size:13px;min-height:16px;display:none}
-#msg.err{display:block;background:rgba(239,68,68,.15);border:1px solid #ef4444;color:#fca5a5}
-#msg.busy{display:block;color:#93c5fd}
 </style></head><body>
 <div class="card">
 <h2>${product.displayName} 登录</h2>
 <p class="desc">选择登录方式 —— 授权页由 AutoClaw 官方接口现发（不会被跳转到中国站）。</p>
-<button id="btnGoogle">使用 Google 账号登录</button>
-<button id="btnZai">使用 z.ai 账号登录</button>
+<button onclick="location.href='/?vendor=google'">使用 Google 账号登录</button>
+<button onclick="location.href='/?vendor=zai'">使用 z.ai 账号登录</button>
+<p class="tip">若桌面端已登录国际版账号，也可以关掉本页，在 magpie 供应商页用「一键导入」。</p>
+</div>
+</body></html>`
+  }
+  const vendorName = vendor === 'zai' ? 'z.ai' : 'Google'
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 ${product.displayName}（${vendorName}）</title>
+<style>
+body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#0f172a;color:#f8fafc;
+     display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px;box-sizing:border-box}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;width:100%;max-width:460px}
+h2{margin:0 0 8px;font-size:20px;color:#38bdf8}
+.step{font-size:13.5px;color:#cbd5e1;margin:10px 0;display:flex;gap:8px;align-items:flex-start}
+.step .n{background:#0284c7;color:#fff;border-radius:50%;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;flex:none}
+#captchaBox{margin:12px 0;padding:14px;border:1px dashed #475569;border-radius:10px;display:none}
+#captchaEle{min-height:44px;color:#0f172a}
+button{width:100%;background:#0284c7;color:#fff;border:none;border-radius:6px;
+       padding:11px 16px;font-size:15px;font-weight:500;cursor:pointer;margin-top:10px}
+button:hover{background:#0369a1}
+button:disabled{background:#475569;cursor:not-allowed}
+.tip{color:#64748b;font-size:12px;margin:14px 0 0;line-height:1.5}
+#msg{margin-top:14px;padding:9px 12px;border-radius:6px;font-size:13px;min-height:16px;display:none}
+#msg.err{display:block;background:rgba(239,68,68,.15);border:1px solid #ef4444;color:#fca5a5}
+#msg.busy{display:block;color:#93c5fd}
+#msg.ok{display:block;color:#86efac}
+</style></head><body>
+<div class="card">
+<h2>${product.displayName} · ${vendorName} 登录</h2>
+<div id="steps">
+  <div class="step"><span class="n">1</span><span id="stepCaptcha">检查安全验证…</span></div>
+  <div id="captchaBox"><div id="captchaEle"></div></div>
+  <div class="step"><span class="n">2</span><span>跳转 ${vendorName} 授权页完成登录（完成后自动回到本流程）</span></div>
+</div>
+<button id="goBtn" disabled>继续授权</button>
 <div id="msg"></div>
-<p class="tip">点按钮后会自动跳到官方授权页；完成登录后浏览器会回到
-<code>localhost</code> 回调端口，本页显示「已收到授权」即可关闭。</p>
+<p class="tip">关闭本页即取消登录。完成授权后浏览器会回到 localhost 回调端口。</p>
 </div>
 <script>
-const msg = document.getElementById('msg');
-const busy = (t) => { msg.className = 'busy'; msg.textContent = t; };
-const fail = (t) => { msg.className = 'err'; msg.textContent = t; };
-async function openAuth(vendor) {
-  document.querySelectorAll('button').forEach((b) => { b.disabled = true; });
-  try {
-    busy('正在向官方接口获取授权页…');
-    const r = await fetch('/open-auth', { method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ vendor }) });
-    const j = await r.json();
-    if (j.error) { fail(j.error);
-      document.querySelectorAll('button').forEach((b) => { b.disabled = false; });
-      return; }
-    msg.textContent = '正在跳转授权页…';
-    setTimeout(() => { location.href = j.url; }, 400);
-  } catch (e) { fail('请求失败：' + e.message);
-    document.querySelectorAll('button').forEach((b) => { b.disabled = false; }); }
+const HIDDEN_TRIGGER_ID = "__acHiddenTrigger";
+(function ensureHiddenTrigger(){
+  let b = document.getElementById(HIDDEN_TRIGGER_ID);
+  if (!b) {
+    b = document.createElement("button");
+    b.id = HIDDEN_TRIGGER_ID; b.type = "button"; b.tabIndex = -1;
+    b.setAttribute("aria-hidden", "true");
+    b.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden";
+    document.body.appendChild(b);
+  }
+})();
+function msg(m, cls) { const e = document.getElementById("msg"); e.textContent = m; e.className = cls || ""; }
+function loadCaptchaLib() {
+  return new Promise((resolve) => {
+    if (window.initAliyunCaptcha) { resolve(); return; }
+    const s = document.createElement("script");
+    s.src = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
+    s.async = true; s.onload = () => resolve(); s.onerror = () => resolve();
+    document.head.appendChild(s);
+    setTimeout(() => resolve(), 10000);
+  });
 }
-document.getElementById('btnGoogle').onclick = () => openAuth('google');
-document.getElementById('btnZai').onclick = () => openAuth('zai');
+async function boot() {
+  let cfg = { enabled: false };
+  try { const r = await fetch("/captcha-config"); cfg = await r.json(); } catch (e) {}
+  if (cfg && cfg.enabled) {
+    document.getElementById("stepCaptcha").textContent = "请完成滑块安全验证";
+    document.getElementById("captchaBox").style.display = "block";
+    window.AliyunCaptchaConfig = window.AliyunCaptchaConfig || { region: cfg.region || "ga", prefix: cfg.prefix || "sq51tr" };
+    msg("正在加载安全验证组件…", "busy");
+    await loadCaptchaLib();
+    if (!window.initAliyunCaptcha) { msg("验证组件加载失败（网络/广告拦截），请刷新重试", "err"); return; }
+    // ⚠️ 官方流程：init → warmup ≥2.1s → 程序化 click 隐藏按钮 → 组件弹出验证窗。
+    //    click 太快组件未就绪 → 弹出空白框（社区实测踩坑，等待 2.3s）。
+    window.initAliyunCaptcha({
+      SceneId: cfg.scene_id, mode: "popup", element: "#captchaEle", button: "#" + HIDDEN_TRIGGER_ID,
+      captchaVerifyCallback: (params) => {
+        const receipt = typeof params === "string" ? params
+          : (params && typeof params.captchaVerifyParam === "string" ? params.captchaVerifyParam : JSON.stringify(params || {}));
+        fetch("/captcha", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ receipt }) })
+          .then(() => { window.__acReceiptSent = true; })
+          .catch(() => { window.__acReceiptSent = true; });
+        return { captchaResult: true };
+      },
+      onBizResultCallback: () => {}, getInstance: () => {},
+      slideStyle: { width: 320, height: 40 }, language: "cn",
+      onError: (err) => { msg("安全验证出错: " + ((err && err.message) || "") + "，请点击重试", "err"); },
+    });
+    msg("验证组件已就绪，正在弹出验证窗…", "busy");
+    setTimeout(() => { document.getElementById(HIDDEN_TRIGGER_ID).click(); }, 2300);
+    // 轮询等回执上报完成（回执 POST /captcha 在 captchaVerifyCallback 里异步发）
+    const t0 = Date.now();
+    await (function pollReceipt() {
+      if (window.__acReceiptSent || Date.now() - t0 > 180000) return;
+      return new Promise((r) => setTimeout(r, 500)).then(pollReceipt);
+    })();
+    window.__acReceiptSent = false;
+    msg("滑块验证通过 ✓", "ok");
+  } else {
+    document.getElementById("stepCaptcha").textContent = "无需安全验证 ✓";
+  }
+  const btn = document.getElementById("goBtn");
+  btn.disabled = false; btn.textContent = "继续授权";
+}
+document.getElementById("goBtn").addEventListener("click", async () => {
+  const btn = document.getElementById("goBtn");
+  btn.disabled = true; btn.textContent = "正在获取授权页…";
+  try {
+    const r = await fetch("/open-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ vendor: "${vendor}" }) });
+    const j = await r.json();
+    if (j.error) { msg(j.error, "err"); btn.disabled = false; btn.textContent = "继续授权"; return; }
+    msg("正在跳转授权页…", "busy");
+    setTimeout(() => { location.href = j.url; }, 600);
+  } catch (e) { msg("本地登录连接已断开或会话已结束，请回 magpie 重新发起登录：" + e.message, "err"); btn.disabled = false; btn.textContent = "继续授权"; }
+});
+window.addEventListener("beforeunload", () => {
+  try { navigator.sendBeacon("/abort", new Blob([JSON.stringify({ reason: "页面关闭" })], { type: "application/json" })); } catch (e) {}
+});
+boot().catch((e) => msg("初始化失败：" + e.message, "err"));
 </script></body></html>`
 }
 
