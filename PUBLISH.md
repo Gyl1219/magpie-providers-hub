@@ -83,6 +83,22 @@ PR 文案草稿：
 5. registry.json 的字段**只加不改名**：provider id 一旦进 registry 就当作已发布
    id —— 改名等于让所有人的登录态掉线（与 AGENTS.md 第 6 条同源）。
 
+## 三之一、审核红线：包里不能写 magpie 的宿主文件（2026-10-30 取证）
+
+社区 PR 审核卡这一条（MYCF711 的 `officeace-auth` #399 在 10-27 被 block 的原话）：
+
+> blocked it on `src/self-register.mjs` … which rewrote magpie's
+> `~/.cache/magpie/plugin-market.json` on every load. … grep: **no fs writes,
+> child_process, eval or HOME/cache paths**.
+
+本仓库的对应处置：
+
+- `src/self-register.mjs` → **`tools/self-register.mjs`**（`files` 白名单不含 `tools`，
+  不随 npm 发布）；本机想让卡片提前显示就手工跑 `node tools/register-local.mjs`；
+- MagiCrew 浏览器登录的一次性 profile 从 `~/.cache/magpie` 挪到系统临时目录；
+- 回归网：`tests/no-host-writes.test.mjs`（源码扫描 + **加载探针**：市场缓存
+  mtime/内容必须零变化）。
+
 ## 三之二、本地自注册为什么之前没留住（黄标根因，2026-10-30 取证）
 
 `src/self-register.mjs` 会把本插件写进 `~/.cache/magpie/plugin-market.json`

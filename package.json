@@ -1,6 +1,6 @@
 {
   "name": "magpie-providers-hub",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "dsh-providers-hub（作者 JetLi）的第三方 Magpie 适配：一个插件注册 10 个供应商（每渠道一条，可各自登录/看额度/单独关闭）——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy（讯飞）、LobsterAI（有道）、超级麦吉/MagiCrew（国内+国际），均不依赖 DSH 运行",
   "type": "module",
   "main": "./index.mjs",

@@ -45,7 +45,6 @@ import { autoclawChannel, autoclawIntlChannel } from './autoclaw.mjs'
 import { loomyChannel } from './loomy.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
-import { startSelfRegister } from './self-register.mjs'
 import { sanitizeXff } from './minimax-transport.mjs'
 
 /** 旧版（聚合形态）的供应商 id —— 账号槽迁移的读来源，别再拿去注册。 */
@@ -526,9 +525,6 @@ export function tierSummarize(rows) {
   return [...out, ...rest]
 }
 
-/** 自注册只需一次（十个供应商实例共用同一张市场卡片）。 */
-let selfRegistered = false
-
 /** 模块级 sweep 状态（十个实例共用一个定时器）。 */
 const sweepState = { timer: undefined, everyMs: undefined, xff: undefined, proxy: undefined }
 
@@ -698,33 +694,19 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   const PROVIDER_NAME = providerNameOf(channel)
   const openBrowser = typeof options.openBrowser === 'function' ? options.openBrowser : undefined
   /**
-   * 自注册：把本插件写进 magpie 的本地市场缓存（`~/.cache/magpie/plugin-market.json`）。
+   * ⚠️ **本插件不写 magpie 的任何宿主文件**（magpie 那张市场列表的缓存 JSON
+   * 一次都不碰 —— 具体路径见 tools/self-register.mjs 头注）。
    *
-   * 没有条目时插件卡片的标题退回包名（`magpie-providers-hub`）且没有「源码」按钮。
-   * magpie 只在启动时整体重写这个缓存、静默期间不碰（模板作者实测），故写一次即稳、
-   * 绝不轮询。移植自 MYCF711/magpie-plugin-template（MIT），见 src/self-register.mjs 头注。
+   * 曾经做过自注册（加载时把本插件写进市场缓存，好让卡片标题/「源码」按钮出现），
+   * 2026-10-30 撤掉：社区 registry 的 PR 审核明确卡这一条 —— MYCF711 的
+   * `officeace-auth` #399 在 10-27 被 block，理由就是「self-register 每次加载都重写
+   * magpie 的市场缓存」，他被迫在 0.1.9 里整个删掉才通过。审核的 grep 标准是
+   * 「no fs writes, child_process, eval or HOME/cache paths」。
+   *
+   * 卡片标题/绿标的正路是 **registry.json 收录**（PR 进 magpie-community/plugins），
+   * 不是本地改缓存。本机想提前看到效果：`node tools/register-local.mjs`
+   * （在仓库里、不随 npm 包发布，见 tools/README 说明）。
    */
-  if (!selfRegistered) {
-    selfRegistered = true
-    startSelfRegister({
-      package: 'magpie-providers-hub',
-      name: 'Providers Hub',
-      // 一个插件，十个供应商（插件行的「承载 …」就是这个列表）
-      providers: PROVIDER_IDS,
-      community: true,
-      summary: {
-        en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one plugin with 10 providers, each a separate channel you can sign in to, meter and switch off on its own — OfficeAce, AStudio, MiniMax Code Intl, Accio, AutoClaw CN/Intl, Loomy, LobsterAI, Magicrew CN/Intl. Runs without DSH.',
-        zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：一个插件注册十个供应商（每个渠道一条，可各自登录/看额度/单独关闭）——OfficeAce（华为云）、AStudio（讯飞）、MiniMax Code 国际版、Accio（阿里）、AutoClaw 国内/国际（智谱）、Loomy（讯飞）、LobsterAI（有道）、超级麦吉/MagiCrew（国内+国际），不依赖 DSH 运行。',
-      },
-    }, {
-      configDir: typeof input?.directory === 'string' ? input.directory : undefined,
-      log: (msg) => {
-        try {
-          input?.client?.app?.log?.({ service: 'providers-hub', level: 'info', message: msg })
-        } catch { /* 日志失败不影响注册 */ }
-      },
-    })
-  }
   /**
    * MiniMax 国际版的可选绕行 IP（`magpie plugin options providers-hub
    * '{"minimaxXff":"<海外IP>"}'` 设置）。⚠️ 默认关闭；`sanitizeXff` 白名单

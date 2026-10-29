@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { registerSelf, _flushNow, _reset, _internal } from '../src/self-register.mjs'
+import { registerSelf, _flushNow, _reset, _internal } from '../tools/self-register.mjs'
 
 /** 造一个「假的 magpie 家目录」：configDir → <tmp>/config/magpie，缓存落到 <tmp>/.cache/magpie */
 function fakeHome(plugins) {

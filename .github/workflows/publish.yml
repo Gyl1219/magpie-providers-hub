@@ -1,0 +1,59 @@
+# 发布到 npm —— 走 Trusted Publishing（OIDC），不用 token、不用 2FA 验证码
+#
+# ⚠️ 为什么非它不可：
+#   ① 账号开了 2FA，发版每次都要 6 位码，人不在就发不了；
+#   ② npm 2026-09-09 起对「用过恢复码」的账号上 72 小时安全暂停，期间一切写操作被禁；
+#   ③ npm 2027-01 起 bypass-2FA token 不能直发（https://gh.io/npm-gat-bypass2fa-deprecation），
+#      只剩 staged 或 Trusted Publishing 两条路。
+#   Trusted Publishing 用 GitHub Actions 的 OIDC 身份换 npm 的短时发布凭证，
+#   仓库里不存任何密钥 —— 三条坑全绕开。
+#
+# ⚠️ 一次性配置（本工作流之外的半步，人工做一次）：
+#   npmjs.com → 包页面 → Settings → Trusted Publishing → 填
+#     repository owner: Gyl1219 / repository name: magpie-providers-hub
+#     workflow filename: publish.yml
+#   （包必须先存在 —— 首版用 `npx npm@12 stage publish` 或本地 `npm publish --otp` 建出来）
+#
+# 用法：GitHub 上发一个 Release（或 Actions 里手动 Run workflow）。
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm dist-tag（默认 latest）'
+        required: false
+        default: 'latest'
+
+permissions:
+  # Trusted Publishing 的命门：没有它 npm 拿不到 OIDC token，会退回要 token
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing 需要 npm ≥ 11.5（staged/attestation 相关改动在 12.x 更稳）
+      - name: 升级 npm
+        run: npm i -g npm@latest && npm -v
+
+      - name: 单测
+        run: npm test
+
+      # ⚠️ 不设 NODE_AUTH_TOKEN：npm 自己用 OIDC 换临时凭证。
+      #    一旦给 setup-node 传了 token，它就会往 .npmrc 写死 authToken，反而把
+      #    OIDC 模式顶掉（表现：又开始要 2FA / 报 ENEEDAUTH）。
+      # --provenance 随发布写一条来源证明（别人能验这个 tarball 确实是本仓库发的）
+      - name: 发布
+        run: npm publish --provenance --access public ${{ github.event_name == 'workflow_dispatch' && format('--tag {0}', inputs.tag) || '' }}

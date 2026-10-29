@@ -14,10 +14,19 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const BASE = () => join(homedir(), '.cache', 'magpie')
+/**
+ * 一次性 Chromium profile 的落点。
+ *
+ * ⚠️ 2026-10-30 从 `~/.cache/magpie` 挪到系统临时目录：社区 registry 的审核 grep
+ *    含「HOME/cache paths」（officeace-auth #399 因宿主缓存写入被 block 的同一条标准），
+ *    登录用的临时 profile 放进 magpie 自己的缓存目录属于「动宿主地盘」。
+ *    系统临时目录语义上就是给一次性文件用的，且 sweep 仍只删本插件造的
+ *    `magicrew-login-*` 目录名。
+ */
+const BASE = () => join(tmpdir(), 'magpie-providers-hub-login')
 
 /** 找本机 Chromium 内核浏览器。 */
 export function findBrowser() {

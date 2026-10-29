@@ -5,12 +5,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { utimesSync } from 'node:fs'
 import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const mod = await import('../src/magicrew-browser.mjs')
 
 const basename = (p) => p.split(/[\\/]/).pop()
+
+// ⚠️ profile 落点 2026-10-30 从 ~/.cache/magpie 挪到系统临时目录（不碰 magpie 的缓存）
+const PROFILE_BASE = join(tmpdir(), 'magpie-providers-hub-login')
 
 test('导出契约完整', () => {
   for (const fn of ['findBrowser', 'newProfileDir', 'sweepProfiles', 'launchLoginBrowser', 'waitForCreds', 'closeSession']) {
@@ -37,7 +40,7 @@ test('newProfileDir 生成一次性目录且以 magicrew-login- 开头', () => {
 })
 
 test('sweepProfiles：删过期的一次性 profile 目录，不碰同前缀文件', () => {
-  const base = join(homedir(), '.cache', 'magpie')
+  const base = PROFILE_BASE
   mkdirSync(base, { recursive: true })
   const oldDir = join(base, `magicrew-login-test-old-${process.pid}-${Date.now()}`)
   mkdirSync(oldDir, { recursive: true })
