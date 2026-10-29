@@ -17,10 +17,16 @@ export function credentialPath(name) {
 }
 
 /**
- * 全链路诊断日志（登录流程排查用）：~/.config/magpie/notify-debug.log。
- * 纯文本、无凭据；追加写。
+ * 全链路诊断日志（登录流程排查用）。**默认关闭**：设 `DSH_HUB_DEBUG=1` 才写
+ * `~/.config/magpie/notify-debug.log`。
+ *
+ * ⚠️ 2026-10-30 起默认不写：这是往 **magpie 的目录**里追加文件，和社区审核卡
+ *    `officeace-auth` #399 的是同一类问题（插件不该在宿主的地盘上落东西，
+ *    yetone 的原话是「That file is outside the plugin's folder and belongs to
+ *    magpie」）。排查时再开开关，常态零写入。
  */
 export function debugLog(line) {
+  if (process.env.DSH_HUB_DEBUG !== '1') return
   try {
     mkdirSync(storeDir(), { recursive: true })
     appendFileSync(join(storeDir(), 'notify-debug.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')

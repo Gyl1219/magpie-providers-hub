@@ -1,11 +1,8 @@
-﻿为社区 registry 过审：包内不再写 magpie 宿主文件 + PR 材料
+﻿诊断日志默认不再写 magpie 的目录（审核红线同类问题）
 
-审核红线（MYCF711 的 officeace-auth #399 被 block 的原话）：插件不得在加载时
-改写 magpie 的市场缓存，grep 标准「no fs writes ... or HOME/cache paths」。
+真机：~/.config/magpie/notify-debug.log 已被追加到 15KB —— 登录链路每次都写。
+yetone 在 officeace-auth #399 的原话是「That file is outside the plugin's
+folder and belongs to magpie」，这条对 config 目录同样成立。
 
-- src/self-register.mjs -> tools/self-register.mjs（files 不含 tools，不随 npm 发布）
-  新增 tools/register-local.mjs：本机想提前看到卡片就手工跑（--once/--remove）
-- magicrew-browser 的一次性 Chromium profile 从 ~/.cache/magpie 挪到系统临时目录
-- REGISTRY_PR.md：PR 标题/正文草稿 + registry 条目 + 提交步骤（网页 Edit 自动 fork）
-- 回归网 tests/no-host-writes.test.mjs：源码扫描 + 加载探针（市场缓存零变化）
-- .github/workflows/publish.yml：Trusted Publishing（OIDC），发版不用 token/验证码
+- debugLog：DSH_HUB_DEBUG=1 才写，常态零写入
+- 回归网：tests/no-host-writes.test.mjs 补一条（默认不落盘 / 开开关才写）

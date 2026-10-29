@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 社区 registry 审核的硬门槛（MYCF711 的 officeace-auth #399 在 2026-10-27 被 block
  * 的原话）：插件**不得在加载/运行时改写 magpie 的宿主文件** —— 审核的 grep 标准是
  * 「no fs writes, child_process, eval or HOME/cache paths」，特指
@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, statSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -39,6 +39,26 @@ test('红线①之二：登录用的临时 profile 也不落 magpie 的缓存目
   // 只读地盘可以留：magicrew 读 magpie 的 models.json 作兜底（只读，不写）
   const magicrew = readFileSync(join(ROOT, 'src', 'magicrew.mjs'), 'utf8')
   assert.doesNotMatch(magicrew, /writeFileSync\([^)]*\.cache/, 'magpie 的缓存目录只读不写')
+})
+
+test('红线①之三：诊断日志默认不写 magpie 的目录（DSH_HUB_DEBUG=1 才写）', async () => {
+  const { debugLog } = await import(new URL('../src/shared.mjs', import.meta.url).href)
+  const home = process.env.HOME ?? process.env.USERPROFILE
+  const logPath = join(home, '.config', 'magpie', 'notify-debug.log')
+  const had = existsSync(logPath)
+  const saved = process.env.DSH_HUB_DEBUG
+  try {
+    delete process.env.DSH_HUB_DEBUG
+    debugLog('probe: 默认不该落盘')
+    assert.equal(existsSync(logPath), had, '默认绝不能往 magpie 的目录里写日志')
+    process.env.DSH_HUB_DEBUG = '1'
+    debugLog('probe: 开了开关才写')
+    assert.equal(existsSync(logPath), true, 'DSH_HUB_DEBUG=1 时应当写（排查用）')
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HUB_DEBUG
+    else process.env.DSH_HUB_DEBUG = saved
+    try { rmSync(logPath, { force: true }) } catch { /* 沙箱里删不掉无所谓 */ }
+  }
 })
 
 test('红线②：npm 发布清单不含 tools/ 与 tests/', () => {
