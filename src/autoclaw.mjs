@@ -42,12 +42,20 @@ const LEDGERS_PATH = '/agent-assetmgr/api/v1/ledgers_std'
 const DAILY_CLAIM_PATH = '/userapi/v1/user-info'
 const SEND_CODE_PATH = '/userapi/v1/agent-send-code'
 const LOGIN_PATH = '/userapi/v1/agent-login'
-/** 国际版 Z.ai OAuth 换 token（overseasv1 命名空间，仅国际站有）。 */
-const ZAI_EXCHANGE_PATH = '/userapi/overseasv1/zai-oauth-login'
+/** 国际版 OAuth：换 token（overseasv1 命名空间，仅国际站有；两 vendor 同构）。 */
+const OAUTH_EXCHANGE_PATH = '/userapi/overseasv1'
+/**
+ * ⚠️⚠️ 授权页地址**必须向上游要**（`POST /userapi/overseasv1/<vendor>-oauth-url`），
+ *    绝不能自己打开 `https://chat.z.ai/auth`（真机 2026-10-29）：
+ *    那是**网页端路由**，未登录访客会被 CDN 按 IP 弹「请切换至中国站点 →
+ *    zchat.z.ai」，OAuth 流程永远回不了回调端口；而 `<vendor>-oauth-url` 返回的
+ *    是官方客户端「用 Google/z.ai 登录」按钮背后调的**专用授权页**，没有网页端
+ *    的地域弹窗 —— 这就是社区 opencode-autoclaw-auth 不跳国内、我们会跳的全部原因。
+ *    （对齐社区 packages/autoclaw 的 /open-auth 实现，含 state 校验。）
+ */
+const OAUTH_URL_PATH = '/userapi/overseasv1'
 
-const ZAI_AUTH_URL = 'https://chat.z.ai/auth'
-const ZAI_CLIENT_ID = 'client_EnD0QI8bLRFT8cciLp389Q'
-/** OAuth 回调端口候选（与官方客户端逐字相同，按序试）。 */
+/** OAuth 回调端口候选（与官方客户端逐字相同，按序试；官方白名单只认这组端口）。 */
 const OAUTH_CALLBACK_PORTS = [18432, 19654, 19723, 53699]
 
 const CLIENT_VERSION = '2.1.1'
@@ -552,18 +560,24 @@ async function loginWithCode(product, phone, code, deviceId) {
   }
 }
 
-/** 国际版 Z.ai 授权码换 token。state 由官方页生成随回调带回，只透传不解析。 */
-async function exchangeZaiCode(product, code, state, navigateUri, deviceId) {
-  const resp = await fetch(`${product.apiBase}${ZAI_EXCHANGE_PATH}`, {
+/**
+ * 国际版 OAuth 授权码换 token（两 vendor 同构：`<vendor>-oauth-login`）。
+ *
+ * ⚠️ `state` 必须是 `oauth-url` 授予地址里带回的那个（本插件的 intl 回调 handler
+ *    已逐字校验）；这里只透传不解析。
+ */
+async function exchangeOAuthCode(product, vendor, code, state, navigateUri, deviceId) {
+  const label = vendor === 'google' ? 'Google' : 'Z.ai'
+  const resp = await fetch(`${product.apiBase}${OAUTH_EXCHANGE_PATH}/${vendor}-oauth-login`, {
     method: 'POST',
     headers: authHeaders(product, { intl: true }),
     body: JSON.stringify({ code: code.trim(), state, navigate_uri: navigateUri, source_id: SOURCE_ID, device_id: deviceId }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
   const json = await resp.json().catch(() => ({}))
-  if (!resp.ok) return { ok: false, error: `Z.ai 授权失败(${resp.status})` }
+  if (!resp.ok) return { ok: false, error: `${label} 授权失败(${resp.status})` }
   if (json.code !== 0 || !json.data?.access_token) {
-    return { ok: false, error: json.msg || `Z.ai 授权失败(错误码: ${json.code})` }
+    return { ok: false, error: json.msg || `${label} 授权失败(错误码: ${json.code})` }
   }
   const d = json.data
   const declared = expiresAtMs(d.expires_at) ?? expiresAtMs(d.expires_in)
@@ -1025,77 +1039,210 @@ document.getElementById('btnLogin').onclick = async () => {
  * 登录流（对齐 beginLogin 契约：立即返回 url，登录在 result 推进）。
  *
  * 国内：本地载体页（一键导入 / 短信两路）。
- * 国际：Z.ai OAuth 授权页（回调端口四候选按序试）+ 载体页一键导入兜底。
+ * 国际：本地引导页（Google 账号 / z.ai 账号两按钮）→ 上游现发**专用授权页**
+ *       （`<vendor>-oauth-url`）→ 302 回调端口 → state 校验 → 换 token。
+ *       + 载体页一键导入兜底（四个回调端口全被占时）。
  */
 async function beginLogin(product, openBrowser) {
-  // 国际版：Z.ai OAuth 主路（回调服务器 + 授权 URL）
   if (product.intl) {
-    let server
-    let actualPort
-    let settleOk, settleFail
-    const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
-    const closeServer = () => new Promise((resolve) => {
-      if (server === undefined) return resolve()
-      server.close(() => resolve())
-    })
-    const timer = setTimeout(() => {
-      settleFail(new Error('Z.ai 授权超时'))
-      void closeServer()
-    }, LOGIN_TIMEOUT_MS)
-    timer.unref?.()
-    // ⚠️ 定义必须先于 server 回调可触发的时机（回调在授权完成时到达）
-    const settleWith = async (code, state) => {
-      try {
-        const navigateUri = `http://localhost:${actualPort}/auth/callback-zai`
-        const deviceId = resolveDeviceId(product)
-        const out = await exchangeZaiCode(product, code, state, navigateUri, deviceId)
-        if (!out.ok) throw new Error(out.error)
-        clearTimeout(timer)
-        settleOk(out.credential)
-        setTimeout(() => void closeServer(), 500)
-      } catch (error) {
-        clearTimeout(timer)
-        settleFail(error instanceof Error ? error : new Error(String(error)))
-        setTimeout(() => void closeServer(), 500)
-      }
-    }
-    for (const port of OAUTH_CALLBACK_PORTS) {
-      const candidate = createServer((req, res) => {
-        const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
-        if (url.pathname !== '/auth/callback-zai') {
-          res.writeHead(404); res.end(); return
-        }
-        const code = url.searchParams.get('code') ?? ''
-        const state = url.searchParams.get('state') ?? ''
-        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
-        res.end('已收到 Z.ai 授权，正在换取凭据…可以关闭此页面。')
-        settleWith(code, state)
-      })
-      const listenOk = await new Promise((resolve) => {
-        candidate.once('error', () => resolve(false))
-        candidate.listen(port, '127.0.0.1', () => resolve(true))
-      })
-      if (listenOk) { server = candidate; actualPort = port; break }
-    }
-    if (server === undefined) {
-      // 四个端口全被占：回退载体页（一键导入）
-      clearTimeout(timer)
-      return beginSmsFlow(product, openBrowser)
-    }
-    const redirectUri = `http://localhost:${actualPort}/auth/callback-zai`
-    const authUrl = new URL(ZAI_AUTH_URL)
-    authUrl.searchParams.set('response_type', 'code')
-    authUrl.searchParams.set('client_id', ZAI_CLIENT_ID)
-    authUrl.searchParams.set('redirect_uri', redirectUri)
-    if (openBrowser) openBrowser(authUrl.toString())
-    return {
-      url: authUrl.toString(),
-      result: result.finally(() => clearTimeout(timer)),
-      instructions: '在打开的 Z.ai 页面完成授权，回调后本窗口自动继续。若桌面端已登录，也可关闭该页并用一键导入。',
-      close: closeServer,
-    }
+    return startIntlFlow(product, openBrowser)
   }
   return beginSmsFlow(product, openBrowser)
+}
+
+/**
+ * 国际版 OAuth（对齐社区 packages/autoclaw 的 /open-auth 设计）。
+ *
+ * 流程：本地引导页（选 vendor）→ `POST <overseasv1>/<vendor>-oauth-url`
+ * （上游**现发**授权页地址 + state）→ 引导页跳过去 → 授权页 302 回
+ * `localhost:<port>/auth/callback-<vendor>` → **state 逐字校验** → 换 token。
+ *
+ * ⚠️ 三个「绝不能」：
+ *   ① 绝不能自己拼 `https://chat.z.ai/auth`（网页端会按 IP 弹中国站跳转，
+ *     OAuth 永远回不了回调 —— 见 OAUTH_URL_PATH 头注）；
+ *   ② 回调的 state 绝不能不校验（等价于接受任何人塞进来的 code ——
+ *     会登录成别人的账号）；
+ *   ③ redirect_uri 的端口绝不能随机（官方白名单只认这四个端口 + 固定路径，
+ *     其它形态回 `Redirect URI not registered for this client`）。
+ */
+async function startIntlFlow(product, openBrowser) {
+  let server
+  let actualPort
+  let settleOk, settleFail
+  const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
+  const closeServer = () => new Promise((resolve) => {
+    if (server === undefined) return resolve()
+    server.close(() => resolve())
+  })
+  const timer = setTimeout(() => {
+    settleFail(new Error('AutoClaw 国际版授权超时（引导页未完成授权）'))
+    void closeServer()
+  }, LOGIN_TIMEOUT_MS)
+  timer.unref?.()
+
+  /** 本 vendor 的回调地址（官方白名单形态：localhost + 白名单端口 + 固定路径）。 */
+  const callbackPathOf = (vendor) => `/auth/callback-${vendor}`
+  const navigateUriOf = (vendor) => `http://localhost:${actualPort}${callbackPathOf(vendor)}`
+
+  const settleWith = async (vendor, code, state) => {
+    try {
+      const out = await exchangeOAuthCode(product, vendor, code, state, navigateUriOf(vendor), resolveDeviceId(product))
+      if (!out.ok) throw new Error(out.error)
+      clearTimeout(timer)
+      settleOk(out.credential)
+      setTimeout(() => void closeServer(), 500)
+    } catch (error) {
+      clearTimeout(timer)
+      settleFail(error instanceof Error ? error : new Error(String(error)))
+      setTimeout(() => void closeServer(), 500)
+    }
+  }
+
+  for (const port of OAUTH_CALLBACK_PORTS) {
+    /** 当前待授权的会话（vendor + oauth-url 给的 state；一页一次只跑一个 vendor）。 */
+    const session = { vendor: undefined, expectedState: undefined }
+    const candidate = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
+      const send = (status, type, body) => {
+        res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' })
+        res.end(body)
+      }
+      try {
+        // 引导页：两个登录按钮（Google 账号 / z.ai 账号）
+        if (url.pathname === '/' || url.pathname === '/guide') {
+          send(200, 'text/html; charset=utf-8', intlGuideHtml(product, session.vendor))
+          return
+        }
+        // 选择 vendor 并向上游要授权页（上游现发 oauth_url + state）
+        if (url.pathname === '/open-auth' && req.method === 'POST') {
+          const body = await new Promise((resolve) => {
+            let text = ''
+            req.on('data', (c) => { text += c })
+            req.on('end', () => resolve(text))
+          })
+          const vendor = (() => { try { return JSON.parse(body || '{}').vendor } catch { return '' } })() === 'google' ? 'google' : 'zai'
+          const deviceId = resolveDeviceId(product)
+          const r = await fetch(`${product.apiBase}${OAUTH_URL_PATH}/${vendor}-oauth-url`, {
+            method: 'POST',
+            headers: authHeaders(product, { intl: true }),
+            body: JSON.stringify({ source_id: SOURCE_ID, device_id: deviceId, navigate_uri: navigateUriOf(vendor) }),
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          })
+          const json = await r.json().catch(() => ({}))
+          if (!r.ok || json.code !== 0 || !json.data) {
+            send(200, 'application/json; charset=utf-8', JSON.stringify({
+              error: `获取授权页失败：${json.msg || `HTTP ${r.status}${json.code !== undefined ? ` (code ${json.code})` : ''}`}`,
+            }))
+            return
+          }
+          const authorizeUrl = String(json.data.oauth_url ?? json.data.url ?? json.data.login_url ?? json.data.auth_url ?? '')
+          if (authorizeUrl === '') {
+            send(200, 'application/json; charset=utf-8', JSON.stringify({ error: '上游未返回授权页地址' }))
+            return
+          }
+          let handedOutState = ''
+          try { handedOutState = new URL(authorizeUrl).searchParams.get('state') ?? '' } catch { /* 非法地址按缺 state 处理 */ }
+          if (handedOutState === '') {
+            send(200, 'application/json; charset=utf-8', JSON.stringify({ error: '上游授权页地址缺少 state 参数，已取消登录（回调校验必需）' }))
+            return
+          }
+          session.vendor = vendor
+          session.expectedState = handedOutState
+          send(200, 'application/json; charset=utf-8', JSON.stringify({ url: authorizeUrl }))
+          return
+        }
+        // 授权页 302 回来：code + state，state 逐字比对才收
+        const cbVendor = session.vendor
+        if (cbVendor !== undefined && url.pathname === callbackPathOf(cbVendor)) {
+          const code = url.searchParams.get('code') ?? ''
+          const state = url.searchParams.get('state') ?? ''
+          const accepted = code !== '' && state !== '' && state === session.expectedState
+          send(200, 'text/plain; charset=utf-8', accepted
+            ? `已收到 ${cbVendor === 'google' ? 'Google' : 'Z.ai'} 授权，正在换取凭据…可以关闭此页面。`
+            : '回调校验失败（state 不符或缺 code）——请回到引导页重新发起登录。')
+          if (accepted) void settleWith(cbVendor, code, state)
+          return
+        }
+        send(404, 'text/plain; charset=utf-8', 'not found')
+      } catch (error) {
+        try {
+          send(200, 'application/json; charset=utf-8', JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+        } catch { /* 连接已断 */ }
+      }
+    })
+    const listenOk = await new Promise((resolve) => {
+      candidate.once('error', () => resolve(false))
+      candidate.listen(port, '127.0.0.1', () => resolve(true))
+    })
+    if (listenOk) { server = candidate; actualPort = port; break }
+  }
+  if (server === undefined) {
+    // 四个官方端口全被占：回退载体页（一键导入）—— 引导页起不来总比死等强
+    clearTimeout(timer)
+    return beginSmsFlow(product, openBrowser)
+  }
+  const guideUrl = `http://localhost:${actualPort}/`
+  if (openBrowser) openBrowser(guideUrl)
+  return {
+    url: guideUrl,
+    result: result.finally(() => clearTimeout(timer)),
+    instructions: '在打开的引导页选 Google 账号或 z.ai 账号，跳到授权页完成后自动继续；桌面端已登录也可关掉它改用一键导入。',
+    close: closeServer,
+  }
+}
+
+/** 国际版引导页：两按钮（Google / z.ai）—— 授权页由上游现发，不在本页拼。 */
+function intlGuideHtml(product) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 ${product.displayName}</title>
+<style>
+body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#0f172a;color:#f8fafc;
+     display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px;box-sizing:border-box}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;width:100%;max-width:420px}
+h2{margin:0 0 8px;font-size:20px;color:#38bdf8}
+.desc{color:#94a3b8;font-size:13px;margin:0 0 24px}
+button{width:100%;background:#0284c7;color:#fff;border:none;border-radius:6px;
+       padding:11px 16px;font-size:15px;font-weight:500;cursor:pointer;margin-top:10px}
+button:hover{background:#0369a1}
+button:disabled{background:#475569;cursor:not-allowed}
+.tip{color:#64748b;font-size:12px;margin:16px 0 0;line-height:1.5}
+#msg{margin-top:16px;padding:10px 12px;border-radius:6px;font-size:13px;min-height:16px;display:none}
+#msg.err{display:block;background:rgba(239,68,68,.15);border:1px solid #ef4444;color:#fca5a5}
+#msg.busy{display:block;color:#93c5fd}
+</style></head><body>
+<div class="card">
+<h2>${product.displayName} 登录</h2>
+<p class="desc">选择登录方式 —— 授权页由 AutoClaw 官方接口现发（不会被跳转到中国站）。</p>
+<button id="btnGoogle">使用 Google 账号登录</button>
+<button id="btnZai">使用 z.ai 账号登录</button>
+<div id="msg"></div>
+<p class="tip">点按钮后会自动跳到官方授权页；完成登录后浏览器会回到
+<code>localhost</code> 回调端口，本页显示「已收到授权」即可关闭。</p>
+</div>
+<script>
+const msg = document.getElementById('msg');
+const busy = (t) => { msg.className = 'busy'; msg.textContent = t; };
+const fail = (t) => { msg.className = 'err'; msg.textContent = t; };
+async function openAuth(vendor) {
+  document.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  try {
+    busy('正在向官方接口获取授权页…');
+    const r = await fetch('/open-auth', { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vendor }) });
+    const j = await r.json();
+    if (j.error) { fail(j.error);
+      document.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+      return; }
+    msg.textContent = '正在跳转授权页…';
+    setTimeout(() => { location.href = j.url; }, 400);
+  } catch (e) { fail('请求失败：' + e.message);
+    document.querySelectorAll('button').forEach((b) => { b.disabled = false; }); }
+}
+document.getElementById('btnGoogle').onclick = () => openAuth('google');
+document.getElementById('btnZai').onclick = () => openAuth('zai');
+</script></body></html>`
 }
 
 /** 国内/兜底：本地载体页（一键导入 + 短信）。 */

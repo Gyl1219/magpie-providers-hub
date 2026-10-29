@@ -175,7 +175,8 @@ const stubFetch = (routes) => {
   const calls = []
   const original = globalThis.fetch
   globalThis.fetch = async (input, init) => {
-    const url = typeof input === 'string' ? input : input.url
+    // ⚠️ input 可能是 string / Request / URL —— URL 对象没有 .url 字段（.href 才有）
+    const url = typeof input === 'string' ? input : String(input?.url ?? input?.href ?? input)
     calls.push({ url, init })
     for (const r of routes) if (url.includes(r.match)) return r.respond({ url, init, calls })
     return new Response('{}', { status: 200 })
@@ -324,4 +325,126 @@ test('tidyWire：别家 agent 的开场白指纹被改写（否则 406），用�
   assert.ok(!/You are CodeBuddy Code/.test(sys), 'CodeBuddy 指纹被改写')
   assert.match(sys, /Claude Code CLI|CodeBuddy Code CLI|GLM-5\.3 model/)
   assert.equal(wire.messages[1].content, 'You are Claude Code 是什么？', '用户消息不动')
+})
+
+// ── 国际版 OAuth：上游现发授权页 + state 校验（2026-10-29 真机修复）───────
+//
+// 旧实现硬编码打开 https://chat.z.ai/auth（网页端），未登录访客被 CDN 按 IP
+// 弹「请切换至中国站点」→ 授权永远回不了回调端口。新实现：
+//   引导页 → POST <overseasv1>/<vendor>-oauth-url（上游现发授权页 + state）
+//   → 302 回 /auth/callback-<vendor> → state 逐字校验 → <vendor>-oauth-login。
+// 三条铁律各有用例钉死。
+
+const rawFetch = globalThis.fetch  // 本地服务的请求必须走真 fetch（stub 只拦上游域）
+/** 本地端口的请求带上重试：上一个用例的服务器刚 close（TIME_WAIT/未完全释放）时偶发 ECONNRESET。 */
+const localFetch = async (url, init, tries = 4) => {
+  let last
+  for (let i = 0; i < tries; i += 1) {
+    try { return await rawFetch(url, init) } catch (e) { last = e; await new Promise((r) => setTimeout(r, 120)) }
+  }
+  throw last
+}
+const intlLoginStub = () => {
+  const issued = { url: '', state: '' }
+  const stub = stubFetch([
+    {
+      match: '/userapi/overseasv1/zai-oauth-url',
+      respond: () => {
+        issued.state = 'S-' + Math.random().toString(36).slice(2, 8)
+        issued.url = `https://auth.z.ai/authorize?client_id=client_x&state=${issued.state}&redirect_uri=http%3A%2F%2Flocalhost%3A18432%2Fauth%2Fcallback-zai`
+        return new Response(JSON.stringify({ code: 0, data: { oauth_url: issued.url } }), { status: 200 })
+      },
+    },
+    {
+      match: '/userapi/overseasv1/zai-oauth-login',
+      respond: ({ init }) => {
+        const body = JSON.parse(init.body)
+        if (body.state !== issued.state) {
+          return new Response(JSON.stringify({ code: 40100, msg: 'state mismatch' }), { status: 200 })
+        }
+        return new Response(JSON.stringify({
+          code: 0,
+          data: {
+            access_token: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+            refresh_token: 'rt-new',
+            user_name: 'tester',
+          },
+        }), { status: 200 })
+      },
+    },
+  ])
+  return { stub, issued }
+}
+
+test('国际版登录：引导页两按钮 → 上游现发授权页（不再打开 chat.z.ai 网页端）', async () => {
+  const { stub, issued } = intlLoginStub()
+  let openedUrl = ''
+  const flow = await autoclawIntlChannel.beginLogin((u) => { openedUrl = u })
+  try {
+    assert.match(openedUrl, /^http:\/\/localhost:\d+\/$/, '打开的是本地引导页，不是授权网站')
+    assert.doesNotMatch(openedUrl, /chat\.z\.ai/, '绝不直接打开 chat.z.ai（会弹中国站跳转）')
+    // 页面形状：两按钮（Google / z.ai），授权页不由本页拼
+    const html = await (await rawFetch(new URL('/guide', openedUrl))).text()
+    assert.match(html, /btnGoogle|使用 Google 账号登录/)
+    assert.match(html, /btnZai|使用 z\.ai 账号登录/)
+    assert.doesNotMatch(html, /chat\.z\.ai/, '页面里不出现网页端地址')
+    // /open-auth：上游现发授权页 + 记下 state
+    const r = await rawFetch(new URL('/open-auth', openedUrl), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vendor: 'zai' }),
+    })
+    const j = await r.json()
+    assert.equal(j.error, undefined, `open-auth 不应报错：${j.error ?? ''}`)
+    assert.equal(j.url, issued.url, '授权页地址必须是上游现发的')
+    assert.match(j.url, /state=/)
+  } finally {
+    stub.restore()
+    await flow.close?.()
+  }
+})
+
+test('国际版登录：回调 state 校验（不符拒收）+ 符合才换 token', async () => {
+  const { stub, issued } = intlLoginStub()
+  const flow = await autoclawIntlChannel.beginLogin(undefined)
+  try {
+    await localFetch(new URL('/open-auth', flow.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vendor: 'zai' }),
+    })
+    // ① 伪造 state → 拒收（不触发 oauth-login）
+    const bad = await localFetch(`http://localhost:${new URL(flow.url).port}/auth/callback-zai?code=evil&state=WRONG`)
+    assert.match(await bad.text(), /校验失败/)
+    // ② state 原样带回 → 换 token 成功，result 兑现
+    const good = await localFetch(`http://localhost:${new URL(flow.url).port}/auth/callback-zai?code=good-code&state=${encodeURIComponent(issued.state)}`)
+    assert.match(await good.text(), /已收到/)
+    const credential = await Promise.race([
+      flow.result,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('result 未兑现')), 8000)),
+    ])
+    assert.equal(credential.access_token, fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }))
+    assert.equal(credential.refresh_token, 'rt-new')
+  } finally {
+    stub.restore()
+    await flow.close?.()
+  }
+})
+
+test('国际版登录：换 token 走 <vendor>-oauth-login（zai/google 同构）', async () => {
+  const { stub } = intlLoginStub()
+  const flow = await autoclawIntlChannel.beginLogin(undefined)
+  try {
+    await localFetch(new URL('/open-auth', flow.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vendor: 'zai' }),
+    })
+    await localFetch(`http://localhost:${new URL(flow.url).port}/auth/callback-zai?code=c&state=${encodeURIComponent('S-wrong-on-purpose')}`)
+    // state 错 → oauth-login 不该被调过（只有校验通过才换）
+    await new Promise((r) => setTimeout(r, 400))
+    const exchangeCalls = stub.calls.filter((c) => c.url.includes('-oauth-login'))
+    assert.equal(exchangeCalls.length, 0, 'state 校验失败绝不能去换 token')
+    assert.ok(stub.calls.some((c) => c.url.includes('zai-oauth-url')), 'oauth-url 被调用过')
+  } finally {
+    stub.restore()
+    await flow.close?.()
+  }
 })
