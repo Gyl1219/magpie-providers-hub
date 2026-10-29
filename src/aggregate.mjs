@@ -378,7 +378,14 @@ function buildSnapshot() {
     const old = previous?.channels?.find((c) => c && c.id === channel.id)
     const oldBuckets = Array.isArray(old?.buckets) ? old.buckets : []
     const buckets = fresh !== undefined ? sanitizeWindows(fresh) : oldBuckets
-    const accountSlots = slots.filter((s) => s.channel === channel.id).length
+    // ⚠️ 只数**本供应商名下**的槽（`hub-<渠道>` / `hub-<渠道>#<slot>`）：
+    //    0.3.x 的旧槽 `providers-hub#<slot>` 的 channel 也是 officeace，迁移是
+    //    复制不是删（magpie 的地盘只写不删）—— 一起数会出「2 个账号」的鬼影
+    //    （真机 2026-10-29：同一份凭据被算成两个账号）。
+    const providerKey = providerIdOf(channel)
+    const accountSlots = slots.filter(
+      (s) => s.channel === channel.id && (s.key === providerKey || s.key.startsWith(`${providerKey}#`)),
+    ).length
     return {
       id: channel.id,
       // 该渠道对应的 magpie 供应商 id（页面上「关掉哪个供应商会关掉它」）

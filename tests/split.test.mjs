@@ -156,3 +156,23 @@ test('旁路口径的渠道由模块级 sweep 补签，结果只进快照', asyn
     channel.checkin = original
   }
 })
+
+test('快照账号数只数本供应商名下的槽（旧 providers-hub#* 不算鬼影账号）', async () => {
+  // 真机 2026-10-29：迁移是复制不是删（magpie 的地盘只写不删），旧槽
+  // `providers-hub#yw0gxk` 的 channel 也是 officeace —— 全局按 channel 数槽
+  // 会把同一份凭据算成「2 个账号」。
+  const channel = REGISTERED_CHANNELS[0]
+  writeAuthSlots({
+    'providers-hub#legacy': { type: 'success', channel: channel.id, accountId: 'OfficeAce' },
+    [providerIdOf(channel)]: { type: 'success', channel: channel.id, accountId: 'OfficeAce' },
+    [`${providerIdOf(channel)}#second`]: { type: 'success', channel: channel.id, accountId: '二号' },
+  })
+  const plugin = await makeHubPlugin(channel)({}, { notify: false })
+  await plugin.config({})
+  _internal.enableSnapshotWrites()
+  await plugin.provider.models({ models: {} })  // 触发一次快照写出
+  const text = readFileSync(process.env.DSH_HUB_SNAPSHOT_PATH, 'utf8')
+  const snap = JSON.parse(text.replace(/^window\.__PROVIDERS_HUB_SNAPSHOT__\s*=\s*/, '').replace(/;\s*$/, ''))
+  const row = snap.channels.find((c) => c.id === channel.id)
+  assert.equal(row.accounts, 2, '新槽 1 + 本供应商的 #second 槽 1 = 2（旧槽 providers-hub#legacy 不算）')
+})
