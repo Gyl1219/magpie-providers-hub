@@ -37,9 +37,15 @@ test('一个插件，十个供应商：每个实例只注册自己那一条', as
   }
 })
 
-test('每个供应商一个登录入口（不是每渠道一个供应商时代的十个）', async () => {
+test('每个供应商的登录入口：单渠道一个，autoclawintl 两个（Google/z.ai）', async () => {
   for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
     const plugin = await makePlugin({}, {})
+    if (plugin.provider.id === 'hub-autoclawintl') {
+      assert.equal(plugin.auth.methods.length, 2, `${exportName} 应有 Google/z.ai 两个登录入口`)
+      assert.match(plugin.auth.methods[0].label, /Google/)
+      assert.match(plugin.auth.methods[1].label, /z\.ai/)
+      continue
+    }
     assert.equal(plugin.auth.methods.length, 1, `${exportName} 应只有一个登录入口`)
     assert.match(plugin.auth.methods[0].label, /^登录 .+$/)
   }

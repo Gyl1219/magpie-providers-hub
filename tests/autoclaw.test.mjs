@@ -376,20 +376,21 @@ const intlLoginStub = () => {
   return { stub, issued }
 }
 
-test('国际版登录：选择页两按钮 → vendor 步骤页带滑块 → 缺回执 open-auth 拒绝', async () => {
+test('国际版登录：vendor 由 loginMethods 定死 → 滑块页 → 缺回执 open-auth 拒绝', async () => {
   const { stub, issued } = intlLoginStub()
+  // vendor 在 authorize 参数层定死（aggregate 经 loginMethods 渲染两条登录入口）
+  assert.deepEqual(autoclawIntlChannel.loginMethods?.map((m) => m.arg), ['google', 'zai'],
+    '国际版必须声明 loginMethods（Google/z.ai 两入口）')
+  assert.equal(autoclawChannel.loginMethods, undefined, '国内版保持单入口')
   let openedUrl = ''
-  const flow = await autoclawIntlChannel.beginLogin((u) => { openedUrl = u })
+  const flow = await autoclawIntlChannel.beginLogin((u) => { openedUrl = u }, { loginArg: 'zai' })
   try {
-    assert.match(openedUrl, /^http:\/\/localhost:\d+\/$/, '打开的是本地引导页，不是授权网站')
+    assert.match(openedUrl, /^http:\/\/localhost:\d+\/$/, '打开的是本地滑块页，不是授权网站')
     assert.doesNotMatch(openedUrl, /chat\.z\.ai/, '绝不直接打开 chat.z.ai（会弹中国站跳转）')
-    // 选择页：两按钮（Google / z.ai）
-    const pick = await (await rawFetch(new URL('/', openedUrl))).text()
-    assert.match(pick, /vendor=google/, '选择页要有 Google 按钮')
-    assert.match(pick, /vendor=zai/, '选择页要有 z.ai 按钮')
-    // vendor 步骤页：滑块步骤（上游 enabled:true，缺回执会被误导性文案挡住）
-    const html = await (await rawFetch(new URL('/?vendor=zai', openedUrl))).text()
-    assert.match(html, /captchaBox|initAliyunCaptcha/, 'vendor 步骤页必须带滑块步骤')
+    // 滑块页：vendor 已定死（页面标题带 z.ai），带滑块步骤
+    const html = await (await rawFetch(new URL('/', openedUrl))).text()
+    assert.match(html, /captchaBox|initAliyunCaptcha/, '滑块页必须带滑块步骤')
+    assert.match(html, /z\.ai/, '页面要标明当前 vendor')
     assert.doesNotMatch(html, /chat\.z\.ai/, '页面里不出现网页端地址')
     // 缺滑块回执 → open-auth 明确拒绝（不发生误导性「版本已停止服务」）
     const deny = await (await rawFetch(new URL('/open-auth', openedUrl), {
@@ -418,7 +419,7 @@ test('国际版登录：选择页两按钮 → vendor 步骤页带滑块 → 缺
 
 test('国际版登录：回调 state 校验（不符拒收）+ 符合才换 token', async () => {
   const { stub, issued } = intlLoginStub()
-  const flow = await autoclawIntlChannel.beginLogin(undefined)
+  const flow = await autoclawIntlChannel.beginLogin(undefined, { loginArg: 'zai' })
   try {
     await localFetch(new URL('/captcha', flow.url), {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -451,7 +452,7 @@ test('国际版登录：回调 state 校验（不符拒收）+ 符合才换 toke
 
 test('国际版登录：换 token 走 <vendor>-oauth-login（zai/google 同构）', async () => {
   const { stub } = intlLoginStub()
-  const flow = await autoclawIntlChannel.beginLogin(undefined)
+  const flow = await autoclawIntlChannel.beginLogin(undefined, { loginArg: 'zai' })
   try {
     await localFetch(new URL('/captcha', flow.url), {
       method: 'POST', headers: { 'content-type': 'application/json' },

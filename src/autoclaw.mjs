@@ -1071,13 +1071,16 @@ document.getElementById('btnLogin').onclick = async () => {
  * 登录流（对齐 beginLogin 契约：立即返回 url，登录在 result 推进）。
  *
  * 国内：本地载体页（一键导入 / 短信两路）。
- * 国际：本地引导页（Google 账号 / z.ai 账号两按钮）→ 上游现发**专用授权页**
- *       （`<vendor>-oauth-url`）→ 302 回调端口 → state 校验 → 换 token。
- *       + 载体页一键导入兜底（四个回调端口全被占时）。
+ * 国际：**vendor 在 authorize 参数层定死**（aggregate 经 `loginMethods` 渲染成
+ *       「Google 账号 / z.ai 账号」两个登录按钮，arg 直通到这里）→ 本地滑块页
+ *       → 上游现发授权页 → 302 回调端口 → state 校验 → 换 token。
+ *       ⚠️ 对齐社区 packages/autoclaw 的关键结构：一个会话从生到死只有一个
+ *       vendor/state 源 —— 引导页里再选 vendor 会出现「重开登录覆盖旧会话」的
+ *       state 失配（真机 2026-10-30「本机当前没有进行中的授权会话」的根因）。
  */
-async function beginLogin(product, openBrowser) {
+async function beginLogin(product, openBrowser, extras = {}) {
   if (product.intl) {
-    return startIntlFlow(product, openBrowser)
+    return startIntlFlow(product, openBrowser, extras.loginArg === 'google' ? 'google' : 'zai')
   }
   return beginSmsFlow(product, openBrowser)
 }
@@ -1085,8 +1088,8 @@ async function beginLogin(product, openBrowser) {
 /**
  * 国际版 OAuth（对齐社区 packages/autoclaw 的 /open-auth 设计）。
  *
- * 流程：本地引导页（选 vendor）→ `POST <overseasv1>/<vendor>-oauth-url`
- * （上游**现发**授权页地址 + state）→ 引导页跳过去 → 授权页 302 回
+ * 流程：本地滑块页（vendor 已定）→ `POST <overseasv1>/<vendor>-oauth-url`
+ * （上游**现发**授权页地址 + state）→ 页面跳过去 → 授权页 302 回
  * `localhost:<port>/auth/callback-<vendor>` → **state 逐字校验** → 换 token。
  *
  * ⚠️ 三个「绝不能」：
@@ -1096,8 +1099,10 @@ async function beginLogin(product, openBrowser) {
  *     会登录成别人的账号）；
  *   ③ redirect_uri 的端口绝不能随机（官方白名单只认这四个端口 + 固定路径，
  *     其它形态回 `Redirect URI not registered for this client`）。
+ * ⚠️ 拒收**不动会话**（社区原语义）：state 失配的回调只回失败页，之后到达的
+ *    合法回调仍能完成登录 —— 会话由 10 分钟定时器统一收口。
  */
-async function startIntlFlow(product, openBrowser) {
+async function startIntlFlow(product, openBrowser, vendor) {
   let server
   let actualPort
   let settleOk, settleFail
@@ -1132,7 +1137,7 @@ async function startIntlFlow(product, openBrowser) {
 
   for (const port of OAUTH_CALLBACK_PORTS) {
     /** 当前待授权的会话（vendor + oauth-url 给的 state + 滑块回执；一页一次一个）。 */
-    const session = { vendor: undefined, expectedState: undefined, captchaReceipt: undefined }
+    const session = { vendor, expectedState: undefined, captchaReceipt: undefined }
     const candidate = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
       const send = (status, type, body) => {
@@ -1145,10 +1150,8 @@ async function startIntlFlow(product, openBrowser) {
         req.on('end', () => resolve(text))
       })
       try {
-        // 引导页：先选 vendor（?vendor=zai|google 为空时是选择页），选完进滑块步骤
+        // 滑块页：vendor 在 authorize 参数层已定死（session.vendor），页内无选择步骤
         if (url.pathname === '/' || url.pathname === '/guide') {
-          const vendor = url.searchParams.get('vendor') === 'google' ? 'google'
-            : url.searchParams.get('vendor') === 'zai' ? 'zai' : undefined
           send(200, 'text/html; charset=utf-8', intlGuideHtml(product, vendor))
           return
         }
@@ -1188,8 +1191,7 @@ async function startIntlFlow(product, openBrowser) {
         }
         // 选定 vendor：校验滑块回执在位 → 向上游要授权页（上游现发 oauth_url + state）
         if (url.pathname === '/open-auth' && req.method === 'POST') {
-          const body = await readBodyText()
-          const vendor = (() => { try { return JSON.parse(body || '{}').vendor } catch { return '' } })() === 'google' ? 'google' : 'zai'
+          // ⚠️ vendor 是会话级的（authorize 参数定死）—— 页面不带、也不改。
           // ⚠️ 滑块回执必须先就位：上游 enabled:true 时缺回执回「当前版本已停止服务」
           //    （误导性文案，真机 2026-10-29 阶梯实验坐实）——别让用户去下载什么新版。
           if (session.captchaReceipt === undefined) {
@@ -1222,7 +1224,6 @@ async function startIntlFlow(product, openBrowser) {
             send(200, 'application/json; charset=utf-8', JSON.stringify({ error: '上游授权页地址缺少 state 参数，已取消登录（回调校验必需）' }))
             return
           }
-          session.vendor = vendor
           session.expectedState = handedOutState
           send(200, 'application/json; charset=utf-8', JSON.stringify({ url: authorizeUrl }))
           return
@@ -1296,30 +1297,6 @@ async function startIntlFlow(product, openBrowser) {
  * （带 `ali_captcha_verify_param`）。授权页地址**永远由上游现发**，本页绝不拼。
  */
 function intlGuideHtml(product, vendor) {
-  if (vendor === undefined) {
-    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 ${product.displayName}</title>
-<style>
-body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#0f172a;color:#f8fafc;
-     display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px;box-sizing:border-box}
-.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;width:100%;max-width:420px}
-h2{margin:0 0 8px;font-size:20px;color:#38bdf8}
-.desc{color:#94a3b8;font-size:13px;margin:0 0 24px}
-button{width:100%;background:#0284c7;color:#fff;border:none;border-radius:6px;
-       padding:11px 16px;font-size:15px;font-weight:500;cursor:pointer;margin-top:10px}
-button:hover{background:#0369a1}
-.tip{color:#64748b;font-size:12px;margin:16px 0 0;line-height:1.5}
-</style></head><body>
-<div class="card">
-<h2>${product.displayName} 登录</h2>
-<p class="desc">选择登录方式 —— 授权页由 AutoClaw 官方接口现发（不会被跳转到中国站）。</p>
-<button onclick="location.href='/?vendor=google'">使用 Google 账号登录</button>
-<button onclick="location.href='/?vendor=zai'">使用 z.ai 账号登录</button>
-<p class="tip">若桌面端已登录国际版账号，也可以关掉本页，在 magpie 供应商页用「一键导入」。</p>
-</div>
-</body></html>`
-  }
   const vendorName = vendor === 'zai' ? 'z.ai' : 'Google'
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1540,6 +1517,16 @@ function makeAutoclawChannel(product) {
     }])),
 
     beginLogin: (openBrowser) => beginLogin(product, openBrowser),
+
+    // 多登录入口（aggregate 摊成多条 magpie auth.methods）：国际版在 authorize
+    // 参数层定死 vendor —— 对齐社区结构，会话从生到死只有一个 state 源，
+    // 不存在「重开登录覆盖旧会话」的 state 失配（真机 2026-10-30）。
+    ...(product.intl ? {
+      loginMethods: [
+        { label: `Google 账号登录 ${product.displayName}`, arg: 'google' },
+        { label: `z.ai 账号登录 ${product.displayName}`, arg: 'zai' },
+      ],
+    } : {}),
 
     refresh: async (credential) => {
       if (typeof credential?.refresh_token !== 'string' || credential.refresh_token.trim() === '') {

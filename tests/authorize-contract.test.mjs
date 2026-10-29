@@ -61,7 +61,8 @@ test('每个注册渠道都实现了 beginLogin', async () => {
 test('authorize 立刻返回（不 await 用户登录）', async () => {
   for (const channel of REGISTERED_CHANNELS) {
     const plugin = await build(channel)
-    assert.equal(plugin.auth.methods.length, 1, `${channel.id}: 一个供应商只有一个登录入口`)
+    assert.equal(plugin.auth.methods.length, channel.loginMethods?.length ?? 1,
+      `${channel.id}: 登录入口数应与 loginMethods 声明一致`)
     for (const method of plugin.auth.methods) {
       const started = Date.now()
       const handle = await method.authorize()

@@ -875,22 +875,27 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       // authorize() 必须**立刻**返回 { url, method, callback } —— 在这里 await
       // 用户完成登录会与 magpie 双向死锁；真正等登录的是 callback()。
       // 渠道契约 beginLogin() → { url, result }。
-      methods: [((channel) => ({
-        type: 'oauth',
-        label: `登录 ${channel.displayName}`,
-        async authorize() {
-          // xff 只对 minimaxintl 有意义，其余渠道忽略该参数
-          const started = await channel.beginLogin(openBrowser, { xff: minimaxXff, proxy: minimaxProxy })
-          // 登录前的账号槽状态（accountId → 此前凭据是否已过期）—— 判据见下
-          const preSlots = new Map(
-            readMagpieAuthSlots(PROVIDER)
-              .filter((s) => s.channel === channel.id)
-              .map((s) => [s.accountId, { expired: s.expires !== undefined && s.expires <= Date.now() }]),
-          )
-          const resolveAccountId = (credential) =>
-            (typeof credential?.nickname === 'string' && credential.nickname !== ''
-              ? credential.nickname
-              : channel.displayName)
+      // 渠道可声明多登录入口（`loginMethods: [{label, arg}]`，如 autoclawintl 的
+      // 「Google 账号 / z.ai 账号」——vendor 在 authorize 参数层定死，引导页不再
+      // 有选择步骤 ⇒ 不会出现「重开一次登录覆盖旧会话」的 state 失配）。
+      // 未声明时退化为单入口 `登录 <displayName>`。
+      methods: ((channel) => {
+        const buildOne = (label, arg) => ({
+          type: 'oauth',
+          label,
+          async authorize() {
+            // xff 只对 minimaxintl 有意义，其余渠道忽略该参数
+            const started = await channel.beginLogin(openBrowser, { xff: minimaxXff, proxy: minimaxProxy, ...(arg !== undefined ? { loginArg: arg } : {}) })
+            // 登录前的账号槽状态（accountId → 此前凭据是否已过期）—— 判据见下
+            const preSlots = new Map(
+              readMagpieAuthSlots(PROVIDER)
+                .filter((s) => s.channel === channel.id)
+                .map((s) => [s.accountId, { expired: s.expires !== undefined && s.expires <= Date.now() }]),
+            )
+            const resolveAccountId = (credential) =>
+              (typeof credential?.nickname === 'string' && credential.nickname !== ''
+                ? credential.nickname
+                : channel.displayName)
           /** 是否「重复登录一个仍然有效的账号」= 该弹「账号重复」且**不覆盖原槽**。 */
           const isHealthyDuplicate = (credential) => {
             const pre = preSlots.get(resolveAccountId(credential))
@@ -968,7 +973,11 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
             },
           }
         },
-      }))(channel)],
+      })
+      return (Array.isArray(channel.loginMethods) && channel.loginMethods.length > 0
+        ? channel.loginMethods.map((m) => buildOne(m.label, m.arg))
+        : [buildOne(`登录 ${channel.displayName}`, undefined)])
+      })(channel),
 
       /**
        * 按账号发请求：`getAuth()` 拿**当前账号槽**的 auth。
