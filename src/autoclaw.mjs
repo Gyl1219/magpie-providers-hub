@@ -1227,19 +1227,38 @@ async function startIntlFlow(product, openBrowser) {
           send(200, 'application/json; charset=utf-8', JSON.stringify({ url: authorizeUrl }))
           return
         }
-        // 授权页 302 回来：code + state，state 逐字比对才收
-        const cbVendor = session.vendor
-        if (cbVendor !== undefined && url.pathname === callbackPathOf(cbVendor)) {
+        // 授权页 302 回来：code + state。
+        // ⚠️ **vendor 宽容匹配**：不管会话当前选的是哪个 vendor，/auth/callback-zai
+        //    与 /auth/callback-google 都收 —— 上游授权页 302 的路径以它自己的
+        //    回调注册为准（真机 2026-10-30：选了 z.ai，上游回的却可能是 google
+        //    路径形态；按 session.vendor 硬匹配会把真回调漏成 404 "not found"）。
+        //    防伪仍由 **state 逐字比对**兜底（state 是 oauth-url 会话级签发的）。
+        if (url.pathname === '/auth/callback-zai' || url.pathname === '/auth/callback-google') {
           const code = url.searchParams.get('code') ?? ''
           const state = url.searchParams.get('state') ?? ''
-          const accepted = code !== '' && state !== '' && state === session.expectedState
-          send(200, 'text/html; charset=utf-8', accepted
-            ? `<meta charset="utf-8"><p style="font:15px system-ui;padding:24px">已收到 ${cbVendor === 'google' ? 'Google' : 'Z.ai'} 授权，正在换取凭据…可以关闭此页面。</p>`
-            : `<meta charset="utf-8"><p style="font:15px system-ui;padding:24px;color:#b91c1c">回调校验失败（state 不符或缺 code）——请回到引导页重新发起登录。</p>`)
-          if (accepted) void settleWith(cbVendor, code, state)
+          const reason = session.expectedState === undefined
+            ? '本机当前没有进行中的授权会话（可能引导页已被重新发起或关闭）——请回 magpie 重新点一次登录，再从头走一遍。'
+            : state === ''
+              ? '回调缺 state 参数，无法校验来源。'
+              : state !== session.expectedState
+                ? 'state 与本会话不一致（通常是旧会话的授权页回到新会话）——请回 magpie 重新发起登录后，用**新的**引导页完成授权。'
+                : code === ''
+                  ? '回调缺 code 参数。'
+                  : undefined
+          if (reason === undefined) {
+            const vendor = session.vendor ?? (url.pathname.endsWith('google') ? 'google' : 'zai')
+            send(200, 'text/html; charset=utf-8',
+              `<meta charset="utf-8"><p style="font:15px system-ui;padding:24px">已收到 ${vendor === 'google' ? 'Google' : 'Z.ai'} 授权，正在换取凭据…可以关闭此页面。</p>`)
+            void settleWith(vendor, code, state)
+            return
+          }
+          send(200, 'text/html; charset=utf-8',
+            `<meta charset="utf-8"><p style="font:15px system-ui;padding:24px;color:#b91c1c">授权回调未通过校验：${reason}</p>`)
           return
         }
-        send(404, 'text/plain; charset=utf-8', 'not found')
+        // 其余路径给可操作的 404（旧版这里只回 "not found"，用户看到的是死页）
+        send(404, 'text/html; charset=utf-8',
+          '<meta charset="utf-8"><p style="font:15px system-ui;padding:24px">not found —— 本端口只服务 AutoClaw 引导页与 OAuth 回调；如果你是刚完成授权被带到这一页，说明回调会话已经失效，请回 magpie 重新发起登录。</p>')
       } catch (error) {
         try {
           send(200, 'application/json; charset=utf-8', JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))

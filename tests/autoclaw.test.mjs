@@ -430,7 +430,10 @@ test('国际版登录：回调 state 校验（不符拒收）+ 符合才换 toke
     })
     // ① 伪造 state → 拒收（不触发 oauth-login）
     const bad = await localFetch(`http://localhost:${new URL(flow.url).port}/auth/callback-zai?code=evil&state=WRONG`)
-    assert.match(await bad.text(), /校验失败/)
+    assert.match(await bad.text(), /未通过校验|state 与本会话不一致/);
+    // vendor 宽容匹配：google 回调路径同样能被收（state 对即可）
+    const gpath = await localFetch(`http://localhost:${new URL(flow.url).port}/auth/callback-google?code=g&state=${encodeURIComponent(issued.state)}`)
+    assert.match(await gpath.text(), /已收到/, 'google 回调路径也要收（上游 302 的路径以其注册为准）')
     // ② state 原样带回 → 换 token 成功，result 兑现
     const good = await localFetch(`http://localhost:${new URL(flow.url).port}/auth/callback-zai?code=good-code&state=${encodeURIComponent(issued.state)}`)
     assert.match(await good.text(), /已收到/)
