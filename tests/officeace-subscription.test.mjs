@@ -232,3 +232,21 @@ test('目录：倍率拼进展示名（x1 不标）；倍率表拉不到纯降�
     stub2.restore()
   }
 })
+
+// ── 「推理域活、订阅域死」要说人话（真机 2026-10-29）─────────────────────
+
+test('usage：IAM 过期 + APIG.0301 → 提示重新登录且说明对话不受影响（不怼 HTTP 原文）', async () => {
+  const { fetchUsage } = await import('../src/officeace.mjs')
+  const dead = { ...CRED, expiresAt: new Date(Date.now() - 3600_000).toISOString() }
+  const stub = stubFetch([{
+    match: '/v1/subscription',
+    respond: () => json({ error_msg: 'Incorrect IAM authentication information: Unauthorized', error_code: 'APIG.0301' }, 401),
+  }])
+  try {
+    await assert.rejects(() => fetchUsage(dead), /IAM 会话已过期.*refresh_token 已被.*重新登录/s)
+    // 未过期的凭据打同样的 401 → 还是原样带原因（别把别的 401 也翻成「过期」）
+    await assert.rejects(() => fetchUsage(CRED), /订阅查询失败：HTTP 401.*APIG\.0301/s)
+  } finally {
+    stub.restore()
+  }
+})

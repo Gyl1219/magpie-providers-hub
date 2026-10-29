@@ -594,6 +594,19 @@ const SUBSCRIPTION_BASE = 'https://officeace.cn-southwest-2.huaweicloud-agentart
 export async function fetchUsage(credential) {
   const result = await signAndRequest(`${SUBSCRIPTION_BASE}${SUBSCRIPTION_PATH}`, credential, 'GET')
   if (!result.ok) {
+    // ⚠️ 「推理域活、订阅域死」的错法要说人话（真机 2026-10-29）：
+    //    STS 三元组过期 → IAM 签名被 APIG 拒（APIG.0301 Unauthorized），
+    //    而 chat 走的 CLAW 域用的是另一套会话（Bearer），照样 200。
+    //    此时 refresh_token 已被上轮续期消费（STS5.1806，一次性的，救不回）
+    //    —— 卡片上「对话不受影响，请重新登录」比 HTTP 401 原文有用得多。
+    const iamDead = result.status === 401 && result.text.includes('APIG.0301')
+    const tokenExpired = typeof credential?.expiresAt === 'string' && Date.parse(credential.expiresAt) < Date.now()
+    if (iamDead && tokenExpired) {
+      throw new Error(
+        'IAM 会话已过期（订阅面 401），refresh_token 已被上轮续期消费（STS5.1806）——'
+        + '对话不受影响，重新登录后恢复额度显示',
+      )
+    }
     const detail = result.text.trim().slice(0, 200)
     throw new Error(`订阅查询失败：HTTP ${result.status}${detail === '' ? '' : `：${detail}`}`)
   }
