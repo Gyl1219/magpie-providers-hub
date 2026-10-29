@@ -1,13 +1,11 @@
-﻿修 OfficeAce「refresh_token 已被消费」：新凭据从不落盘的两处写盘漏洞
+﻿自注册：落盘时点改有上限的补写（治本地市场条目被官方拉取冲掉）
 
-真机：STS5.1806 invalid refresh token: 'the refresh token has been used'，
-卡片只会报 401 APIG.0301。盘上和账号槽是同一份过期 46 小时的凭据 ——
-说明有次续期成功了，但新 refresh_token 从未落盘。
+真机取证：05:32:59 插件写入「共 61 条」，05:33:29 缓存 mtime 变了、
+内容回到 60 条官方条目 —— magpie 启动后异步拉官方 registry 并整体重写缓存，
+把 100ms 写的那条冲掉，卡片退回 GitHub 话题发现的「未审阅」黄标。
 
-- saveCredential：拒绝下调写入（盘上到期更晚就不覆盖，旧凭据回写不能吞掉
-  轮转出来的新 token）；写失败不再静默，console.warn + 返回 false
-- writeSidecar：写盘成功才记 identity（旧实现无条件记 → 这次的新 token
-  再没有第二次落盘机会）
-- doRefresh：STS5.1806 / 'has been used' 单独成句（不是网络抖动，重试无意义，
-  直接重新登录）
-- 新增 tests/credential-write.test.mjs（7 例）钉死上述语义
+- FLUSH_SCHEDULE_MS = [100, 30s, 90s, 240s]：官方拉取之后再补写
+- flush 不再清队列（后续时点要复用同一批条目），重复合并幂等：
+  条目已存在 -> JSON 不变 -> 不写盘
+- 缓存不可用时保留条目等下一个时点（不凭空造缓存文件）
+- 新增 tests/self-register.test.mjs（5 例）；PUBLISH.md 补取证与本地验证

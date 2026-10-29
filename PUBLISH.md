@@ -83,6 +83,34 @@ PR 文案草稿：
 5. registry.json 的字段**只加不改名**：provider id 一旦进 registry 就当作已发布
    id —— 改名等于让所有人的登录态掉线（与 AGENTS.md 第 6 条同源）。
 
+## 三之二、本地自注册为什么之前没留住（黄标根因，2026-10-30 取证）
+
+`src/self-register.mjs` 会把本插件写进 `~/.cache/magpie/plugin-market.json`
+（卡片标题 / 源码按钮 / 「承载 …」的来源）。但真机观测：
+
+```
+05:32:59  [providers-hub] 已注册 新增 1（共 61 条，这是第 1 次写入）
+05:33:29  plugin-market.json  mtime 变了 —— 内容回到 60 条官方条目，我们那条没了
+```
+
+magpie 启动后**异步**去拉一次官方 registry（联网，快慢不定），拉到就**整体重写**
+缓存 —— 插件在 100ms 写的那一条，几十秒后被冲掉，卡片退回 GitHub 话题发现的
+「未审阅」黄标。
+
+修法：**落盘时点改成有上限的一组补写** `FLUSH_SCHEDULE_MS = [100, 30s, 90s, 240s]`
+（`src/self-register.mjs`）。合并是幂等的（条目已存在 → JSON 不变 → 不写盘），
+四次之后彻底停下 —— 不是 fs.watch、不是轮询（那会自触发死循环）。
+
+本机立刻见效的验证（不用等 PR）：
+
+```bash
+magpie plugin update
+# 等 1 分钟（第二次补写在 30s）
+node -e "const j=require(process.env.USERPROFILE+'/.cache/magpie/plugin-market.json');console.log(j.plugins.filter(p=>p.package==='magpie-providers-hub'))"
+```
+
+⚠️ 本地缓存只是**本机**的卡片显示；要所有人都看到，仍要走第二节的 registry PR。
+
 ## 四、验证「上架成功」
 
 - `magpie plugin remove github:Gyl1219/magpie-providers-hub` 后

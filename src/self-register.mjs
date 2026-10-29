@@ -64,6 +64,21 @@ const QUEUE_KEY = Symbol.for("magpie.plugin-template.registry-queue")
 const FLUSH_MS = 100
 
 /**
+ * 落盘时点（**有上限**，绝不是轮询/watch）。
+ *
+ * ⚠️ 真机 2026-10-30：magpie 启动后会**异步**去拉一次官方 registry（联网，
+ *    快慢不定），拉到就**整体重写**缓存 —— 我们在 100ms 写进去的那条会在几十秒后
+ *    被冲掉（`plugin update` 后 30 秒：文件回到 60 条官方条目，我们的第 61 条没了，
+ *    卡片于是退回 GitHub 发现的「未审阅」黄标）。
+ *
+ * 所以在拉取窗口之后再补写几次。⚠️ 与「不要 fs.watch / setInterval 去补」不冲突：
+ *    那是指**自触发死循环**（写文件触发 watch，watch 又写，每秒 3-4 次永不停止）。
+ *    这里是**固定 4 个时点、写完即止**，且每次合并是幂等的（条目已存在 → JSON 不变
+ *    → 不写盘）。
+ */
+const FLUSH_SCHEDULE_MS = [FLUSH_MS, 30_000, 90_000, 240_000]
+
+/**
  * 从 magpie 的配置目录推出它的缓存目录。
  *
  * 插件的 directory 是 magpie 的 config folder（~/.config/magpie）。
@@ -122,14 +137,24 @@ export function registerSelf(entry, opts = {}) {
 
   q.entries.set(entry.package, entry)
 
-  if (q.timer) return Promise.resolve({ ok: true, queued: true })
+  if (q.timer || q.scheduled) return Promise.resolve({ ok: true, queued: true })
 
   return new Promise((resolve) => {
-    q.timer = setTimeout(() => {
+    q.scheduled = true
+    q.attempt = 0
+    const step = () => {
       q.timer = null
       const r = flush(q, opts.timeoutMs)
-      resolve(r)
-    }, FLUSH_MS)
+      q.attempt += 1
+      if (q.attempt === 1) resolve(r) // 第一次的结果就是调用方拿到的结果
+      if (q.attempt >= FLUSH_SCHEDULE_MS.length) {
+        q.scheduled = false
+        return
+      }
+      q.timer = setTimeout(step, FLUSH_SCHEDULE_MS[q.attempt])
+      if (typeof q.timer.unref === "function") q.timer.unref()
+    }
+    q.timer = setTimeout(step, FLUSH_SCHEDULE_MS[0])
     if (typeof q.timer.unref === "function") q.timer.unref()
   })
 }
@@ -158,10 +183,10 @@ function flush(q, timeoutMs = 15_000) {
     }
 
     if (!current || !Array.isArray(current.plugins)) {
-      // 缓存不可用就跳过（不阻塞插件加载）。下次启动还会再试。
+      // 缓存不可用就跳过（不阻塞插件加载）。条目留在队列里，后续时点还会再试
+      // （magpie 的官方拉取可能还没落盘，那时文件就是不可用的）。
       const names = [...q.entries.keys()].join(", ")
       log(`市场缓存不可用，跳过注册：${names}`)
-      q.entries.clear()
       return { ok: false, reason: "市场缓存不可用" }
     }
 
@@ -180,7 +205,9 @@ function flush(q, timeoutMs = 15_000) {
         added.push(pkg)
       }
     }
-    q.entries.clear()
+    // ⚠️ 不清队列：后续时点（FLUSH_SCHEDULE_MS）还要用同一批条目再合并一次
+    //    （magpie 的官方拉取会整体重写缓存，晚到的那次才是最终留在盘上的）。
+    //    重复合并且条目已存在时 JSON 不变 → snapshot === next → 根本不写盘。
 
     const next = JSON.stringify(current, null, 2)
     if (snapshot === next) {
@@ -208,7 +235,6 @@ function flush(q, timeoutMs = 15_000) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     log(`自注册失败：${msg}`)
-    q.entries.clear()
     return { ok: false, reason: msg }
   }
 }
@@ -226,6 +252,13 @@ export function startSelfRegister(entry, opts = {}) {
   registerSelf(entry, opts).catch(() => {})
 }
 
+/** 供测试：把共享队列整个复位（每个用例一个干净的宿主状态；不影响真实使用）*/
+export function _reset() {
+  const q = globalThis[QUEUE_KEY]
+  if (q?.timer) clearTimeout(q.timer)
+  delete globalThis[QUEUE_KEY]
+}
+
 /** 供测试：立刻清空队列（不影响真实使用）*/
 export function _flushNow() {
   const q = globalThis[QUEUE_KEY]
@@ -237,4 +270,4 @@ export function _flushNow() {
   return flush(q)
 }
 
-export const _internal = { cacheDirOf, OFFICIAL_REGISTRY, QUEUE_KEY, FLUSH_MS }
+export const _internal = { cacheDirOf, OFFICIAL_REGISTRY, QUEUE_KEY, FLUSH_MS, FLUSH_SCHEDULE_MS }
