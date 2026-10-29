@@ -1,0 +1,12 @@
+﻿autoclawintl：治「没有进行中的授权会话」真根因
+
+引导页跳授权页走 location.href，这必发 beforeunload -> sendBeacon('/abort')；
+旧实现在 /abort 里清 expectedState，于是几秒后上游 302 回来的合法回调
+必然撞上「本机当前没有进行中的授权会话」—— 用户每重登一次都失败，
+且文案把因果说反了（会话是被这次跳转自己清掉的）。
+
+- /open-auth 交出授权页后置 session.handedOff
+- handedOff 之后 /abort 只回 204，不动会话（关页面/旧标签都不作废）
+  未交出前 abort 仍保持取消语义
+- 引导页提示改为「跳走后本页可关，授权继续有效」
+- 回归用例：跳走后的 abort 不影响回调；未交出前的 abort 仍作废

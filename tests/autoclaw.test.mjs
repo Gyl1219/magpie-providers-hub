@@ -450,6 +450,65 @@ test('国际版登录：回调 state 校验（不符拒收）+ 符合才换 toke
   }
 })
 
+test('国际版登录：跳授权页时的 beforeunload /abort 不得作废会话（真机 2026-10-30 根因）', async () => {
+  // 引导页跳授权页走 `location.href = j.url`，这**必发** beforeunload →
+  // sendBeacon('/abort')。旧实现在这里清 expectedState，于是三秒后上游 302
+  // 回来的合法回调撞上「本机当前没有进行中的授权会话」—— 用户一次次重登都失败。
+  // 修复：/open-auth 交出授权页后置 handedOff，此后 abort 只回 204 不动会话。
+  const { stub, issued } = intlLoginStub()
+  const flow = await autoclawIntlChannel.beginLogin(undefined, { loginArg: 'zai' })
+  const port = new URL(flow.url).port
+  try {
+    await localFetch(new URL('/captcha', flow.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ receipt: 'aliyun-receipt-stub' }),
+    })
+    await localFetch(new URL('/open-auth', flow.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vendor: 'zai' }),
+    })
+    // 模拟浏览器跳走：beforeunload 的 sendBeacon
+    const aborted = await localFetch(new URL('/abort', flow.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: '页面关闭' }),
+    })
+    assert.equal(aborted.status, 204, 'abort 仍回 204（页面无需关心结果）')
+    // 关键断言：回调**仍然**被接受
+    const cb = await localFetch(`http://localhost:${port}/auth/callback-zai?code=after-abort&state=${encodeURIComponent(issued.state)}`)
+    assert.match(await cb.text(), /已收到/, '跳转授权页触发的 abort 绝不能废掉会话')
+    const credential = await Promise.race([
+      flow.result,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('result 未兑现')), 8000)),
+    ])
+    assert.equal(credential.refresh_token, 'rt-new')
+  } finally {
+    stub.restore()
+    await flow.close?.()
+  }
+})
+
+test('国际版登录：未交出授权页前 /abort 仍取消会话（关页面语义不丢）', async () => {
+  const { stub } = intlLoginStub()
+  const flow = await autoclawIntlChannel.beginLogin(undefined, { loginArg: 'zai' })
+  const port = new URL(flow.url).port
+  try {
+    await localFetch(new URL('/captcha', flow.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ receipt: 'aliyun-receipt-stub' }),
+    })
+    // 还没点「继续授权」就关页面 → 会话应作废
+    await localFetch(new URL('/abort', flow.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: '页面关闭' }),
+    })
+    const cb = await localFetch(`http://localhost:${port}/auth/callback-zai?code=c&state=whatever`)
+    assert.match(await cb.text(), /没有进行中的授权会话/, '未交出授权页时 abort 必须作废会话')
+  } finally {
+    stub.restore()
+    await flow.close?.()
+  }
+})
+
 test('国际版登录：换 token 走 <vendor>-oauth-login（zai/google 同构）', async () => {
   const { stub } = intlLoginStub()
   const flow = await autoclawIntlChannel.beginLogin(undefined, { loginArg: 'zai' })

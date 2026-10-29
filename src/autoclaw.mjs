@@ -1136,8 +1136,11 @@ async function startIntlFlow(product, openBrowser, vendor) {
   }
 
   for (const port of OAUTH_CALLBACK_PORTS) {
-    /** 当前待授权的会话（vendor + oauth-url 给的 state + 滑块回执；一页一次一个）。 */
-    const session = { vendor, expectedState: undefined, captchaReceipt: undefined }
+    /**
+     * 当前待授权的会话（vendor + oauth-url 给的 state + 滑块回执；一页一次一个）。
+     * `handedOff`：授权页已交出（此后引导页任何卸载/取消都不再作废本会话）。
+     */
+    const session = { vendor, expectedState: undefined, captchaReceipt: undefined, handedOff: false }
     const candidate = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
       const send = (status, type, body) => {
@@ -1181,9 +1184,20 @@ async function startIntlFlow(product, openBrowser, vendor) {
           send(200, 'application/json; charset=utf-8', JSON.stringify({ ok: session.captchaReceipt !== undefined }))
           return
         }
-        // 放弃登录（引导页关闭）——清理会话即可；服务器留给 result 的超时收
+        // 放弃登录（引导页关闭）——清理会话即可；服务器留给 result 的超时收。
+        // ⚠️ **handedOff 之后 /abort 一律不作数**（真机 2026-10-30 根因）：
+        //   引导页跳授权页走的是 `location.href = j.url`，这一步**必发**
+        //   beforeunload → sendBeacon('/abort')。若在这里清会话，三秒后上游
+        //   302 回来的合法回调就撞上 `expectedState === undefined`，用户看到的
+        //   是「本机当前没有进行中的授权会话（可能引导页已被重新发起或关闭）」
+        //   —— 因果正好反过来：会话是被**这次跳转自己**清掉的。
+        //   所以：一旦 /open-auth 成功交出授权页，关页面/旧标签的 abort 都只回 204，
+        //   会话交给 10 分钟定时器统一收口（社区原语义）。
         if (url.pathname === '/abort' && req.method === 'POST') {
-          session.vendor = undefined
+          if (session.handedOff) {
+            send(204, 'text/plain; charset=utf-8', '')
+            return
+          }
           session.expectedState = undefined
           session.captchaReceipt = undefined
           send(204, 'text/plain; charset=utf-8', '')
@@ -1225,6 +1239,7 @@ async function startIntlFlow(product, openBrowser, vendor) {
             return
           }
           session.expectedState = handedOutState
+          session.handedOff = true
           send(200, 'application/json; charset=utf-8', JSON.stringify({ url: authorizeUrl }))
           return
         }
@@ -1329,7 +1344,7 @@ button:disabled{background:#475569;cursor:not-allowed}
 </div>
 <button id="goBtn" disabled>继续授权</button>
 <div id="msg"></div>
-<p class="tip">关闭本页即取消登录。完成授权后浏览器会回到 localhost 回调端口。</p>
+<p class="tip">点「继续授权」跳到 ${vendorName} 授权页后，本页可以关掉 —— 授权继续有效，完成后浏览器会回到 localhost 回调端口。</p>
 </div>
 <script>
 const HIDDEN_TRIGGER_ID = "__acHiddenTrigger";
