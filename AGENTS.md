@@ -161,6 +161,12 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 - 凭据双写：magpie 账号槽（`client.auth.set`）+ 旁路 sidecar（`saveCredential`）
 - OfficeAce 的 refresh_token 一次性（STS5.1806）：STS 成功**立即落盘** +
   并发去重闸（refreshInFlight）—— 已消费的救不回，只能重登
+- **凭据落盘的两条命门**（真机 2026-10-29：OfficeAce 新 refresh_token 从未落盘 →
+  下次续期 STS5.1806，卡片只会报 401 APIG.0301）：
+  ① `saveCredential` **拒绝下调**：盘上凭据到期更晚就不覆盖（旧凭据回写不能吞掉
+     轮转出来的新 token）；写失败**必须 console.warn 并返回 false**（不许静默）。
+  ② `writeSidecar` **写盘成功才记 identity**：否则这一次的新 refresh_token
+     再没有第二次落盘机会。
 - 提交信息用 `-F <file>`（PowerShell 内联多行会乱）；临时草稿文件进 .gitignore
 
 ## 7. 形态：一个插件，十个供应商（v0.4.0）

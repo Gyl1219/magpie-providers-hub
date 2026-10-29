@@ -363,11 +363,15 @@ async function doRefresh(current, persist) {
   if (!r.ok) {
     const detail = await r.text().catch(() => '')
     // ⚠️ 必须留痕：refresh_token 一次性，丢了只能重新登录。
+    // ⚠️「已被消费」要单独成句：它的含义是**新 token 没落盘**，不是网络抖动，
+    //    重试一万次也是同一个错（真机 2026-10-29：STS5.1806 → 只能重新登录）。
+    const consumed = /STS5\.1806|has been used/i.test(detail)
     console.warn(
-      `[officeace] STS 续期失败 HTTP ${r.status}：${detail.slice(0, 200)}`
-      + '（refresh_token 是一次性的：若报 STS5.1806 已被消费，必须重新登录）',
+      `[officeace] STS 续期失败 HTTP ${r.status}${consumed ? '（refresh_token 已被消费 —— 新 token 未落盘，必须重新登录）' : ''}：${detail.slice(0, 200)}`,
     )
-    throw new Error('OfficeAce 续期失败，请重新登录')
+    throw new Error(consumed
+      ? 'OfficeAce 续期失败：refresh_token 已被消费（一次性），新凭据未落盘 —— 请重新登录'
+      : 'OfficeAce 续期失败，请重新登录')
   }
   const token = await r.json()
   const c = token.credentials

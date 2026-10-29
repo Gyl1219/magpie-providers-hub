@@ -84,18 +84,57 @@ export function loadCredential(name) {
   }
 }
 
+/** 凭据到期时刻（毫秒）；解析不出来 → undefined（不参与比较，宁可写也不要漏写）。 */
+function expiryOf(credential) {
+  const raw = credential?.expiresAt ?? credential?.expires ?? credential?.expires_at ?? credential?.expireMs
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw > 1e12 ? raw : raw * 1000
+  if (typeof raw === 'string') {
+    const t = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw)
+    if (Number.isFinite(t) && t > 0) return t > 1e12 ? t : t * 1000
+  }
+  return undefined
+}
+
+/**
+ * 是否「下调写入」：盘上已有的凭据比这次要写的**更晚到期**。
+ *
+ * ⚠️ 轮转型渠道（OfficeAce STS）的致命形态：续期成功后盘上是新 refresh_token(R2)，
+ *    另一条调用路径仍拿着旧凭据(R1)回写一份 —— 把 R2 覆盖成 R1，下次续期拿已消费的
+ *    R1 去换 → `STS5.1806 the refresh token has been used` → 凭据**永久**作废，
+ *    只能重新登录（真机 2026-10-29）。
+ */
+function isStaleWrite(target, credential) {
+  if (!existsSync(target)) return false
+  try {
+    const prev = JSON.parse(readFileSync(target, 'utf8'))
+    const kept = expiryOf(prev)
+    const incoming = expiryOf(credential)
+    return kept !== undefined && incoming !== undefined && incoming < kept
+  } catch {
+    return false
+  }
+}
+
 export function saveCredential(name, credential) {
   try {
     mkdirSync(storeDir(), { recursive: true })
     const target = credentialPath(name)
+    if (isStaleWrite(target, credential)) {
+      console.warn(`[credential] 拒绝下调写入 ${name}（盘上凭据到期更晚，本次为旧凭据）`)
+      return false
+    }
     // ⚠️ **原子写**（临时文件 + 改名）：magpie 重启/登录并发时，宿主可能正在
     //    读这份文件 —— 非原子的截断写入会让读侧 JSON.parse 失败 → 凭据被当成
     //    「未登录」（真机瞬态：重启后快照整帧「部分未登录」）。
     const tmp = `${target}.tmp`
     writeFileSync(tmp, JSON.stringify(credential, null, 2), 'utf8')
     renameSync(tmp, target)
-  } catch {
-    // 存不下不致命：本次会话仍可用，重启后重新登录。
+    return true
+  } catch (error) {
+    // ⚠️ 绝不能静默：轮转型渠道「续期成功但没落盘」= 新 refresh_token 永久丢失，
+    //    上次消费掉的旧 token 下次必报 STS5.1806。静默 = 用户只能靠猜。
+    console.warn(`[credential] 凭据落盘失败 ${name}：${error instanceof Error ? error.message : String(error)}`)
+    return false
   }
 }
 

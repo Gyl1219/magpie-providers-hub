@@ -150,8 +150,13 @@ function writeSidecar(channel, credential) {
   const identity = identityOf(credential)
   sidecar.set(channel.id, credential)
   if (sidecarIdentity.get(channel.id) === identity) return
-  sidecarIdentity.set(channel.id, identity)
-  saveCredential(channel.id, credentialOfAuth(credential))
+  // ⚠️ **写盘成功才记身份**：旧实现无条件记，于是「STS 续期成功、落盘却失败」
+  //    这一次的新 refresh_token 再也**没有第二次机会**落盘（下次 identity 相同
+  //    直接 return），盘上永远是已消费的旧 token → STS5.1806 永久作废
+  //    （真机 2026-10-29：OfficeAce 只能重新登录）。写失败要留着下次重试。
+  if (saveCredential(channel.id, credentialOfAuth(credential))) {
+    sidecarIdentity.set(channel.id, identity)
+  }
 }
 
 // ── 续期：去重闸 + 双写落盘 ──────────────────────────────────────────────
@@ -622,6 +627,8 @@ export const _internal = {
     writeSnapshot()
   },
   resetMigrations: () => migrationsStarted.clear(),
+  /** 测试用：直接驱动旁路落盘（对象导出，不会被 magpie 当成供应商）。 */
+  writeSidecar: (channel, credential) => writeSidecar(channel, credential),
   /** 测试里前面用过 notify:false（会关掉快照写入），这里显式打开。 */
   enableSnapshotWrites: () => { snapshotWritesDisabled = false },
 }
