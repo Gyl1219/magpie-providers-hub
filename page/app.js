@@ -84,14 +84,21 @@ function renderSnapshot() {
     show("summary", "暂无快照 —— 打开一次用量页 / 发起一次请求后，宿主会写出快照。");
     return;
   }
+  // 未登录的排前面：magpie 供应商页会把未登录的折叠掉（用户报障：
+  // 「我这怎么只有这几个」），侧栏是唯一一定列全十条的地方，得先让人看见
+  // 需要动手的那几条。
+  const rows = s.channels.slice().sort((a, b) => Number(Boolean(a.signedIn)) - Number(Boolean(b.signedIn)));
+  const notSignedIn = rows.filter((ch) => !ch.signedIn).length;
   show("summary", (s.provider || "Providers Hub") + " · " + s.channels.length + " 个渠道"
+    + " · 已登录 " + (s.channels.length - notSignedIn)
+    + (notSignedIn > 0 ? " · 未登录 " + notSignedIn : "")
     + (s.models ? " · 共 " + s.models + " 个模型" : ""));
 
   const body = document.getElementById("channelsBody");
   const table = document.getElementById("channelsTable");
   if (!body || !table) return;
   body.innerHTML = "";
-  for (const ch of s.channels) {
+  for (const ch of rows) {
     const tr = el("tr");
     const nameTd = el("td", ch.displayName || ch.id);
     // 所属 magpie 供应商 id（一个渠道一个供应商：关掉它 = 关掉这个渠道）
@@ -118,9 +125,11 @@ function renderSnapshot() {
 
     // 操作列：⚠️ 页面沙盒无法触发登录（magpie 的 read 只服务 usage:summary /
     // providers:list 两个内建项，自造名被服务端拒绝）—— 登录入口是供应商
-    // 编辑器里的方式按钮（magpie 原生渲染 auth.methods）。这里如实提示。
+    // 编辑器里的方式按钮（magpie 原生渲染 auth.methods），或者下面这条命令。
+    // 命令写成可选中的文本（页面拿不到 clipboard 权限，不做假复制按钮）。
     const actTd = el("td");
-    actTd.appendChild(el("span", ch.signedIn ? "—" : "去「供应商」页登录", "muted"));
+    actTd.appendChild(el("span", ch.signedIn ? "供应商页 · 重新登录：" : "供应商页 · 登录：", "muted"));
+    actTd.appendChild(el("code", "magpie plugin login " + (ch.provider || ch.id)));
     tr.appendChild(actTd);
 
     body.appendChild(tr);

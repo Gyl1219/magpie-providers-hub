@@ -73,6 +73,16 @@ test('app.js 不联网（沙盒没有 fetch）', () => {
   assert.doesNotMatch(app, /XMLHttpRequest/, '页面沙盒不能用 XHR')
 })
 
+test('侧栏页列全十条：未登录排前面 + 给出登录命令（供应商页会折叠未登录项）', () => {
+  // 真机报障：magpie 供应商页只显示已登录的，用户以为插件只注册了 5 个渠道。
+  // 侧栏页是唯一一定列全的地方 —— 未登录的必须排前面，并给出可直接执行的命令。
+  const app = read('page/app.js')
+  assert.match(app, /sort\(/, '渠道必须排序（未登录的顶上去）')
+  assert.match(app, /Number\(Boolean\(a\.signedIn\)\)/, '排序键是 signedIn')
+  assert.match(app, /magpie plugin login /, '操作列要给出登录命令')
+  assert.match(app, /ch\.provider/, '命令里用 provider id（快照字段），不硬编码')
+})
+
 test('页面引用的 DOM id 都在 index.html 里存在', () => {
   const html = read('page/index.html')
   const app = read('page/app.js')

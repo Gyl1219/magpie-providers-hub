@@ -38,9 +38,12 @@
     登录 / 增删账号在「供应商」页 —— 本插件注册了<b>十个供应商</b>（渠道名后面那串
     <code>hub-…</code> 就是它的 id），每个供应商卡片里一个登录按钮，关掉某个供应商
     就等于关掉对应渠道。</p>
+  <p class="hint">⚠️ magpie 的供应商页会把<b>未登录</b>的折叠掉（所以那儿常常只看到几条）。
+    本页一定列全十个：未登录的排在最上面，操作列给出对应命令
+    （<code>magpie plugin login hub-…</code>）；在「供应商」页把筛选清掉也能看到它们。</p>
   <p class="hint" id="summary">读取中…</p>
   <table id="channelsTable" hidden>
-    <thead><tr><th>渠道</th><th>登录</th><th>模型</th><th>额度（到期分档）</th><th>签到</th><th>操作</th></tr></thead>
+    <thead><tr><th>渠道</th><th>登录</th><th>模型</th><th>额度（到期分档）</th><th>签到</th><th>怎么登录</th></tr></thead>
     <tbody id="channelsBody"></tbody>
   </table>
 
