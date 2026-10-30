@@ -263,6 +263,17 @@ const SNAPSHOT_PATH = process.env.DSH_HUB_SNAPSHOT_PATH
   ?? fileURLToPath(new URL('../page/snapshot.js', import.meta.url))
 
 /**
+ * 本进程的身份标记。
+ *
+ * ⚠️⚠️ 为什么需要它（PR #502 审核 2026-10-30，真机事故）：快照文件是**磁盘上的一份**
+ *    共享状态，`buildSnapshot()` 原本会「本次没查到桶 → 沿用上一份快照的桶」。
+ *    于是打包时若把本地生成的 snapshot.js 带进 npm 包，
+ *    新用户装上后、还没登录时，就会把**打包者机器上的余额与签到结果**当成自己的看到。
+ *    ⇒ 快照里写 runId，读回来只在 runId 相同（= 同一进程写的）时才沿用。
+ */
+const RUN_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+
+/**
  * 快照写入开关 —— 由工厂按 options.notify 设置（模块层变量：writeSnapshot
  * 在模块层，引用工厂内的 const 会 ReferenceError 且被静默吞掉 ——
  * 真机 2026-10-27：快照从此一次都没写过，「等半天没刷新」的根因）。
@@ -359,7 +370,13 @@ function sanitizeWindows(windows) {
  *    修法：本次没有桶的渠道，**沿用上一份快照里的桶**（快照本身也当缓存用）。
  */
 function buildSnapshot() {
-  const previous = readPreviousSnapshot()
+  // ⚠️⚠️ 只沿用**本进程**写过的快照（PR #502 审核 2026-10-30）：
+  //    旧实现无条件读磁盘上那份 —— 于是「装了这个包的新用户」在还没登录时，
+  //    buildSnapshot 会把**别人（打包者）机器上的余额与签到结果**当成自己的显示出来。
+  //    runId 是进程启动时生成的随机串：同进程内沿用（models() 触发时桶为空不至于
+  //    把整列刷成「—」），跨进程/跨安装一律不沿用（读到旧 runId 就丢弃）。
+  const previousRaw = readPreviousSnapshot()
+  const previous = previousRaw?.runId === RUN_ID ? previousRaw : undefined
   // 每渠道的 magpie 账号槽数：一个渠道一个供应商，槽的 key 形如 `hub-<渠道>` /
   // `hub-<渠道>#<slot>`。accountId 相同 = 原地更新（magpie 原生语义）；
   // 不同 accountId 并存 = 真多账号。
@@ -403,6 +420,8 @@ function buildSnapshot() {
   })
   return {
     at: Date.now(),
+    // 本进程的身份标记：跨进程读回来时据此判断「这份快照是不是我写的」
+    runId: RUN_ID,
     provider: 'Providers Hub',
     models: snapshotCache.modelCount,
     channels,

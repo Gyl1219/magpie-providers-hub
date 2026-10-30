@@ -13,6 +13,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerSelf, _flushNow, _reset, _internal } from '../tools/self-register.mjs'
 
+/**
+ * ⚠️ 必须收尾（PR #502 审核在 mote 上看到 5 个 cancelled：
+ *    "Promise resolution is still pending but the event loop has already resolved"）。
+ *    原因：`registerSelf` 的补写时点最长到 240s（`FLUSH_SCHEDULE_MS`），
+ *    用例跑完时进程中还挂着后续 timer/promise。
+ *    ⇒ 每个用例开始前 `_reset()`（已有），**整体结束后再 `_reset()` 清干净**。
+ */
+test.after(() => { _reset() })
+
 /** 造一个「假的 magpie 家目录」：configDir → <tmp>/config/magpie，缓存落到 <tmp>/.cache/magpie */
 function fakeHome(plugins) {
   const root = mkdtempSync(join(tmpdir(), 'selfreg-'))
@@ -27,7 +36,8 @@ function fakeHome(plugins) {
 const ENTRY = {
   package: 'magpie-providers-hub',
   name: 'Providers Hub',
-  providers: ['hub-officeace', 'hub-autoclawintl'],
+  // v0.5.0：只注册保留的五条（重叠渠道已从包里删除）
+  providers: ['hub-astudio', 'hub-accio', 'hub-lobsterai', 'hub-magicrew', 'hub-magicrew-intl'],
   community: true,
   summary: { en: 'en', zh: 'zh' },
 }
@@ -42,7 +52,7 @@ test('自注册：条目进缓存，官方条目不动', async () => {
   assert.equal(j.plugins.length, 2, '官方条目保留 + 新增我们一条')
   assert.equal(j.plugins[0].package, 'officeace-auth')
   assert.equal(j.plugins[1].package, 'magpie-providers-hub')
-  assert.deepEqual(j.plugins[1].providers, ['hub-officeace', 'hub-autoclawintl'])
+  assert.deepEqual(j.plugins[1].providers, ['hub-astudio', 'hub-accio', 'hub-lobsterai', 'hub-magicrew', 'hub-magicrew-intl'])
 })
 
 test('自注册：magpie 官方拉取整体重写后，后续时点把条目补回来（黄标的根因）', async () => {

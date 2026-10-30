@@ -50,7 +50,21 @@ test('package.json 声明了侧边栏页面，文件存在', () => {
   assert.ok(pkg.magpie.page.title)
   // 声明指向的文件真实存在
   assert.ok(read('page/index.html').length > 0)
-  assert.ok(pkg.files.includes('page'), 'files 必须包含 page，否则发布不带页面')
+  // ⚠️ PR #502 审核：**不能**用 `files: ["page"]` 整个目录收 —— 那样会把运行时
+  //    生成的 `page/snapshot.js`（含本机余额/签到/AK ID）打进 npm 包。
+  //    现在逐文件列出，且 snapshot.js 必须是**空模板**。
+  for (const f of ['page/index.html', 'page/app.js', 'page/snapshot.js']) {
+    assert.ok(pkg.files.includes(f), `files 必须逐个列出 ${f}（不能用整个 page 目录）`)
+  }
+  assert.equal(pkg.files.includes('page'), false, 'files 不能用整个 page 目录（会带上本地快照）')
+  // 快照模板必须是空的：任何真实数据都不许进仓库/进包
+  const tpl = read('page/snapshot.js')
+  const m = tpl.match(/^window\.__PROVIDERS_HUB_SNAPSHOT__\s*=\s*(\{[\s\S]*\});?\s*$/)
+  assert.ok(m, 'snapshot.js 必须是 window.__PROVIDERS_HUB_SNAPSHOT__ = {...}; 形式')
+  const snap = JSON.parse(m[1])
+  assert.equal(snap.at, 0, 'snapshot.js 必须是空模板（at: 0）')
+  assert.deepEqual(snap.channels, [], 'snapshot.js 不许带任何渠道数据')
+  assert.equal(snap.runId ?? null, null, 'snapshot.js 不许带 runId')
 })
 
 test('index.html 引用 bridge/snapshot/app 三个脚本', () => {
