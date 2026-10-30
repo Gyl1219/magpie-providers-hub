@@ -170,7 +170,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </div>
 
 <div class="pane active" id="pane-sms">
-  <label>手机号</label><input id="mobile" placeholder="13800138000" autocomplete="tel" maxlength="11">
+  <label>手机号</label><input id="mobile" placeholder="请输入手机号" autocomplete="tel" maxlength="11">
   <label>人机验证</label>
   <div class="captcha-box" id="smsCaptchaBox"><button class="secondary" id="smsCaptchaBtn" type="button">完成安全验证</button></div>
   <label>验证码</label>

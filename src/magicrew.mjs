@@ -29,7 +29,7 @@ const UA =
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { assignExpiryBands } from './shared.mjs'
+import { assignExpiryBands, debugLog } from './shared.mjs'
 
 const REQUEST_TIMEOUT_MS = 30_000
 /** api_key 只活 2 小时，提前 10 分钟续。 */
@@ -135,6 +135,63 @@ async function login({ site, phone, password, stateCode = '+86', organizationCod
     token,
     organizationCode: d?.organization_code || d?.organizationCode || organizationCode || '',
     nickname: d?.name || d?.nickname || d?.phone || phone || undefined,
+  }
+}
+
+// ── 账号资料（昵称自愈）──────────────────────────────────────────────
+//
+// 上游 iJetLi/dsh-providers-hub 2026-10-30 的 6fa7472 报障：昵称**只在登录那一刻**
+// 取一次 ⇒ 登录响应里没带 name/phone 的账号，卡片就一直显示产品名（国际站尤其常见，
+// 它不返回手机号）。修法是登录后补查一次资料。
+//
+// ⚠️ 端点必须是 `/api/v1/contact/accounts/me/users` ——
+//    不带 `/users` 的那条实测 404（上游注释明确记过）。
+const PROFILE_PATH = '/api/v1/contact/accounts/me/users'
+/** 登录路径上的小超时：拿不到昵称就安静回落，不能让登录卡住。 */
+const PROFILE_TIMEOUT_MS = 6_000
+
+/**
+ * 读本账号资料。**拿不到 ⇒ 抛**（不静默假装「没有昵称」）。
+ * 失败语义刻意是抛，让调用方（`resolveNickname`）能区分「上游说没有昵称」与
+ * 「我们根本没读到」—— 后者要留痕，前者只该安静回落。
+ */
+export async function fetchProfile(site, { token, organizationCode, signal } = {}) {
+  const body = await jsonRequest(`${site.host}${PROFILE_PATH}`, {
+    headers: headersFor(site, token, organizationCode),
+    signal: signal ?? AbortSignal.timeout(PROFILE_TIMEOUT_MS),
+  })
+  const d = body?.data ?? {}
+  const raw = d.items
+  const rows = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw] : [d])
+  const item = rows.find((x) => x && typeof x === 'object' && !Array.isArray(x))
+  if (item === undefined) throw new MagicrewError('账号资料为空（上游没有返回任何条目）')
+  const str = (key) => (typeof item[key] === 'string' && item[key].length > 0 ? item[key] : undefined)
+  const nickname = str('nickname') ?? str('real_name')
+  const realName = str('real_name') ?? ''
+  const phone = str('phone') ?? ''
+  if (nickname === undefined && realName.length === 0 && phone.length === 0) {
+    throw new MagicrewError('账号资料里没有任何可用字段（nickname/real_name/phone）')
+  }
+  return { nickname: nickname ?? '', realName, phone }
+}
+
+/**
+ * 取展示昵称：凭据里已有就直接用（零请求）；没有才补查一次资料。
+ * 查不到 ⇒ 返回 undefined（保持「无昵称」，由上层回落到渠道显示名），**不抛**。
+ */
+export async function resolveNickname(site, credential, signal) {
+  const existing = typeof credential?.nickname === 'string' ? credential.nickname.trim() : ''
+  if (existing.length > 0) return existing
+  try {
+    const profile = await fetchProfile(site, {
+      token: credential?.token,
+      organizationCode: credential?.organizationCode,
+      signal,
+    })
+    return profile.nickname.length > 0 ? profile.nickname : undefined
+  } catch (error) {
+    debugLog(`magicrew ${site.id}: 昵称自愈失败（保持无昵称）：${error?.message ?? String(error)}`)
+    return undefined
   }
 }
 
@@ -550,7 +607,7 @@ $('go-jwt').addEventListener('click', async () => {
           settle(true, {
             token: loginResult.token,
             organizationCode: loginResult.organizationCode,
-            nickname: loginResult.nickname,
+            nickname: await resolveNickname(site, loginResult),
             apiKey: gw.apiKey,
             refreshToken: gw.refreshToken,
             apiKeyExpiresAt: gw.apiKeyExpiresAt,
@@ -569,7 +626,7 @@ $('go-jwt').addEventListener('click', async () => {
           settle(true, {
             token,
             organizationCode,
-            nickname: undefined,
+            nickname: await resolveNickname(site, { token, organizationCode }),
             apiKey: gw.apiKey,
             refreshToken: gw.refreshToken,
             apiKeyExpiresAt: gw.apiKeyExpiresAt,
@@ -595,7 +652,7 @@ $('go-jwt').addEventListener('click', async () => {
             settle(true, {
               token: jwt,
               organizationCode: org,
-              nickname: name || undefined,
+              nickname: await resolveNickname(site, { nickname: name, token: jwt, organizationCode: org }),
               apiKey: gw.apiKey,
               refreshToken: gw.refreshToken,
               apiKeyExpiresAt: gw.apiKeyExpiresAt,
