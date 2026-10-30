@@ -960,6 +960,12 @@ export const astudioChannel = {
         used: usedPercent,
         // ⚠️ 刻意不挂 runsOutAt：亮色层已带时间（band 名「临期·N天」+ display
         // 绝对日期），再挂会多一行浅灰重复（与 autoclaw 同款去重 —— 用户报障）
+        //
+        // ⚠️ 但 **resetsAt 要挂**（2026-10-31）：magpie 的「剩余额度走势」靠它画
+        // 投影虚线、横轴伸到窗口结束点；不挂就只有空坐标轴（用户报障
+        // 「这卡片不对，没有虚线功能」）。resetsAt = 窗口边界，runsOutAt =
+        // 「按速度什么时候用完」，只挂前者不会多出重复行。
+        ...(Number.isFinite(bucket.expireMs) ? { resetsAt: new Date(bucket.expireMs).toISOString() } : {}),
         // 剩 0 的桶收进折叠区（aside）：主环位留给有值的桶
         ...(bucket.remaining <= 0 ? { aside: true } : {}),
         display: `剩余 ${bucket.remaining}${expiryShort !== undefined ? ` · ${expiryShort} 到期` : ''}`,

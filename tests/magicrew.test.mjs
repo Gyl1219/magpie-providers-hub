@@ -102,9 +102,14 @@ test('usage：滚动指针分档（临期=最早到期未耗尽桶，名字带�
       assert.ok(pointer, '应有临期桶（滚动指针）')
       assert.match(pointer.name, /每日赠送/)
       assert.match(pointer.display, /剩余 200/)
+      // resetsAt = 窗口边界：magpie 的「剩余额度走势」靠它画投影虚线
+      //（真机 2026-10-31：不带它卡片只有空坐标轴）
+      assert.ok(pointer.resetsAt, '临期桶必须带 resetsAt（画走势虚线用）')
+      assert.ok(Number.isFinite(Date.parse(pointer.resetsAt)), 'resetsAt 必须是可解析的 ISO 时刻')
       const longterm = windows.find((w) => /长期/.test(w.name))
       assert.ok(longterm, '另一个到期桶应为长期')
       assert.match(longterm.display, /剩余 1000/)
+      assert.ok(longterm.resetsAt, '长期桶也要带 resetsAt')
     },
   )
 })

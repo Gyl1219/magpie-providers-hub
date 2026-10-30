@@ -1,0 +1,15 @@
+﻿修「剩余额度走势」没有投影虚线：窗口补 resetsAt
+
+真机 2026-10-31（超级麦吉卡片）：走势图只有空坐标轴、没有虚线；同屏的
+OfficeAce 卡片有虚线。对照 officeace-auth@0.1.24 源码：它每条窗口都带
+esetsAt: new Date(expiresAt).toISOString() —— 那是 magpie 画投影虚线、
+把横轴伸到窗口结束点的唯一依据。
+
+- shared.expiryBandedWindows：有 expireMs 的桶挂 resetsAt（ISO）；永久桶不挂
+- magicrew：临期指针 + 合并后的长期窗口都挂（长期取最早到期那批）
+- astudio：自拼窗口补 resetsAt（注释早就写了要挂，代码里其实没挂）
+- lobsterai：runsOutAt 旁边补 resetsAt（各喂各的渲染）
+- 回归：expiry-bands / magicrew 用例断言 resetsAt 存在且可解析
+
+⚠️ 仍不挂 runsOutAt（会多一行浅灰重复，用户报障过）—— 两者语义不同：
+resetsAt 是窗口边界，runsOutAt 是「按速度什么时候用完」。

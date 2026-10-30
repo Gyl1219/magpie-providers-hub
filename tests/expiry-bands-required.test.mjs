@@ -73,6 +73,21 @@ test('expiryBandedWindows：不挂 runsOutAt（避免重复一行）', () => {
   for (const w of windows) assert.equal(w.runsOutAt, undefined, '不应挂 runsOutAt')
 })
 
+test('expiryBandedWindows：有到期的桶必须挂 resetsAt（magpie 画走势虚线的唯一依据）', () => {
+  const now = Date.parse('2026-10-31T00:00:00.000Z')
+  const windows = expiryBandedWindows([
+    { label: '每日赠送', remaining: 200, expireMs: now + DAY, expireRaw: '2026-11-01 23:59:59' },
+    { label: '积分余额', remaining: 981, expireMs: undefined, expireRaw: '' },
+  ], now)
+  const expiring = windows.find((w) => /每日赠送/.test(w.name))
+  assert.ok(expiring, '应有每日赠送窗口')
+  assert.equal(expiring.resetsAt, new Date(now + DAY).toISOString(),
+    'resetsAt 必须是该桶的到期时刻（ISO），magpie 靠它把横轴伸到窗口结束点并画投影虚线')
+  const permanent = windows.find((w) => /永久/.test(w.name))
+  assert.ok(permanent, '应有永久窗口')
+  assert.equal(permanent.resetsAt, undefined, '永久桶没有窗口边界，不该挂 resetsAt')
+})
+
 test('门禁：渠道源码里带到期窗口的必须走 banding 工具（不手拼档位）', () => {
   const srcDir = join(import.meta.dirname, '..', 'src')
   // 存量豁免：这些渠道在本约定生效前就手拼了到期窗口，改造需单独回归验证，

@@ -229,6 +229,15 @@ export function expiryBandedWindows(buckets, now = Date.now()) {
       used,
       // ⚠️ 刻意不挂 runsOutAt：档位名（临期·N天）+ display 绝对日期已够，
       //   多挂会多一行浅灰重复（AStudio/officeace 同款去重，用户报障过）。
+      //
+      // ⚠️⚠️ 但 **resetsAt 必须挂**（2026-10-31 真机）：它是「窗口什么时候结束」，
+      //   magpie 的「剩余额度走势」靠它画**投影虚线**并把横轴伸到重置点。
+      //   不带它的卡片只有一根空坐标轴（用户报障：「这卡片不对，没有虚线功能」），
+      //   而 community 的 officeace-auth 每条窗口都带
+      //   `resetsAt: new Date(expiresAt).toISOString()` —— 对照实证。
+      //   与 runsOutAt 的区别：resetsAt 是窗口边界（画图用），runsOutAt 是
+      //   「按当前速度什么时候用完」（会与档位名重复一行），只挂前者。
+      ...(Number.isFinite(bucket.expireMs) ? { resetsAt: new Date(bucket.expireMs).toISOString() } : {}),
       ...(Number.isFinite(bucket.remaining) && bucket.remaining <= 0 ? { aside: true } : {}),
       display: `剩余 ${bucket.remaining}${expiryShort !== undefined ? ` · ${expiryShort} 到期` : ''}`,
     })

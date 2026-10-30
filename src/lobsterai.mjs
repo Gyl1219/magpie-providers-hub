@@ -499,7 +499,9 @@ async function usage(credential) {
       // amount 供聚合层指针汇总求和（>3 桶自动折叠成 临期/长期/永久）
       amount: remaining,
       display: until !== undefined ? `剩 ${remaining} · ${until}` : `剩 ${remaining}`,
-      ...(Number.isFinite(expMs) ? { runsOutAt: new Date(expMs).toISOString() } : {}),
+      // resetsAt = 窗口边界（magpie 靠它画「剩余额度走势」的投影虚线）；
+      // runsOutAt 是「按速度什么时候用完」的作废语义，两者都给，各喂各的渲染。
+      ...(Number.isFinite(expMs) ? { runsOutAt: new Date(expMs).toISOString(), resetsAt: new Date(expMs).toISOString() } : {}),
     })
   }
   if (windows.length === 0) {

@@ -812,6 +812,9 @@ $('go-jwt').addEventListener('click', async () => {
         windows.push({
           name: `${pointer.label} · ${pointer.band}`,
           used: 0,
+          // resetsAt = 窗口边界：magpie 靠它画「剩余额度走势」的**投影虚线**
+          //（不带就只有空坐标轴 —— 真机 2026-10-31 用户报障「没有虚线功能」）。
+          ...(Number.isFinite(pointer.expireMs) ? { resetsAt: new Date(pointer.expireMs).toISOString() } : {}),
           display: `剩余 ${pointer.remaining}${expiryShort !== undefined ? ` · ${expiryShort} 到期` : ''}`,
         })
       }
@@ -823,7 +826,13 @@ $('go-jwt').addEventListener('click', async () => {
         const tail = longs.length > 1
           ? ` · 共 ${longs.length} 批 · 最早 ${fmtDate(earliestMs)} 到期`
           : ` · ${fmtDate(earliestMs)} 到期`
-        windows.push({ name: '积分包 · 长期', used: 0, display: `剩余 ${sum}${tail}` })
+        windows.push({
+          name: '积分包 · 长期',
+          used: 0,
+          // 合并窗口的边界 = 最早到期那批（先失效的那笔决定窗口结束）
+          ...(Number.isFinite(earliestMs) ? { resetsAt: new Date(earliestMs).toISOString() } : {}),
+          display: `剩余 ${sum}${tail}`,
+        })
       }
       // ③ 永久余额单独
       for (const b of buckets.filter((x) => x.band === '永久')) {
