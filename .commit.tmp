@@ -1,15 +1,13 @@
-﻿修「剩余额度走势」没有投影虚线：窗口补 resetsAt
+﻿修「0 models」：models() 认 magpie 传进来的 auth
 
-真机 2026-10-31（超级麦吉卡片）：走势图只有空坐标轴、没有虚线；同屏的
-OfficeAce 卡片有虚线。对照 officeace-auth@0.1.24 源码：它每条窗口都带
-esetsAt: new Date(expiresAt).toISOString() —— 那是 magpie 画投影虚线、
-把横轴伸到窗口结束点的唯一依据。
+真机 2026-10-31：magicrew 两条渠道都显示 0 models（之前是 27/49）。
+根因：v0.5.0 去掉旁路凭据文件后凭据只在 memoryCredentials，**冷启动那一刻为空**
+⇒ signedIn() 为假 ⇒ 连远端目录都不拉 ⇒ 退回兜底表；magicrew 的兜底表是空的。
 
-- shared.expiryBandedWindows：有 expireMs 的桶挂 resetsAt（ISO）；永久桶不挂
-- magicrew：临期指针 + 合并后的长期窗口都挂（长期取最早到期那批）
-- astudio：自拼窗口补 resetsAt（注释早就写了要挂，代码里其实没挂）
-- lobsterai：runsOutAt 旁边补 resetsAt（各喂各的渲染）
-- 回归：expiry-bands / magicrew 用例断言 resetsAt 存在且可解析
+- discoverModels(channel, fallback, auth)：优先用调用方给的 auth
+  （authOfChannel 命中则 ensureAuth，顺带写进内存缓存）
+- provider.models(provider, ctx)：取 ctx.auth ?? ctx.getAuth
+  （社区插件 sync models(provider, { auth }) 同款签名）
+- 回归：aggregate.test 断言 ctx.auth 在位时确实拉远端目录
 
-⚠️ 仍不挂 runsOutAt（会多一行浅灰重复，用户报障过）—— 两者语义不同：
-resetsAt 是窗口边界，runsOutAt 是「按速度什么时候用完」。
+另：0.5.3 已补 resetsAt（走势图投影虚线的依据），本版一并发布。

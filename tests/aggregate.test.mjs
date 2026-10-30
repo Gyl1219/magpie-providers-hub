@@ -72,6 +72,32 @@ test('未登录也不返回空目录（回落兜底，选择器不会空掉）',
   assert.ok(Object.keys(models).length > 0, '未登录时目录不应为空')
 })
 
+test('models() 用 magpie 传进来的 auth 拉远端目录（冷启动内存为空也不掉成兜底）', async () => {
+  // 真机 2026-10-31：v0.5.0 去掉旁路凭据文件后，凭据只在内存，冷启动那一刻为空
+  // ⇒ 不认 magpie 的第二参 auth 就永远拉不到远端目录（magicrew 卡片显示「0 models」，
+  //   而它的兜底表是空的）。magpie 调 models() 时会把当前账号的 auth 传进来。
+  const { astudioChannel } = await import('../src/astudio.mjs')
+  const seen = []
+  const originalCatalog = astudioChannel.catalog
+  const originalExpired = astudioChannel.expired
+  astudioChannel.catalog = async (credential) => {
+    seen.push(credential)
+    return { 'remote-only-model': { name: 'R', limit: { context: 1000, output: 100 }, tool_call: true } }
+  }
+  astudioChannel.expired = () => false
+  try {
+    const { plugin, provider } = await build()
+    const models = await plugin.provider.models(provider, {
+      auth: { type: 'success', channel: 'astudio', access_token: 'tok' },
+    })
+    assert.equal(seen.length, 1, 'ctx.auth 在位时必须去拉远端目录')
+    assert.ok(Object.keys(models).includes('remote-only-model'), '目录应来自远端（不是兜底表）')
+  } finally {
+    astudioChannel.catalog = originalCatalog
+    astudioChannel.expired = originalExpired
+  }
+})
+
 test('别的供应商的模型打到本供应商 → 404（不静默转发到本渠道）', async () => {
   const { plugin } = await build()
   const { fetch: pluginFetch } = await plugin.auth.loader()

@@ -229,12 +229,25 @@ const signedIn = (channel) => Boolean(cachedCredentialOf(channel))
  * 一个供应商只有一个渠道 ⇒ 模型 id 就是**渠道自己的模型名**（`glm-5.3`）。
  * magpie 展示/选择时自动补供应商名前缀，呈现为 `hub-officeace/glm-5.3`。
  * ⚠️ 别再加渠道前缀：那会变成 `hub-officeace/officeace/glm-5.3`。
+ *
+ * ⚠️⚠️ `auth` 必须由调用方（`provider.models` 的第二个参数）传进来
+ * （2026-10-31 真机：magicrew 卡片显示「0 models」）。v0.5.0 去掉旁路凭据文件后，
+ * 凭据只在 `memoryCredentials` 里 —— **冷启动那一刻内存是空的**，`signedIn()`
+ * 为假 ⇒ 连远端目录都不去拉 ⇒ 退回兜底表；而 magicrew 这类「目录只在远端」的
+ * 渠道兜底表是空的 ⇒ 0 个模型。magpie 调 `models()` 时会把当前账号的 auth
+ * 作为第二参传进来（社区插件 `async models(provider, { auth })` 同款），用它即可，
+ * 顺带把凭据写进内存缓存（后续 sweep / chat 就有了）。
  */
-async function discoverModels(channel, fallback) {
+async function discoverModels(channel, fallback, auth) {
   let models
-  if (signedIn(channel)) {
+  let credential
+  if (authOfChannel(auth, channel)) {
+    credential = await ensureAuth(channel, auth) // 同时写进 memoryCredentials
+  } else if (signedIn(channel)) {
+    credential = await ensure(channel)
+  }
+  if (credential !== undefined) {
     try {
-      const credential = await ensure(channel)
       models = await channel.catalog(credential)
     } catch {
       // 拉目录失败退回该渠道自己的兜底目录（选择器不会空掉）
@@ -1091,8 +1104,14 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
 
     provider: {
       id: PROVIDER,
-      async models(provider) {
-        const models = await discoverModels(channel, provider.models)
+      /**
+       * ⚠️ 第二参是 magpie 给的上下文：`{ auth, getAuth }`（社区插件
+       * `async models(provider, { auth })` 同款）。**必须用它**——凭据只在内存，
+       * 冷启动时内存为空，不传 auth 就拉不到远端目录（真机 0 models）。
+       */
+      async models(provider, ctx = {}) {
+        const auth = ctx?.auth ?? (typeof ctx?.getAuth === 'function' ? await safeGetAuth(ctx.getAuth) : undefined)
+        const models = await discoverModels(channel, provider.models, auth)
         // 本渠道模型数 + 总数，喂给页面快照（一个供应商只有一个渠道，计数即全量）
         try {
           snapshotCache.perChannelModelCount = { ...(snapshotCache.perChannelModelCount ?? {}), [channel.id]: Object.keys(models ?? {}).length }
