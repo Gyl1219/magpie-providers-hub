@@ -1,17 +1,19 @@
-﻿修「永久窗口没有进度条和百分比」：别发 balance，改发 limit/amount/unit
+﻿修「多批次渠道没有走势虚线」：tierSummarize 别再删 resetsAt
 
-真机 2026-10-31。从 magpie 二进制里内嵌的前端代码读到的渲染规则（不是猜）：
+真机 2026-10-31（LobsterAI 卡片）：两条窗口都有进度条，但「剩余额度走势」
+只有空坐标轴、没有 even-burn 投影虚线。同屏 OfficeAce 有。
 
-  quotaNoShare(w) = !!w.text || w.used == null || **w.balance != null**
-  quotaText(w)    = w.balance != null ? "{n} left" : quotaCount + " · " + pct
-  quotaCount(w)   = w.limit > 0 ? ${limit-amount} /   : w.display
-  if (!w.unlimited && !quotaNoShare(w)) 才渲染进度条
+从 magpie 二进制里的前端代码读到（非猜测）：
 
-⇒ 带 balance 的窗口被当成「钱包」：只显示「981 积分」，**没有百分比也没有进度条**。
-这正是超级麦吉卡片「积分余额 · 永久」那一行的样子（用户报障）。
+  let reset = l.window.resetsAt ? Date.parse(l.window.resetsAt) : last.reset
+  if (c.reset && c.start < c.reset && !short) → 画 qc-even 虚线
 
-改法（对齐 community 的 officeace-auth：它两条窗口都显示「500 / 500 积分 · 剩余 100%」）：
-永久桶改发 used=0 + amount=0 + limit=当前余额 + unit='积分'，去掉 balance。
-永久余额没有上限，limit 取存量本身（这堆一分未动），与 officeace 对试用桶同款。
+⇒ 虚线**只认窗口的 resetsAt**。而 lobsterai 26 批走 tierSummarize 汇总时，
+  「去掉重复浅灰行」的规则把 runsOutAt / runsOut / **resetsAt** 一起删了
+  ⇒ 汇总出来的临期/长期两行没有窗口终点 ⇒ 没有虚线。
 
-回归：magicrew.test 断言永久桶 balance === undefined 且 limit/amount/unit 齐备。
+改法：runsOutAt / runsOut 照旧删（它们才会造成「N 将于 X 过期」重复行），
+**resetsAt 保留**（临期 = 最早到期那批，长期 = 剩余批次里最早的那批）。
+≤3 桶的透传分支同样保留 resetsAt。
+
+回归：aggregate.test 断言两档都带 resetsAt、且仍不带 runsOutAt。

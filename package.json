@@ -1,6 +1,6 @@
 {
   "name": "magpie-providers-hub",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "dsh-providers-hub（作者 JetLi）的第三方 Magpie 适配：五条供应商（AStudio/Accio/LobsterAI/超级麦吉国内+国际），各渠道独立实现登录/额度/转发，不依赖 DSH 运行。v0.5.0 起删除了与社区 registry 重叠的五条渠道（OfficeAce、AutoClaw 国内/国际、Loomy、MiniMax 国际版）",
   "type": "module",
   "main": "./index.mjs",

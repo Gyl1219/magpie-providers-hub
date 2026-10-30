@@ -208,10 +208,13 @@ test('tierSummarize：≤3 桶原样返回；>3 桶汇总成 临期(指针)/长�
     { name: '新用户福利', used: 0, amount: 3994, resetsAt: '2026-11-12T00:00:00Z' },
     { name: '每日签到', used: 0, amount: 100, resetsAt: '2026-10-26T15:59:59Z' },
   ]
-  // ≤3 桶保留原命名，但到期字段剥掉（浅灰行去重 —— 渠道行带 runsOutAt 只是分类输入）
+  // ≤3 桶保留原命名，但 runsOutAt 剥掉（浅灰行去重 —— 渠道行带它只是分类输入）；
+  // ⚠️ resetsAt **保留**：走势图的 even-burn 投影虚线只认它（2026-10-31 真机）
   const smallOut = tierSummarize(small)
   assert.equal(smallOut.length, 3)
-  assert.ok(smallOut.every((w) => w.runsOutAt === undefined && w.resetsAt === undefined), '≤3 桶到期字段剥掉')
+  assert.ok(smallOut.every((w) => w.runsOutAt === undefined), '≤3 桶的 runsOutAt 剥掉')
+  assert.equal(smallOut[1].resetsAt, '2026-11-12T00:00:00Z', 'resetsAt 必须留着（虚线依据）')
+  assert.equal(smallOut[0].resetsAt, undefined, '本来就没有的不会凭空出现')
   assert.equal(smallOut[1].amount, 3994, '其余字段原样保留')
 
   // 多批次形态：8 桶（7 笔不同到期批次 + 1 永久）→ 3 桶
@@ -234,6 +237,10 @@ test('tierSummarize：≤3 桶原样返回；>3 桶汇总成 临期(指针)/长�
   const longTerm = out.find((w) => w.name.includes('长期'))
   assert.equal(longTerm.amount, 200 + 200 + 200 + 500 + 200 + 200, '其余 6 批合计')
   assert.equal(longTerm.runsOutAt, undefined, '长期桶同样不挂 runsOutAt（浅灰行去重）')
+  // ⚠️ 但两档都要带 resetsAt：magpie 的走势投影虚线（even burn）只认窗口终点，
+  //   删了就只有空坐标轴（2026-10-31 真机：LobsterAI 卡片没虚线）。
+  assert.equal(pointer.resetsAt, '2026-10-26T14:47:00Z', '临期桶带 resetsAt（= 最早到期那批）')
+  assert.equal(longTerm.resetsAt, '2026-10-26T14:58:00Z', '长期桶带 resetsAt（= 剩余批次里最早的那批）')
   const permanent = out.find((w) => w.name.includes('永久'))
   assert.equal(permanent.amount, 10550)
   assert.equal(permanent.resetsAt, undefined)

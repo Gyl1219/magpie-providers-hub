@@ -494,9 +494,10 @@ export function tierSummarize(rows) {
   if (summable.length <= 3) {
     // 小组数渠道保留原始命名，但**到期字段仍要剥**（浅灰行去重，用户报障）；
     // 渠道行带 runsOutAt 只是给本函数的分类输入，不该漏到卡片上。
+    // ⚠️ resetsAt 例外：走势图投影虚线（even burn）只认它，剥了就没线。
     return rows.map((r) => {
       if (!(typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0)) return r
-      const { runsOutAt, runsOut, resetsAt, ...keep } = r
+      const { runsOutAt, runsOut, ...keep } = r
       return keep
     })
   }
@@ -520,9 +521,14 @@ export function tierSummarize(rows) {
     })
     // ⚠️ 刻意不挂 runsOutAt/runsOut：亮色行已带倒计时，再挂会让 magpie 渲染
     //    出第三行浅灰「N 将于 X 过期」（用户报障：重复）。
+    //
+    // ⚠️⚠️ 但 **resetsAt 必须留下**（2026-10-31 真机，LobsterAI 卡片没有走势虚线）：
+    //    magpie 的 even-burn 投影线只认窗口的 resetsAt ——
+    //      let reset = l.window.resetsAt ? Date.parse(l.window.resetsAt) : last.reset
+    //      if (c.reset && c.start < c.reset && !short) → 画虚线
+    //    这里删掉它，26 批汇总出来的行就没有窗口终点，图上只剩空坐标轴。
     delete out[out.length - 1].runsOutAt
     delete out[out.length - 1].runsOut
-    delete out[out.length - 1].resetsAt
   }
   const longTerm = expiring.slice(1)
   if (longTerm.length > 0) {
@@ -538,9 +544,9 @@ export function tierSummarize(rows) {
       amount: Number(amount),
       display: untilEarliest !== undefined ? `最早 ${untilEarliest}` : `剩 ${amount} · ${longTerm.length} 批`,
     })
+    // 同上：runsOutAt/runsOut 去掉（重复行），resetsAt 留着（走势虚线要它）
     delete out[out.length - 1].runsOutAt
     delete out[out.length - 1].runsOut
-    delete out[out.length - 1].resetsAt
   }
   if (permanent.length > 0) {
     const amount = tidyNumber(permanent.reduce((s, r) => s + r.amount, 0))
