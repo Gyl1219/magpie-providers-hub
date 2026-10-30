@@ -1,72 +1,88 @@
-// 各渠道共享的小工具：凭据落盘、信封解析。
+// 各渠道共享的小工具：账号槽读取、信封解析、额度分档。
 //
-// 每个渠道一份凭据文件，互不干扰。
+// ⚠️ v0.5.0 起本模块**不写任何文件**（除了显式开启的诊断日志，且落在系统临时目录）：
+//    插件不碰 magpie 的配置目录，账号只存 magpie 账号槽。
 
-import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { readFileSync, appendFileSync, mkdirSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 /**
- * 凭据目录。⚠️ **惰性求值**（每次现取 homedir）：模块级常量会在首次 import
- * 时固化 —— 测试按用例切换 HOME 时会读到别的沙箱的凭据文件（状态泄漏）。
+ * magpie 的配置目录（**只用于读它自己的文件**：plugin-auth.json / models.json）。
+ * ⚠️ 惰性求值：模块级常量会在首次 import 时固化 homedir。
+ * ⚠️ 便携版 magpie 或设了 XDG_CONFIG_HOME 时这里可能指错 —— 但既然只读、
+ *    读不到就回退（`readOwnAuthEntries` 的 catch 返回空数组），不会污染任何东西。
  */
 const storeDir = () => join(homedir(), '.config', 'magpie')
 
-export function credentialPath(name) {
-  return join(storeDir(), `${name}-credential.json`)
-}
-
 /**
- * 全链路诊断日志（登录流程排查用）。**默认关闭**：设 `DSH_HUB_DEBUG=1` 才写
- * `~/.config/magpie/notify-debug.log`。
+ * 全链路诊断日志（排查用）。**默认关闭**：设 `DSH_HUB_DEBUG=1` 才写。
  *
- * ⚠️ 2026-10-30 起默认不写：这是往 **magpie 的目录**里追加文件，和社区审核卡
- *    `officeace-auth` #399 的是同一类问题（插件不该在宿主的地盘上落东西，
- *    yetone 的原话是「That file is outside the plugin's folder and belongs to
- *    magpie」）。排查时再开开关，常态零写入。
+ * ⚠️ 落点是**系统临时目录**（`<tmp>/providers-hub-debug.log`），不是 magpie 的
+ *    配置目录 —— 社区审核（PR #502 第 2 条）要求插件不往宿主的目录里写文件。
  */
 export function debugLog(line) {
   if (process.env.DSH_HUB_DEBUG !== '1') return
   try {
-    mkdirSync(storeDir(), { recursive: true })
-    appendFileSync(join(storeDir(), 'notify-debug.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')
+    const dir = join(tmpdir(), 'providers-hub')
+    mkdirSync(dir, { recursive: true })
+    appendFileSync(join(dir, 'debug.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')
   } catch { /* 忽略 */ }
 }
 
 /**
- * magpie 的账号槽存储（plugin-auth.json）—— 供「每渠道账号数」统计用。
+ * magpie 的账号槽存储（plugin-auth.json）—— 供「每渠道账号数」统计与旧槽迁移用。
  * ⚠️ 只读，绝不写（那是 magpie 的地盘）；路径可用 env 重定向（测试）。
  */
 export function magpieAuthPath() {
   return process.env.DSH_HUB_AUTH_PATH ?? join(storeDir(), 'plugin-auth.json')
 }
 
+/** 本插件自己的账号槽前缀（`hub-<ch>` 与 0.3.x 的 `providers-hub*`）—— 见 isOwnSlotKey。 */
+
 /**
- * 重叠渠道的开关文件（`providers-hub.json`）。
+ * 这个 key 是不是本插件的槽。
  *
- * ⚠️ **本插件对它只读**：文件由用户手工创建，或跑 `node tools/set-channels.mjs`
- *    （仓库内工具，不随 npm 发布）。格式：`{"extraChannels": "all"}` 或
- *    `{"extraChannels": ["officeace", "autoclawintl"]}`。坏 JSON / 不存在 = 没开。
+ * 认三种形态：
+ *   `hub-<渠道>` / `hub-<渠道>#<slot>`   —— v0.4.0 起的槽
+ *   `providers-hub` / `providers-hub#<slot>` —— v0.3.x 聚合形态的旧槽（迁移用）
+ *
+ * ⚠️ 别写成 `key.startsWith(p + '-')` 一把梭：`hub-` 后面直接跟渠道名
+ *    （`hub-astudio`），没有第二个分隔符 —— 那样写会把所有自己的槽全漏掉
+ *    （实测：`readOwnAuthEntries()` 返回空数组）。
  */
-export function hubSwitchPath() {
-  return process.env.DSH_HUB_SWITCH_PATH ?? join(storeDir(), 'providers-hub.json')
+function isOwnSlotKey(key) {
+  const k = String(key ?? '')
+  if (k.startsWith('hub-')) return true
+  if (k === 'providers-hub') return true
+  return k.startsWith('providers-hub#') || k.startsWith('providers-hub-')
 }
 
 /**
  * 读 magpie 账号槽的**原始条目**：`[{key, channel, value}]`（value 是 magpie 存的整个 auth）。
  * 只读，绝不写（那是 magpie 的地盘）；路径可用 env 重定向（测试）。
  *
- * @param {string} [providerId] 省略 = 全部槽（调用方自己按 `channel` 过滤归属）
+ * ⚠️⚠️ **必须按 key 前缀过滤后再取值**（PR #502 审核第 3 条）：不带过滤地调用会把
+ *    `plugin-auth.json` 里**所有**供应商的完整 auth（包括别的插件的 token）读进内存 ——
+ *    而调用方往往只用来数账号。现在默认**只返回本插件的槽**，且 `withValue:false`
+ *    时连 auth 内容都不保留（直接丢弃 value）。
+ *
+ * @param {{providerId?: string, withValue?: boolean}} [opts]
+ *   providerId 省略 = 本插件的全部槽（`hub-*` / `providers-hub*`）；
+ *   withValue 只在**迁移**时才需要（要复制旧槽的 auth）。
  */
-export function readMagpieAuthEntries(providerId) {
+export function readOwnAuthEntries({ providerId, withValue = false } = {}) {
   try {
     const obj = JSON.parse(readFileSync(magpieAuthPath(), 'utf8'))
     const out = []
     for (const [key, val] of Object.entries(obj ?? {})) {
-      if (typeof val !== 'object' || val === null) continue
+      // ① 先按 key 收窄：别人的槽**连值都不碰**
+      if (!isOwnSlotKey(key)) continue
       if (providerId !== undefined && key !== providerId && !key.startsWith(`${providerId}#`)) continue
+      if (typeof val !== 'object' || val === null) continue
       const channel = typeof val.channel === 'string' ? val.channel : ''
-      out.push({ key, channel, value: val })
+      // ② 不需要值时**不把 auth 放进返回对象**（凭据不经过不需要它的代码）
+      out.push(withValue ? { key, channel, value: val } : { key, channel })
     }
     return out
   } catch {
@@ -79,7 +95,8 @@ export function readMagpieAuthEntries(providerId) {
  * @param {string} [providerId] 省略 = 全部槽（页面快照用，按 `channel` 归属）
  */
 export function readMagpieAuthSlots(providerId) {
-  return readMagpieAuthEntries(providerId).map(({ key, value: val, channel }) => {
+  // ⚠️ 这里需要 expires（判「重复登录是否已过期」），所以对本插件自己的槽取 value。
+  return readOwnAuthEntries({ providerId, withValue: true }).map(({ key, value: val, channel }) => {
     const expires = Number(val.expires)
     return {
       key,
@@ -91,69 +108,11 @@ export function readMagpieAuthSlots(providerId) {
   })
 }
 
-export function loadCredential(name) {
-  try {
-    const p = credentialPath(name)
-    if (!existsSync(p)) return null
-    return JSON.parse(readFileSync(p, 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-/** 凭据到期时刻（毫秒）；解析不出来 → undefined（不参与比较，宁可写也不要漏写）。 */
-function expiryOf(credential) {
-  const raw = credential?.expiresAt ?? credential?.expires ?? credential?.expires_at ?? credential?.expireMs
-  if (typeof raw === 'number' && Number.isFinite(raw)) return raw > 1e12 ? raw : raw * 1000
-  if (typeof raw === 'string') {
-    const t = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw)
-    if (Number.isFinite(t) && t > 0) return t > 1e12 ? t : t * 1000
-  }
-  return undefined
-}
-
 /**
- * 是否「下调写入」：盘上已有的凭据比这次要写的**更晚到期**。
- *
- * ⚠️ 轮转型渠道（OfficeAce STS）的致命形态：续期成功后盘上是新 refresh_token(R2)，
- *    另一条调用路径仍拿着旧凭据(R1)回写一份 —— 把 R2 覆盖成 R1，下次续期拿已消费的
- *    R1 去换 → `STS5.1806 the refresh token has been used` → 凭据**永久**作废，
- *    只能重新登录（真机 2026-10-29）。
- */
-function isStaleWrite(target, credential) {
-  if (!existsSync(target)) return false
-  try {
-    const prev = JSON.parse(readFileSync(target, 'utf8'))
-    const kept = expiryOf(prev)
-    const incoming = expiryOf(credential)
-    return kept !== undefined && incoming !== undefined && incoming < kept
-  } catch {
-    return false
-  }
-}
-
-export function saveCredential(name, credential) {
-  try {
-    mkdirSync(storeDir(), { recursive: true })
-    const target = credentialPath(name)
-    if (isStaleWrite(target, credential)) {
-      console.warn(`[credential] 拒绝下调写入 ${name}（盘上凭据到期更晚，本次为旧凭据）`)
-      return false
-    }
-    // ⚠️ **原子写**（临时文件 + 改名）：magpie 重启/登录并发时，宿主可能正在
-    //    读这份文件 —— 非原子的截断写入会让读侧 JSON.parse 失败 → 凭据被当成
-    //    「未登录」（真机瞬态：重启后快照整帧「部分未登录」）。
-    const tmp = `${target}.tmp`
-    writeFileSync(tmp, JSON.stringify(credential, null, 2), 'utf8')
-    renameSync(tmp, target)
-    return true
-  } catch (error) {
-    // ⚠️ 绝不能静默：轮转型渠道「续期成功但没落盘」= 新 refresh_token 永久丢失，
-    //    上次消费掉的旧 token 下次必报 STS5.1806。静默 = 用户只能靠猜。
-    console.warn(`[credential] 凭据落盘失败 ${name}：${error instanceof Error ? error.message : String(error)}`)
-    return false
-  }
-}
+ * ⚠️ v0.5.0 起**没有** `saveCredential` / `loadCredential` / `credentialPath`：
+ *    插件不再往 magpie 的配置目录写任何凭据文件（PR #502 审核第 2 条）。
+ *    账号只存 magpie 账号槽，凭据只在内存里流转（见 src/aggregate.mjs 的
+ *    memoryCredentials）。
 
 /**
  * 上游信封 `{code, message, data}`；`code === 0` 为成功。
@@ -275,4 +234,56 @@ export function expiryBandedWindows(buckets, now = Date.now()) {
     })
   }
   return windows
+}
+
+// ── 传输层重试（各渠道共用）────────────────────────────────────────────────
+
+const sleep = (ms) => (ms <= 0 ? Promise.resolve() : new Promise((r) => setTimeout(r, ms)))
+
+/**
+ * 这个错误是不是**传输层**的（值得重发）。
+ *
+ * ⚠️ 只认网络/证书/DNS 这类「包没到或被切断」的错误；HTTP 业务错误（4xx/5xx
+ *    被 fetch 正常解析成 Response）**不在此列** —— 那些重发只会原样失败、
+ *    还会掩盖真因（额度/鉴权/限流各 有各 的处置）。
+ * ⚠️ 追到 `cause` 链（Node 的 fetch 把真错误包在 `fetch failed` 外面）。
+ */
+export function isTransportError(error) {
+  const seen = new Set()
+  let current = error
+  for (let depth = 0; current !== null && current !== undefined && depth < 6; depth += 1) {
+    if (seen.has(current)) break
+    seen.add(current)
+    if (typeof current !== 'object') break
+    const name = typeof current.name === 'string' ? current.name : ''
+    const message = typeof current.message === 'string' ? current.message.toLowerCase() : ''
+    const code = typeof current.code === 'string' ? current.code : ''
+    if (name.startsWith('UND_ERR_') || code.startsWith('UND_ERR_')) return true
+    if (code.startsWith('SELF_SIGNED_CERT') || code.startsWith('CERT_')
+      || code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') return true
+    if (code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'EPIPE'
+      || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EAI_AGAIN') return true
+    if (message.includes('fetch failed')) return true
+    if (message.includes('socket hang up') || message.includes('terminated')
+      || message.includes('other side closed')) return true
+    current = current.cause
+  }
+  return false
+}
+
+/** 传输级重试：默认 2 次、400ms 指数退避；abort 绝不重试；耗尽抛最后的错误。 */
+export async function fetchWithRetry(fetchOnce, signal, retries = 2) {
+  let lastError
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fetchOnce()
+    } catch (error) {
+      lastError = error
+      if (signal?.aborted === true) throw error
+      if (!isTransportError(error)) throw error
+      if (attempt === retries) break
+      await sleep(400 * 2 ** attempt)
+    }
+  }
+  throw lastError
 }

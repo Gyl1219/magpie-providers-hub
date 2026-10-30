@@ -30,7 +30,7 @@
 
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { loadCredential, saveCredential, untilText } from './shared.mjs'
+import { untilText } from './shared.mjs'
 
 export const CHANNEL_ID = 'lobsterai'
 export const DISPLAY_NAME = 'LobsterAI（有道龙虾）'
@@ -194,7 +194,6 @@ async function beginLogin(openBrowser) {
         return
       }
       const credential = await exchangeAuthCode(code, { uuid, firstKeyfrom })
-      saveCredential(CHANNEL_ID, credential)
       sendJson(200, { ok: true, message: '登录成功，可以关闭此页面' })
       settle(true, credential)
     } catch (error) {

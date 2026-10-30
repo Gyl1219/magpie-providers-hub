@@ -32,8 +32,8 @@ export const REGISTRY_ENTRY = {
   ],
   community: true,
   summary: {
-    en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one package, five registered providers, each a separate channel you can sign in to, meter and switch off on its own — AStudio, Accio, LobsterAI, MagiCrew (CN & Intl). Five more channels that already exist in the registry (OfficeAce, AutoClaw CN/Intl, Loomy, MiniMax Code Intl) ship in the package but stay unregistered unless MAGPIE_HUB_EXTRA_CHANNELS is set. Runs without DSH.',
-    zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：一个插件注册五条供应商（每渠道一条，可各自登录/看额度/单独关闭）——AStudio（讯飞）、Accio（阿里）、LobsterAI（有道）、超级麦吉/MagiCrew（国内+国际）。与社区 registry 已有插件重叠的五个渠道（OfficeAce、AutoClaw 国内/国际、Loomy、MiniMax 国际版）也打进包里但默认不注册，设 MAGPIE_HUB_EXTRA_CHANNELS 打开。不依赖 DSH 运行。',
+    en: 'Third-party Magpie adapter for dsh-providers-hub (by JetLi): one package, five providers, each a separate channel you can sign in to, meter and switch off on its own — AStudio, Accio, LobsterAI, MagiCrew (CN & Intl). Channels that overlap with existing registry plugins are not shipped. Runs without DSH.',
+    zh: 'dsh-providers-hub（作者 JetLi）的第三方适配：五条供应商（每渠道一条，可各自登录/看额度/单独关闭）——AStudio（讯飞）、Accio（阿里）、LobsterAI（有道）、超级麦吉/MagiCrew（国内+国际）。与社区 registry 已有插件重叠的渠道不随包提供（改装对应社区插件）。不依赖 DSH 运行。',
   },
 }
 

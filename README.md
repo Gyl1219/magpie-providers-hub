@@ -6,74 +6,63 @@
 > 账号渠道、EAC 授权流程、本地服务与管理界面来自原项目，这些功能的主要实现归
 > 原作者及其上游贡献者。本仓库新增 Magpie 供应商接口、自动服务管理、浏览器管理入口和兼容测试。
 
-Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的 10 个渠道**做成**独立实现**
-（优先覆盖 Magpie 社区包和 Our Free Model（ofm）还没有的那些）。
+Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**做成**独立实现**。
+
+> **v0.5.0 起只提供 5 条渠道**：与社区 registry 里已有插件重叠的五条（OfficeAce、
+> AutoClaw 国内/国际、Loomy、MiniMax 国际版）**已从包里删除**（PR #502 审核结论）。
+> 老用户改装对应社区插件即可，见下方「迁移」一节。
 
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个插件，十个供应商（v0.4.0）
+## 形态：一个插件，五条供应商（v0.5.0）
 
-**装一次，Magpie 里出现十个供应商**，一个渠道一条：
+**装一次，Magpie 里出现五条供应商**，一个渠道一条：
 
 ```
-hub-officeace   hub-astudio     hub-minimaxintl  hub-accio     hub-autoclaw
-hub-autoclawintl hub-loomy      hub-lobsterai    hub-<麦吉国内> hub-<麦吉国际>
+hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl
 ```
 
 - 一个 git 仓库 / 一个 npm 包 / 一条安装命令 —— provider id 不是包，插件包可以注册任意多个
   （社区 `opencode-trae-auth` 一个包两个供应商、`opencode-qoder-auth` 一个包四个，同理）；
 - 每个供应商有自己的登录按钮、额度卡、rpm 与开关，**可以单独关掉**；
-- magpie 的故障转移是 provider 粒度 ⇒ 现在**能跨渠道切**了（`hub-officeace` 被限流时可以换到
-  `hub-autoclaw` 的账号）；
-- 模型 id 由 magpie 拼成 `hub-officeace/glm-5.3`（目录里我们返回的是裸模型名 `glm-5.3`）。
+- magpie 的故障转移是 provider 粒度 ⇒ **能跨渠道切**（`hub-astudio` 被限流时可以换到
+  `hub-accio` 的账号）；
+- 模型 id 由 magpie 拼成 `hub-astudio/spark-x`（目录里我们返回的是裸模型名 `spark-x`）。
 
-> **从 0.3.x 升级**：旧版是「一个供应商 `providers-hub` 内部聚合十渠道」，模型 id 形如
-> `providers-hub/officeace/glm-5.3`。升级后旧模型名一律失效（magpie 没有别名表），
-> 需要在模型选择器里重选；已登录账号会由插件**自动搬**到新的供应商槽
-> （`providers-hub*` → `hub-*`，`migrateLegacySlots`，幂等、可关），搬不动的旁路凭据照常供
-> 对话/额度/签到使用，只是卡片显示「未登录」，重登一次即可。
+> **从 0.4.x 升级（重要）**：包里删掉了 OfficeAce / AutoClaw 国内+国际 / Loomy /
+> MiniMax 国际版 四条渠道的代码（原因见下节）。这五条供应商会从 Magpie 里消失，
+> **改装对应的社区插件即可**：
+> - OfficeAce → `officeace-auth`
+> - AutoClaw（国内/国际）→ `opencode-autoclaw-auth`
+> - Loomy → `opencode-loomy-auth`
+> - MiniMax Code 国际版 → `opencode-minimax-auth`
+>
+> 剩下的五条（astudio / accio / lobsterai / magicrew×2）**登录态不受影响**。
+> 另外：插件已不再往 `~/.config/magpie/` 写任何凭据文件，旧的
+> `<渠道>-credential.json` 可以手工删掉。
+
+## 为什么删掉那五条
+
+PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立：
+
+1. **一个订阅两个入口**：registry 里已经有 OfficeAce / AutoClaw / Loomy / MiniMax 国际版
+   的社区插件，再出一个同名能力的供应商，用户会搞不清该装哪个；
+2. **它们各自带着与本插件无关的敏感能力**：AutoClaw 那套要**解密本机桌面端凭据**
+   （DPAPI masterKey + AES-256-GCM），MiniMax 国际版带着**伪造 XFF 绕地区分流**。
+   这两样只服务那两条渠道，留着就是白送风险面。
+
+删代码而不是「默认不注册」，是因为审核在意的是**包里有什么**，不是默认开没开。
 
 ## 当前渠道
 
 | 渠道 id | 供应商 id | 归属 | 登录方式 | 模型 | 续期 |
 |---|---|---|---|---|---|
-| `officeace` | `hub-officeace` | 华为云 AgentArts | 华为云 OAuth（PKCE + DPoP + 云侧轮询） | `/v2/models` | ✅ STS（⚠️ refresh_token 一次性） |
 | `astudio` | `hub-astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `/api/v1/model-manager/models` | ❌ 不支持（会话一年，不滑动） |
-| `minimaxintl` | `hub-minimaxintl` | MiniMax Code 国际版 | OAuth 设备码 + PKCE（浏览器确认 user_code） | `/mavis/api/v1/models?region=en` | ✅ 标准 refresh_token 轮换 |
 | `accio` | `hub-accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调 | `POST /api/llm/config/v2` | ✅ refresh（⚠️ 轮换 refresh_token，已串行化） |
-| `autoclaw` | `hub-autoclaw` | 智谱 AutoClaw 国内 | 本地载体页（**一键导入桌面端凭据** / 短信验证码） | `/autoclaw-proxy/proxy/autoclaw-model-config` | ✅ 标准 refresh_token 轮换 |
-| `autoclawintl` | `hub-autoclawintl` | 智谱 AutoClaw 国际版 | Z.ai OAuth（授权页回调）+ 本地导入 | 同上（两站同协议） | ✅ 同左 |
-| `loomy` | `hub-loomy` | 讯飞 Loomy | 本地载体页（短信验证码） | `GET /models` | ❌ 无 refresh 端点（session 14 天） |
 | `lobsterai` | `hub-lobsterai` | 有道 LobsterAI（龙虾） | 官方门户 OAuth + 本机 loopback 回调 | `/api/models/available` | ✅ 标准 refresh_token 轮换 |
-| 超级麦吉（国内） | `hub-` + 渠道 id | 超级麦吉（letsmagic.cn） | 载体页：CDP 浏览器登录 / 手机号密码 / 粘贴 JWT | `/api/v1/flows/models` | ✅ refresh_token（⚠️ PUT 一次轮换一次）+ `mgw_` api_key 2h 自续 |
-| MagiCrew（国际） | `hub-` + 渠道 id | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
-
-### autoclaw / autoclawintl
-
-智谱清言桌面端（AutoClaw）协议，**国内与国际是两个渠道**：账号体系物理隔离
-（手机号 vs 邮箱 OAuth）、API 主机不同、登录方式不同 —— 实测国内 token 打
-国际基址全拒，不可能用一个站点参数切换；`appId`/`appKey` 两站通用。
-
-- 登录：国内载体页支持**一键读取本机桌面端凭据**（Electron 凭据解密：
-  DPAPI masterKey + AES-256-GCM）或短信验证码；国际版走 Z.ai OAuth
-  （`state` 由官方授权页生成随回调带回，插件透传），桌面端已登录也可一键导入。
-- ⚠️ 实测坑（都来自上游真机取证）：`X-Version` 是推理**硬校验头**（缺 →
-  HTTP 500 空响应体）；`messages[0]` 必须逐字等于白名单前缀（否则 406）；
-  `max_tokens` ≥ 10000 或不发；思考档位集合外**不发**（上游对非法档位回
-  200 按最贵档跑）；过期时间以 **JWT exp 为权威**（登录响应的声明值偏大 6 天）。
-
-### officeace
-
-```
-POST /v1/claw/auth/state                    → 云侧登记 state
-浏览器打开 auth.huaweicloud.com（PKCE+DPoP）
-轮询 GET /v1/claw/auth/code?state=…          → code
-POST sts.cn-north-4/v1/oauth2/tokens         → STS 凭据（AK/SK/security_token）
-GET  /v1/claw/client-permission-validate     → modelInfo（推理端点 + appKey/appSecret）
-```
-
-推理用 **Basic** 认证（`base64(appKey:appSecret)`），不是 Bearer。
+| 超级麦吉（国内） | `hub-magicrew` | 超级麦吉（letsmagic.cn） | 载体页：CDP 浏览器登录 / 手机号密码 / 粘贴 JWT | `/api/v1/flows/models` | ✅ refresh_token（⚠️ PUT 一次轮换一次）+ `mgw_` api_key 2h 自续 |
+| MagiCrew（国际） | `hub-magicrew-intl` | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
 
 ### astudio
 
@@ -84,22 +73,6 @@ GET  /v1/claw/client-permission-validate     → modelInfo（推理端点 + appK
 ⚠️ 两个实测坑：
 - `/model-gateway/v1/models` 恒 **404**；目录在 `/api/v1/model-manager/models`（两个基址不共用前缀）
 - 推理端只认**裸 slug**；发 `builtin/<base64>` 会 502（`builtin/` 是 acode 内核内部别名）
-
-### minimaxintl
-
-MiniMax Code **国际版**（`account.minimax.io` / `agent.minimax.io`）。登录是官方客户端
-同款的 **OAuth 设备码 + PKCE**（client `mcode-public`）：插件给出验证码，你在浏览器确认，
-无需本地回调端口。推理端说 **Anthropic Messages** 协议，本插件内置 OpenAI↔Anthropic
-翻译桥（system/tools/tool_calls/图片/思考档位/SSE 全量双向翻译）。
-
-⚠️ 三个实测坑（都来自 DSH 的真机记录）：
-- `agent.minimax.io` 恒 **307 → 中国站**（Akamai 按出口 IP 分流），而 fetch 跨域跟随会
-  **剥掉 Authorization** ⇒ 插件手动逐跳跟随并**每跳重附头**（不跟就 401，且与
-  「凭据失效」逐字同形）。中国大陆出口会被分流；可用
-  `magpie plugin options providers-hub '{"minimaxXff":"<海外IP>"}'` 绕行（默认关）。
-- `access_token` **不是 JWT**（`mmoat_` 前缀）⇒ 过期时间只能来自 `expires_in` 自算。
-- 思考档位错发就是 400 或假关闭：M3.1 系**永不发** `disabled`（硬 400）；
-  M2.7 系不发 thinking 字段；只有 M3 可真开关。
 
 ### accio
 
@@ -121,17 +94,6 @@ PKCE + **本地 loopback 回调**（Accio 对 `return_url` 无白名单校验，
 
 另：`system_instruction` 必须是**字符串**（照 Gemini 包成对象恒 400）；思考档位
 仅作展示（上游无任何受控字段，实测四类字段全部无效）。
-
-### loomy
-
-讯飞 Loomy（`loomyad.xunfei.cn`）。OpenAI 兼容直传，无翻译层；登录走本地载体页的
-短信三步表单流（`sendMsgCode → msgid → checkCode`）。
-
-⚠️ 四个实测坑：**两套认证头**（chat 只认 `Authorization: Bearer`，models/points
-只认小写 `token`，带错的那个回 HTTP 200 + `缺少 token`）；**业务失败恒 HTTP 200**
-（成败只能读 body 的 `code`）；**没有 refresh 端点**（session 14 天，过期只能重登）；
-短信 `msgid` 必须原样带回。额度是「永久积分 + 每日重置」，属余额/重置型，
-**不适用**滚动指针档位（见 AGENTS.md §1）。
 
 ### lobsterai
 
@@ -162,11 +124,11 @@ PUT 一次轮换一次（一次性，必须串行 + 立即落盘）**。登录�
 
 ```bash
 magpie plugin add <本仓库路径或 github:Gyl1219/magpie-providers-hub>
-magpie plugin login hub-officeace     # 登录某个渠道（十个供应商各登各的）
+magpie plugin login hub-astudio       # 登录某个渠道（五条供应商各登各的）
 ```
 
-模型在选择器里长这样（magpie 自动补供应商名）：`hub-officeace/glm-5.3`、
-`hub-loomy/spark-x`、`hub-autoclaw/zai_auto`…
+模型在选择器里长这样（magpie 自动补供应商名）：`hub-astudio/spark-x`、
+`hub-accio/<模型>`、`hub-magicrew/<模型>`…
 
 改代码后重载（终端每次按文件夹当前内容加载；应用里需关掉再打开）：
 
@@ -175,16 +137,17 @@ magpie plugin off "<目录>"
 magpie plugin on  "<目录>"
 ```
 
-⚠️ 插件选项（如 minimax 的绕行 IP/代理）仍是**插件级**：
-`magpie plugin options providers-hub '{"minimaxXff":"<海外IP>"}'` —— 十個实例都会收到。
+⚠️ 插件选项是**插件级**（所有实例共享同一个 options 对象）：
+`magpie plugin options hub-astudio '{"snapshotRefreshMinutes":10}'`
+（`snapshotRefreshMinutes` 控制页面快照的刷新周期，默认 5 分钟，0 = 关闭）
 
 ## 为什么做这些
 
-ofm 已覆盖 13 个渠道（CodeArts、WorkBuddy 国内/国际、LobsterAI、Qoder 国内/国际、TRAE、
-Cline、Loomy、Raccoon、MiniMax Code 国内、ZCode、Gemini）⇒ **这些不做**，重复实现没有价值。
-MiniMax **国际版**是例外：ofm 渠道包只有国内站（`account.minimax.cn`），magpie 社区插件的
-国际版登录则卡在上游 307 丢 Authorization 的坑里（见上节）——而 DSH 已把这两个坑都
-真机修通过，故移植其实现。
+选型原则：**只做社区 / ofm 还没有的渠道**，重复实现没有价值（这也是 v0.5.0 删掉
+OfficeAce / AutoClaw / Loomy / MiniMax 国际版的原因 —— 社区插件已经覆盖了）。
+
+保留的五条里：AStudio 与 Accio 是 magpie 社区至今没有的实现；LobsterAI 与
+MagiCrew（国内/国际）有社区包但这里保留了各自修过的真机坑（见下节各渠道小节）。
 
 **AutoClaw 国内/国际**是后来应需求加入的（虽与社区插件覆盖重叠）：上游 DSH 对该渠道
 做过四轮审计修复（X-Version 硬校验、406 白名单、档位本地门禁、JWT exp 权威过期、
@@ -201,7 +164,7 @@ ofm、社区包有覆盖重叠，仍收进本仓库：它们各自有必须真�
 
 ## 已知边界
 
-### 为什么从「聚合」改成「一个插件十个供应商」
+### 为什么从「聚合」改成「一个插件多条供应商」
 
 0.3.x 是一个 provider id 包住十个渠道（ofm 同款）。问题出在 magpie 的粒度
 （[#1](https://github.com/Gyl1219/magpie-providers-hub/issues/1) 里由
@@ -212,7 +175,7 @@ ofm、社区包有覆盖重叠，仍收进本仓库：它们各自有必须真�
 - **设置按 provider 粒度**：关掉一个渠道 = 关掉全部；fallback / preset 无法只针对单渠道。
 
 v0.4.0 拆开后这两点都没了（每渠道一条供应商），代价是**模型名一次性变化**
-（`providers-hub/officeace/x` → `hub-officeace/x`）与旧账号槽需要迁移（插件自动做）。
+（`providers-hub/<渠道>/x` → `hub-<渠道>/x`）与旧账号槽需要迁移（插件自动做）。
 
 社区仍有独立包可选（如 [@MYCF711/magpie-officeace](https://github.com/MYCF711/magpie-officeace)，
 它在本插件 officeace 实现的基础上补了 V11 签名订阅 API 与 bonus 签到）。

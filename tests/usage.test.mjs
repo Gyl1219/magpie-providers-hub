@@ -11,7 +11,6 @@ const originalHome = process.env.USERPROFILE
 process.env.USERPROFILE = sandbox
 process.env.HOME = sandbox
 
-const { minimaxintlChannel } = await import('../src/minimaxintl.mjs')
 const { accioChannel } = await import('../src/accio.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
 
@@ -21,7 +20,6 @@ test.after = () => {
   rmSync(sandbox, { recursive: true, force: true })
 }
 
-const MM_CRED = { access_token: 'mmoat_t', refresh_token: 'rt', expires_at: String(Date.now() + 3600_000) }
 const AC_CRED = { access_token: 'at_accio', refresh_token: 'rt2', expires_at: Date.now() + 3600_000, region: 'cn' }
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
@@ -121,50 +119,6 @@ test('accio：quota 端点失败可容忍（只丢刷新时刻，不丢桶）', 
   }
 })
 
-// ── minimaxintl 分桶 ────────────────────────────────────────────────────
-
-test('minimaxintl：details 逐行一桶，remaining_amount 是字符串，过期桶跳过，指针分档', async () => {
-  const future = Date.now() + 5 * 86400_000
-  const past = Date.now() - 86400_000
-  const stub = stubFetch([
-    {
-      match: '/credit/details',
-      respond: () => json({
-        details: [
-          { remaining_amount: '800.00', expire_at_ms: future, credit_type: 2 },
-          { remaining_amount: '400.00', expire_at_ms: past }, // 已过期：服务端仍返回但不可用
-        ],
-        total_count: 2, // ← 这是记录条数不是余额（DSH 修过的字段误读），我们不用它
-        base_resp: { status_code: 0, status_msg: 'ok' },
-      }),
-    },
-  ])
-  try {
-    const windows = await minimaxintlChannel.usage(MM_CRED)
-    assert.equal(windows.length, 1, '过期桶不显示')
-    assert.match(windows[0].name, /800 积分/, 'remaining_amount 字符串要解析（只认 number 会静默算成 0）')
-    assert.match(windows[0].name, /临期·5天/, '唯一未过期的带到期桶 = 指针位（5 天如实显示）')
-    assert.equal(windows[0].resetsAt, new Date(future).toISOString())
-  } finally {
-    stub.restore()
-  }
-})
-
-test('minimaxintl：地理分流后的失败指向出口 IP 而不是凭据', async () => {
-  const stub = stubFetch([
-    { match: 'agent.minimax.io', respond: () => new Response(null, { status: 307, headers: { location: 'https://agent.minimaxi.com/x' } }) },
-    { match: 'agent.minimaxi.com', respond: () => new Response('{"error":"invalid access token"}', { status: 401 }) },
-  ])
-  try {
-    await assert.rejects(
-      () => minimaxintlChannel.usage(MM_CRED),
-      /出口 IP|分流/,
-    )
-  } finally {
-    stub.restore()
-  }
-})
-
 // ── astudio 分桶（托盘面板适配：resetsAt + aside）────────────────────────
 
 const AS_CRED = { accessToken: 'b', ssoSessionId: 's', accountId: 'a', token: 't' }
@@ -231,11 +185,11 @@ test('assignExpiryBands：指针随最早桶耗尽/过期而滚动（12天桶接
 
 test('未登录的供应商：usage 出「未登录」状态条（不报成查询失败）', async () => {
   const { HUB_PLUGINS } = await import('../index.mjs')
-  const plugin = await HUB_PLUGINS.HubOfficeAcePlugin({}, {})
+  const plugin = await HUB_PLUGINS.HubAStudioPlugin({}, {})
   const cfg = {}
   await plugin.config(cfg)
   const result = await plugin.auth.usage()
-  assert.equal(result.plan, '华为云 OfficeAce')
+  assert.equal(result.plan, 'AStudio（讯飞）')
   assert.equal(result.windows.length, 1)
   assert.match(result.windows[0].display, /未登录/)
 })

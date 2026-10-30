@@ -19,10 +19,10 @@ const originalHome = process.env.USERPROFILE
 process.env.USERPROFILE = sandbox
 process.env.HOME = sandbox
 
-const { officeaceChannel } = await import('../src/officeace.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
-const { minimaxintlChannel } = await import('../src/minimaxintl.mjs')
 const { accioChannel } = await import('../src/accio.mjs')
+const { lobsteraiChannel } = await import('../src/lobsterai.mjs')
+const { magicrewChannel, magicrewIntlChannel } = await import('../src/magicrew.mjs')
 const { REGISTERED_CHANNELS, makeHubPlugin } = await import('../src/aggregate.mjs')
 
 const FAKE = { fake: true }
@@ -44,18 +44,18 @@ const build = async (channel) => {
 }
 
 test('每个注册渠道都实现了 beginLogin', async () => {
-  assert.ok(REGISTERED_CHANNELS.length >= 4, `渠道数异常：${REGISTERED_CHANNELS.length}`)
+  assert.equal(REGISTERED_CHANNELS.length, 5, `v0.5.0 起只有五条渠道，实际：${REGISTERED_CHANNELS.length}`)
   for (const channel of REGISTERED_CHANNELS) {
     assert.equal(typeof channel.beginLogin, 'function', `${channel.id} 缺少 beginLogin`)
   }
   // 引用一致性：测试 stub 的对象必须是聚合层实际持有的那几个
-  for (const channel of [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel]) {
+  for (const channel of [astudioChannel, accioChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel]) {
     assert.ok(REGISTERED_CHANNELS.includes(channel), `${channel.id} 未注册进聚合层`)
   }
-  // autoclaw 两个渠道（国内/国际）：聚合层持有的必须就是模块导出的那份
-  const { autoclawChannel, autoclawIntlChannel } = await import('../src/autoclaw.mjs')
-  assert.ok(REGISTERED_CHANNELS.includes(autoclawChannel), 'autoclaw 未注册进聚合层')
-  assert.ok(REGISTERED_CHANNELS.includes(autoclawIntlChannel), 'autoclawintl 未注册进聚合层')
+  // 已删渠道不许再出现在聚合层（PR #502 审核：重叠 + 敏感能力，整个删掉）
+  for (const gone of ['officeace', 'autoclaw', 'autoclawintl', 'loomy', 'minimaxintl']) {
+    assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
+  }
 })
 
 test('authorize 立刻返回（不 await 用户登录）', async () => {
@@ -76,8 +76,8 @@ test('authorize 立刻返回（不 await 用户登录）', async () => {
   }
 })
 
-test('callback 兑现凭据：success + channel 归属 + 双写落盘', async () => {
-  const { loadCredential } = await import('../src/shared.mjs')
+test('callback 兑现凭据：success + channel 归属 + 进内存缓存', async () => {
+  const { _internal } = await import('../src/aggregate.mjs')
   for (const channel of REGISTERED_CHANNELS) {
     const plugin = await build(channel)
     for (const method of plugin.auth.methods) {
@@ -87,8 +87,9 @@ test('callback 兑现凭据：success + channel 归属 + 双写落盘', async ()
       // ⚠️ channel 字段是账号槽归属的唯一判据（loader/refresh/checkin 都按它分发）
       assert.equal(outcome.channel, channel.id, `${method.label}: 登录回调的 channel 应是本渠道`)
       assert.ok(REGISTERED_CHANNELS.some((c) => c.id === outcome.channel), `${method.label}: channel 未注册`)
-      // 旁路双写（兜底路径的凭据源）
-      assert.notEqual(loadCredential(outcome.channel), null, `${outcome.channel}: 旁路凭据未落盘`)
+      // ⚠️ v0.5.0 起**没有旁路凭据文件**（PR #502 审核第 2 条）：凭据进内存缓存，
+      //    落盘只走 magpie 账号槽（client.auth.set）。
+      assert.notEqual(_internal.cachedCredentialOf(channel), undefined, `${outcome.channel}: 登录后应进内存缓存`)
       // FAKE 凭据字段被完整带进账号槽（magpie 存的就是这个对象）
       assert.equal(outcome.fake, true, `${method.label}: 凭据字段未随账号槽存储`)
     }

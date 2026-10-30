@@ -1,11 +1,13 @@
-// 账号池（凭据进 magpie 账号槽）的行为契约。
+// 账号池与分派的行为契约（v0.5.0 重写版）。
 //
-// 核心主张：一个供应商、多渠、多账号 —— getAuth 的账号槽决定用哪份凭据；
-// 旁路文件只做兜底；去重闸按凭据身份（refresh_token）键控，多账号不串号。
+// 核心主张：一个供应商 = 一个渠道；凭据只存 magpie 账号槽（`getAuth`）；
+// 插件侧凭据只在内存里流转（**不写任何宿主文件**）；续期去重闸按凭据身份键控。
 //
-// ⚠️ 状态隔离：**每个用例**独立 HOME + 全新聚合层模块实例（URL 加查询串
-// 绕过 ESM 缓存）。shared.mjs 的目录已改惰性求值，新 HOME 才真正生效；
-// 聚合层的旁路内存缓存是模块级的，不换实例会跨用例泄漏。
+// ⚠️ 状态隔离：**每个用例**独立 HOME + 全新聚合层模块实例（URL 加查询串绕过
+//    ESM 缓存）—— `memoryCredentials` / `renewInFlight` 都是模块级的，
+//    不换实例会跨用例泄漏。
+// ⚠️ v0.5.0 起被测渠道只能用保留的五条（astudio / accio / lobsterai /
+//    magicrew / magicrew-intl）；officeace / minimaxintl 等已从包里删除。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,18 +15,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { webcrypto } from 'node:crypto'
 
 const originalHome = process.env.USERPROFILE
 
-/** 合法的 DPoP P-256 私钥（officeace 续期路径会 importKey+签名，随手编的 JWK 在 importKey 就炸）。 */
-const dpopJwk = await webcrypto.subtle
-  .generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
-  .then((k) => webcrypto.subtle.exportKey('jwk', k.privateKey))
-
 let seq = 0
 /**
- * 独立沙箱里构建插件：新 HOME → 全新 aggregate 实例 → build 完成后回调。
+ * 独立沙箱里构建插件：新 HOME → 全新 aggregate 实例 → 回调。
  * 用完清理沙箱并还原 HOME。
  */
 async function isolated(fn) {
@@ -32,14 +28,13 @@ async function isolated(fn) {
   const previousAuthPath = process.env.DSH_HUB_AUTH_PATH
   process.env.USERPROFILE = sandbox
   process.env.HOME = sandbox
-  // 账号槽路径同时跟着沙箱走（setup.mjs 设过 env，env 优先级高于 HOME）
   process.env.DSH_HUB_AUTH_PATH = join(sandbox, '.config', 'magpie', 'plugin-auth.json')
   const q = `?v=${++seq}-${Date.now()}`
   const url = pathToFileURL(join(import.meta.dirname, '..', 'src', 'aggregate.mjs')).href + q
   try {
     const mod = await import(url)
-    /** 建某个供应商实例（默认 officeace；一个渠道一个供应商）。 */
-    const build = async (input = {}, options = {}, channelId = 'officeace') => {
+    /** 建某个供应商实例（默认 astudio）。 */
+    const build = async (input = {}, options = {}, channelId = 'astudio') => {
       const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === channelId)
       const plugin = await mod.makeHubPlugin(channel)(input, options)
       const cfg = {}
@@ -56,359 +51,288 @@ async function isolated(fn) {
   }
 }
 
-test.after = () => {
-  // aftereach 由 isolated 自己还原；此处兜底（最后一个用例异常退出时）
+/** 收集 toast 的 client stub（登录反馈改走 toast，不再有系统通知）。 */
+const toastClient = () => {
+  const toasts = []
+  const saved = []
+  return {
+    toasts,
+    client: {
+      app: { log: async () => {} },
+      auth: { set: async (arg) => { saved.push(arg) }, get: async () => undefined },
+      tui: { showToast: async (arg) => { toasts.push(arg?.body?.message ?? '') } },
+      config: { get: async () => ({ data: {} }) },
+    },
+    saved,
+  }
 }
 
-/** 构造一个 officeace 账号的 auth（magpie 存储形态：type:'oauth' + channel）。 */
-const officeaceAuth = (over = {}) => ({
+const CHAT_BODY = (model = 'hub-astudio/spark-x') => JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }] })
+
+const astudioAuth = (over = {}) => ({
   type: 'oauth',
-  channel: 'officeace',
-  access: 'AK', secret: 'SK', securityToken: 'ST', projectId: '',
-  expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-  refreshToken: 'RT-1',
-  dpopPrivateJwk: dpopJwk,
-  modelAppKey: 'key-1', modelAppSecret: 'sec-1',
-  modelApiUrlBase: 'gw.example.com',
+  channel: 'astudio',
+  accessToken: 'AT-1',
+  ssoSessionId: 'sso',
+  accountId: 'acc-1',
   ...over,
 })
 
-/** officeace auth → 裸凭据（写旁路文件用）。 */
-const bareOf = (auth) => {
-  const { type, channel, expires, accountId, ...bare } = auth
-  return bare
-}
-
-const CHAT_BODY = (model = 'officeace/glm-5.3') => JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }] })
-
-/** 拦全局 fetch；记录每次调用（officeace 的头是普通对象，直接读属性）。 */
-const stubFetch = (respond) => {
-  const calls = []
-  const original = globalThis.fetch
-  globalThis.fetch = async (input, init) => {
-    const url = typeof input === 'string' ? input : input.url
-    calls.push({ url, init })
-    return respond ? respond({ url, init, calls }) : new Response('{"choices":[]}', { status: 200 })
-  }
-  return { calls, restore: () => { globalThis.fetch = original } }
-}
-
 // ── 到期时刻解析（纯函数）───────────────────────────────────────────────
 
-test('expiresMsOf：officeace ISO 串 / minimaxintl 毫秒串 / accio 毫秒数字 / 秒级兼容', async () => {
+test('expiresMsOf：ISO 串 / 毫秒串 / 毫秒数字 / 秒级兼容；无字段 → undefined', async () => {
   await isolated(async ({ mod }) => {
     const { expiresMsOf } = mod
     assert.equal(expiresMsOf({ expiresAt: '2026-10-25T12:00:00Z' }), Date.parse('2026-10-25T12:00:00Z'))
     assert.ok(expiresMsOf({ expires_at: String(Date.now() + 3600_000) }) > Date.now())
     assert.ok(expiresMsOf({ expires_at: Date.now() + 3600_000 }) > Date.now())
     assert.ok(expiresMsOf({ expires_at: String(Math.floor((Date.now() + 3600_000) / 1000)) }) > Date.now(), '秒级数字串要 ×1000')
-    assert.equal(expiresMsOf({ fake: true }), undefined, 'astudio 无到期字段 → undefined')
+    assert.equal(expiresMsOf({ fake: true }), undefined, '无到期字段 → undefined')
   })
 })
 
 // ── loader：按账号槽取凭据 ───────────────────────────────────────────────
 
 test('loader 用 getAuth 账号的凭据（同渠道多账号 = magpie 换槽即换号）', async () => {
-  await isolated(async ({ build }) => {
-    const stub = stubFetch()
-    try {
-      const plugin = await build()
-      const { fetch: pluginFetch } = await plugin.auth.loader(async () => officeaceAuth({ modelAppKey: 'key-ACCOUNT-2', modelAppSecret: 'sec-2' }))
-      await pluginFetch('https://x/chat/completions', { method: 'POST', body: CHAT_BODY() })
-      assert.equal(stub.calls[0].init.headers.authorization,
-        'Basic ' + Buffer.from('key-ACCOUNT-2:sec-2').toString('base64'),
-        '发上游的凭据必须来自账号槽（而不是旁路文件里那份）')
-    } finally {
-      stub.restore()
-    }
-  })
-})
-
-test('loader：账号槽属于别的渠道 → 旁路兜底（多渠供应商轮到别的账号）', async () => {
   await isolated(async ({ build, mod }) => {
-    mod // shared 的 saveCredential 经 aggregate 实例链（同沙箱目录）
-    const { saveCredential } = await import('../src/shared.mjs')
-    saveCredential('officeace', bareOf(officeaceAuth({ modelAppKey: 'key-SIDECAR', modelAppSecret: 'sec-S' })))
-    const stub = stubFetch()
+    const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === 'astudio')
+    const seen = []
+    const original = channel.chat
+    channel.chat = async (credential) => {
+      seen.push(credential.accessToken)
+      return Response.json({ ok: true })
+    }
     try {
-      const plugin = await build()
-      const { fetch: pluginFetch } = await plugin.auth.loader(async () => ({
-        type: 'oauth', channel: 'minimaxintl', access_token: 'mm', refresh_token: 'mr', expires_at: String(Date.now() + 3600_000),
-      }))
-      await pluginFetch('https://x/chat/completions', { method: 'POST', body: CHAT_BODY() })
-      assert.equal(stub.calls[0].init.headers.authorization,
-        'Basic ' + Buffer.from('key-SIDECAR:sec-S').toString('base64'),
-        '渠道不匹配时用旁路凭据把请求发出去')
+      const plugin = await build({}, { notify: false })
+      let { fetch: pluginFetch } = await plugin.auth.loader(async () => astudioAuth({ accessToken: 'AT-1' }))
+      await pluginFetch('http://127.0.0.1/x', { method: 'POST', body: CHAT_BODY() })
+      ;({ fetch: pluginFetch } = await plugin.auth.loader(async () => astudioAuth({ accessToken: 'AT-2', accountId: 'acc-2' })))
+      await pluginFetch('http://127.0.0.1/x', { method: 'POST', body: CHAT_BODY() })
+      assert.deepEqual(seen, ['AT-1', 'AT-2'], '每次都用当前槽的凭据')
     } finally {
-      stub.restore()
+      channel.chat = original
     }
   })
 })
 
-test('loader：无账号也无旁路 → 401 + 明确未登录文案（不炸会话）', async () => {
+test('loader：账号槽属于别的渠道 → 401（v0.5.0 起没有旁路兜底了）', async () => {
   await isolated(async ({ build }) => {
-    const plugin = await build()
+    const plugin = await build({}, { notify: false })
+    const { fetch: pluginFetch } = await plugin.auth.loader(async () => ({
+      // magicrew 是另一个供应商的账号 —— 本实例是 astudio，绝不能用它
+      type: 'oauth', channel: 'magicrew', access_token: 'OTHER',
+    }))
+    const response = await pluginFetch('http://127.0.0.1/x', { method: 'POST', body: CHAT_BODY() })
+    // ⚠️ 关键规则：别的渠道的凭据**不许**拿来用（旧版会掉进旁路兜底把别人的 token 发出去）
+    assert.equal(response.status, 401, '别的渠道的凭据不能顶用')
+    const payload = await response.json()
+    assert.match(payload.error.message, /未登录/)
+  })
+})
+
+test('loader：无账号也无内存凭据 → 401 + 明确未登录文案（不炸会话）', async () => {
+  await isolated(async ({ build }) => {
+    const plugin = await build({}, { notify: false })
     const { fetch: pluginFetch } = await plugin.auth.loader(async () => undefined)
-    const response = await pluginFetch('https://x/chat/completions', { method: 'POST', body: CHAT_BODY() })
+    const response = await pluginFetch('http://127.0.0.1/x', { method: 'POST', body: CHAT_BODY() })
     assert.equal(response.status, 401)
     const payload = await response.json()
     assert.match(payload.error.message, /未登录/)
   })
 })
 
-// ── refresh：按 auth.channel 分发 + 凭据身份键控 ──────────────────────────
+// ── refresh：按 auth.channel 分发 ─────────────────────────────────────────
 
-/** STS/validate 双路由 stub（onTokens 回调记录 tokens 请求体，供并发断言）。 */
-const stsStub = (map, onTokens) => stubFetch(({ url, init }) => {
-  if (url.includes('oauth2/tokens')) {
-    onTokens?.(String(init?.body))
-    return new Response(JSON.stringify({
-      credentials: {
-        access_key_id: map.nextAccess(), secret_access_key: 'S', security_token: 'T',
-        project_id: '', expiration: new Date(Date.now() + 7200_000).toISOString(),
-      },
-      refresh_token: map.nextToken(),
-    }), { status: 200 })
-  }
-  if (url.includes('client-permission-validate')) {
-    return new Response(JSON.stringify({
-      subscription: { model_info: { model_auth_info: { model_app_key: 'k', model_app_secret: 's' }, model_api_url_base: 'gw.example.com' } },
-    }), { status: 200 })
-  }
-  return new Response('{}', { status: 200 })
+test('refresh：别的渠道的 auth → undefined（不动登录）', async () => {
+  await isolated(async ({ build }) => {
+    const plugin = await build({}, { notify: false })
+    const next = await plugin.auth.refresh({ type: 'oauth', channel: 'magicrew', access_token: 'X' })
+    assert.equal(next, undefined)
+  })
 })
 
-test('refresh 按 auth.channel 分发并返回续期后的 auth（magpie 会保存它）', async () => {
+test('refresh：astudio 无 refresh_token → undefined（不假装能续期）', async () => {
+  await isolated(async ({ build }) => {
+    const plugin = await build({}, { notify: false })
+    // astudio 的凭据字段是 accessToken（identityOf 只认 refreshToken/refresh_token/access/access_token）
+    const next = await plugin.auth.refresh(astudioAuth())
+    assert.equal(next, undefined, 'identityOf 为空 → 不碰 magpie 的登录')
+  })
+})
+
+test('refresh：accio 有 access_token → 走渠道续期，结果回给 magpie 保存', async () => {
   await isolated(async ({ build, mod }) => {
-    const stub = stsStub({ nextAccess: () => 'AK2', nextToken: () => 'RT-2' })
+    const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === 'accio')
+    const original = channel.refresh
+    channel.refresh = async (bare) => ({ ...bare, access_token: 'NEW-TOKEN' })
     try {
-      const plugin = await build()
-      const next = await plugin.auth.refresh(officeaceAuth())
-      assert.equal(next.type, 'oauth', '续期结果保持 auth 形状（magpie 原样保存）')
-      assert.equal(next.channel, 'officeace', 'channel 字段不能丢（丢了下次分发就错了）')
-      assert.equal(next.access, 'AK2')
-      assert.equal(next.refreshToken, 'RT-2')
-      assert.equal(next.modelAppKey, 'k', 'modelInfo 一并合并')
-      // 旁路同步到新凭据（目录/兜底路径靠它）
-      const { loadCredential } = await import('../src/shared.mjs')
-      assert.equal(loadCredential('officeace').refreshToken, 'RT-2')
-      void mod
+      // ⚠️ 必须建 **accio** 实例：build 默认是 astudio，stub 的却是 accio 的 channel
+      const plugin = await build({}, { notify: false }, 'accio')
+      const next = await plugin.auth.refresh({
+        type: 'oauth', channel: 'accio', access_token: 'OLD', refresh_token: 'RT-1',
+      })
+      assert.equal(next.access_token, 'NEW-TOKEN')
+      assert.equal(next.channel, 'accio', 'channel 字段不能丢（丢了下次分发就错了）')
     } finally {
-      stub.restore()
+      channel.refresh = original
     }
   })
 })
 
-test('refresh：同渠道两个账号并发续期不串号（按 refresh_token 键控）', async () => {
-  await isolated(async ({ build }) => {
-    const bodies = []
-    const stub = stsStub({
-      nextAccess: () => 'AK-' + (bodies.length + 1),
-      nextToken: () => 'RT-' + (bodies.length + 1),
-    }, (body) => bodies.push(body))
+test('refresh：同一凭据并发只续一次（去重闸按凭据身份键控）', async () => {
+  await isolated(async ({ build, mod }) => {
+    const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === 'accio')
+    let calls = 0
+    const original = channel.refresh
+    channel.refresh = async (bare) => {
+      calls += 1
+      await new Promise((r) => setTimeout(r, 30))
+      return { ...bare, access_token: 'NEW' }
+    }
     try {
-      const plugin = await build()
-      const [a, b] = await Promise.all([
-        plugin.auth.refresh(officeaceAuth({ refreshToken: 'RT-A' })),
-        plugin.auth.refresh(officeaceAuth({ refreshToken: 'RT-B' })),
+      const plugin = await build({}, { notify: false }, 'accio')
+      const auth = { type: 'oauth', channel: 'accio', access_token: 'OLD', refresh_token: 'RT-SAME' }
+      const results = await Promise.all([
+        plugin.auth.refresh({ ...auth }),
+        plugin.auth.refresh({ ...auth }),
+        plugin.auth.refresh({ ...auth }),
       ])
-      assert.equal(bodies.filter((x) => x.includes('RT-A')).length, 1, '账号 A 的 refresh_token 只被消费一次')
-      assert.equal(bodies.filter((x) => x.includes('RT-B')).length, 1, '账号 B 的 refresh_token 只被消费一次')
-      assert.ok(a.access !== b.access, `两个账号各自拿到自己的续期结果（got ${a.access}/${b.access}）`)
+      assert.equal(calls, 1, '同一 refresh_token 的并发续期必须共享一次在途请求（否则第二个去消费已作废的 token）')
+      assert.ok(results.every((r) => r?.access_token === 'NEW'))
     } finally {
-      stub.restore()
+      channel.refresh = original
     }
   })
 })
 
-test('refresh：astudio（无 refresh_token）与未知渠道 → undefined（不动登录）', async () => {
-  await isolated(async ({ build }) => {
-    const plugin = await build()
-    assert.equal(await plugin.auth.refresh({ type: 'oauth', channel: 'astudio', accessToken: 'x' }), undefined)
-    assert.equal(await plugin.auth.refresh({ type: 'oauth', channel: 'nope' }), undefined)
-  })
-})
+// ── checkin：按账号槽分发 ────────────────────────────────────────────────
 
-// ── checkin / usage：按账号 ─────────────────────────────────────────────
-
-test('checkin 按账号槽的渠道分发（officeace 账号 → V11 bonus/claim）', async () => {
-  await isolated(async ({ build }) => {
-    let claimCalls = 0
-    const stub = stubFetch(({ url }) => {
-      if (url.includes('/v1/subscription/bonus/claim')) {
-        claimCalls += 1
-        return new Response(JSON.stringify({
-          bonus_skus: [{ activity_id: 'daily', activity_name: '每日签到', points: 1000 }],
-        }), { status: 200, headers: { 'content-type': 'application/json' } })
-      }
-      return new Response('{}', { status: 200 })
-    })
+test('checkin 按账号槽的渠道分发（本渠道才签）', async () => {
+  await isolated(async ({ build, mod }) => {
+    const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === 'lobsterai')
+    const original = channel.checkin
+    channel.checkin = async () => ({ outcome: 'claimed', credit: 30, message: 'ok' })
     try {
-      const plugin = await build()
-      const outcome = await plugin.auth.checkin(async () => officeaceAuth())
-      assert.equal(claimCalls, 1, '签到请求必须发到该账号渠道的 bonus/claim')
-      assert.equal(outcome.outcome, 'claimed')
-      assert.equal(outcome.credit, 1000)
+      // ⚠️ 建 lobsterai 实例（build 默认 astudio）
+      const plugin = await build({}, { notify: false }, 'lobsterai')
+      const own = await plugin.auth.checkin(async () => ({ type: 'success', channel: 'lobsterai', access_token: 'T' }))
+      assert.equal(own.outcome, 'claimed')
+      assert.equal(own.credit, 30)
     } finally {
-      stub.restore()
+      channel.checkin = original
     }
   })
 })
 
-test('usage 只出本供应商渠道的窗口（astudio 供应商 → AStudio 的窗口）', async () => {
+test('无凭据 → 签到报 inactive（不把卡片涂红）', async () => {
   await isolated(async ({ build }) => {
-    const stub = stubFetch(() => new Response('{"code":0,"data":{}}', { status: 200, headers: { 'content-type': 'application/json' } }))
-    try {
-      const plugin = await build({}, {}, 'astudio')
-      const usage = await plugin.auth.usage(async () => ({ type: 'oauth', channel: 'astudio', accessToken: 'x', ssoSessionId: 's' }))
-      assert.ok(usage.windows.length > 0)
-      for (const w of usage.windows) assert.match(w.name, /AStudio/, `不该出现别的渠道的桶：${w.name}`)
-    } finally {
-      stub.restore()
-    }
+    const plugin = await build({}, { notify: false })
+    const outcome = await plugin.auth.checkin(async () => undefined)
+    assert.equal(outcome.outcome, 'inactive')
+    assert.match(outcome.message, /未登录/)
   })
 })
 
-test('无账号也无旁路 → 签到报 inactive（不把卡片涂红）', async () => {
-  await isolated(async ({ build }) => {
-    const plugin = await build()
-    const checkin = await plugin.auth.checkin()
-    assert.equal(checkin.outcome, 'inactive', '独立沙箱无凭据 → inactive')
-    assert.match(checkin.message, /未登录/)
+// ── 登录：新账号 / 重复 ──────────────────────────────────────────────────
+
+/** 建一个 login 流程已打桩的插件（stub channel.beginLogin）。 */
+const loginHarness = async ({ mod, client, accountId = 'A' }) => {
+  const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === 'astudio')
+  const original = channel.beginLogin
+  channel.beginLogin = async () => ({
+    url: 'https://auth.example/authorize',
+    instructions: '在浏览器里完成登录',
+    result: Promise.resolve({
+      accessToken: 'AT-NEW',
+      ssoSessionId: 'sso',
+      // ⚠️ resolveAccountId 优先用 nickname，没有才退回渠道显示名 ——
+      //    要让「重复登录」命中预置槽，mock 必须带 nickname
+      nickname: accountId,
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    }),
   })
-})
+  const plugin = await mod.makeHubPlugin(channel)({ client }, { notify: false })
+  const cfg = {}
+  await plugin.config(cfg)
+  return { plugin, channel, restore: () => { channel.beginLogin = original } }
+}
 
-// ── 登录回调写账号槽（saveAuth 透传给 magpie client）─────────────────────
-
-test('重复登录仍未过期的账号 → 弹「账号重复」且**不覆盖原账号槽**', async () => {
-  await isolated(async ({ build, sandbox }) => {
-    const toasts = []
-    const saved = []
-    const { officeaceChannel } = await import('../src/officeace.mjs')
-    const stubCred = bareOf(officeaceAuth())
-    // 预置：magpie 里已有同一渠道的账号槽（accountId 同为 OfficeAce，凭据仍有效）
-    const fakeAuthJson = JSON.stringify({
-      'hub-officeace': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() + 3600_000 },
-    })
-    const { writeFileSync, mkdirSync } = await import('node:fs')
-    const authDir = join(sandbox, '.config', 'magpie')
-    mkdirSync(authDir, { recursive: true })
-    writeFileSync(join(authDir, 'plugin-auth.json'), fakeAuthJson, 'utf8')
-
-    const plugin = await build({
-      notify: false, // 不弹 Windows 系统通知（TUI toast 照常，供断言）
-      client: {
-        auth: { set: async (call) => { saved.push(call) } },
-        tui: { showToast: async (p) => toasts.push(p) },
-      },
-    })
-    const original = officeaceChannel.beginLogin
-    officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
+test('登录新账号 → toast「登录成功（新增账号）」', async () => {
+  await isolated(async ({ mod }) => {
+    const t = toastClient()
+    const h = await loginHarness({ mod, client: t.client, accountId: '新账号' })
     try {
-      const method = plugin.auth.methods[0]
-      const handle = await method.authorize()
+      const handle = await h.plugin.auth.methods[0].authorize()
       await handle.callback()
-      assert.equal(toasts.length, 1, '重复登录必须提示「账号重复」')
-      const msg = toasts[0]?.body?.message ?? ''
-      assert.match(msg, /OfficeAce/, 'toast 带渠道名')
-      assert.match(msg, /账号重复/, '同账号重登 = 明确的「账号重复」提示')
-      // ⚠️ 核心：未过期的重复登录**不覆盖原账号槽**（不写 magpie auth）
-      assert.equal(saved.length, 0, '未过期的重复登录不能覆盖原账号槽')
+      await new Promise((r) => setTimeout(r, 50))
+      assert.ok(t.toasts.some((m) => /登录成功/.test(m)), `应弹登录成功，实际：${t.toasts.join(' | ')}`)
+      assert.ok(t.saved.length >= 1, '凭据要交给 magpie 账号槽（client.auth.set）')
+      assert.equal(t.saved[0].body.type, 'success')
+      assert.equal(t.saved[0].body.channel, 'astudio')
     } finally {
-      officeaceChannel.beginLogin = original
+      h.restore()
     }
   })
 })
 
-test('重复登录已过期的账号 → 弹「已更新登录（已续期）」且**覆盖写入**', async () => {
-  await isolated(async ({ build, sandbox }) => {
-    const toasts = []
-    const saved = []
-    const { officeaceChannel } = await import('../src/officeace.mjs')
-    const stubCred = bareOf(officeaceAuth())
-    // 预置：账号槽存在，但凭据已过期
-    const fakeAuthJson = JSON.stringify({
-      'hub-officeace': { type: 'success', channel: 'officeace', accountId: 'OfficeAce', expires: Date.now() - 3600_000 },
-    })
+test('重复登录一个仍未过期的账号 → toast「账号重复」且不覆盖原槽', async () => {
+  await isolated(async ({ mod, sandbox }) => {
+    const t = toastClient()
     const { writeFileSync, mkdirSync } = await import('node:fs')
-    const authDir = join(sandbox, '.config', 'magpie')
-    mkdirSync(authDir, { recursive: true })
-    writeFileSync(join(authDir, 'plugin-auth.json'), fakeAuthJson, 'utf8')
-
-    const plugin = await build({
-      notify: false,
-      client: {
-        auth: { set: async (call) => { saved.push(call) } },
-        tui: { showToast: async (p) => toasts.push(p) },
+    mkdirSync(join(sandbox, '.config', 'magpie'), { recursive: true })
+    writeFileSync(process.env.DSH_HUB_AUTH_PATH, JSON.stringify({
+      'hub-astudio': {
+        type: 'success', channel: 'astudio', accountId: 'A',
+        accessToken: 'AT-OLD', expires: Date.now() + 3600_000,
       },
-    })
-    const original = officeaceChannel.beginLogin
-    officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
+    }), 'utf8')
+    const h = await loginHarness({ mod, client: t.client, accountId: 'A' })
     try {
-      const method = plugin.auth.methods[0]
-      const handle = await method.authorize()
+      const handle = await h.plugin.auth.methods[0].authorize()
       await handle.callback()
-      assert.equal(toasts.length, 1, '过期账号重新登录要提示')
-      assert.match(toasts[0]?.body?.message ?? '', /已更新登录|已续期/)
-      assert.equal(saved.length, 1, '过期的账号要正常写入续期')
+      await new Promise((r) => setTimeout(r, 50))
+      assert.equal(t.saved.length, 0, '未过期的重复登录不该覆盖原槽')
+      assert.ok(t.toasts.some((m) => /账号重复/.test(m)), `应提示账号重复，实际：${t.toasts.join(' | ')}`)
     } finally {
-      officeaceChannel.beginLogin = original
+      h.restore()
     }
   })
 })
 
-test('登录新账号 → 弹「登录成功（新增账号）」（不误报重复）', async () => {
-  await isolated(async ({ build, sandbox }) => {
-    const toasts = []
-    const { officeaceChannel } = await import('../src/officeace.mjs')
-    const stubCred = bareOf(officeaceAuth())
-    // 账号槽为空 —— 这是新账号
-    const fakeAuthJson = JSON.stringify({})
-    const { writeFileSync, mkdirSync } = await import('node:fs')
-    const authDir = join(sandbox, '.config', 'magpie')
-    mkdirSync(authDir, { recursive: true })
-    writeFileSync(join(authDir, 'plugin-auth.json'), fakeAuthJson, 'utf8')
-
-    const plugin = await build({
-      notify: false,
-      client: {
-        auth: { set: async () => {} },
-        tui: { showToast: async (p) => toasts.push(p) },
-      },
-    })
-    const original = officeaceChannel.beginLogin
-    officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
+test('登录回调把 auth 交给 magpie 的 client.auth.set（账号槽为唯一落盘处）', async () => {
+  await isolated(async ({ mod }) => {
+    const t = toastClient()
+    const h = await loginHarness({ mod, client: t.client, accountId: 'B' })
     try {
-      const method = plugin.auth.methods[0]
-      const handle = await method.authorize()
-      await handle.callback()
-      assert.equal(toasts.length, 1, '新账号登录也要提示')
-      assert.match(toasts[0]?.body?.message ?? '', /新增账号/)
+      const handle = await h.plugin.auth.methods[0].authorize()
+      const auth = await handle.callback()
+      assert.equal(auth.type, 'success')
+      assert.equal(auth.channel, 'astudio')
+      assert.equal(auth.accountId, 'B')
+      assert.equal(t.saved.length, 1)
+      assert.equal(t.saved[0].path.id, 'hub-astudio', '写的是本供应商的槽')
+      assert.equal(auth.accessToken, 'AT-NEW')
     } finally {
-      officeaceChannel.beginLogin = original
+      h.restore()
     }
   })
 })
 
-test('登录回调把 auth 交给 magpie 的 client.auth.set（账号槽为主存储）', async () => {
-  await isolated(async ({ build }) => {
-    const saved = []
-    const { officeaceChannel } = await import('../src/officeace.mjs')
-    const plugin = await build({ notify: false, client: { auth: { set: async (call) => { saved.push(call) } } } })
-    const stubCred = bareOf(officeaceAuth())
-    const originalBegin = officeaceChannel.beginLogin
-    officeaceChannel.beginLogin = async () => ({ url: 'https://auth.example', result: Promise.resolve(stubCred) })
+// ── authorize 契约：立刻返回 ──────────────────────────────────────────────
+
+test('authorize 立刻返回（不 await 用户登录 → 不会双向死锁）', async () => {
+  await isolated(async ({ mod }) => {
+    const t = toastClient()
+    const h = await loginHarness({ mod, client: t.client })
     try {
-      const method = plugin.auth.methods[0]
-      const handle = await method.authorize()
-      const outcome = await handle.callback()
-      assert.equal(saved.length, 1, 'client.auth.set 必须被调（账号槽存储）')
-      assert.equal(saved[0].path.id, 'hub-officeace')
-      assert.equal(saved[0].body.channel, 'officeace')
-      assert.ok(Number.isFinite(saved[0].body.expires), '带 expires（magpie 的到期管理靠它）')
-      assert.equal(outcome.channel, 'officeace')
+      const started = Date.now()
+      const handle = await h.plugin.auth.methods[0].authorize()
+      assert.ok(Date.now() - started < 2_000, 'authorize 不得等用户完成登录')
+      assert.equal(typeof handle.url, 'string')
+      assert.equal(handle.method, 'auto')
+      assert.equal(typeof handle.callback, 'function')
     } finally {
-      officeaceChannel.beginLogin = originalBegin
+      h.restore()
     }
   })
 })

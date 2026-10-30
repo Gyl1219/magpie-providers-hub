@@ -27,12 +27,8 @@
 // 与 DSH 的 `toAccioWireMessages` 同位）→ 再转 Gemini 信封（`serializeAccioMessages`）。
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { fetchWithRetry } from './minimax-transport.mjs'
-import { loadCredential, saveCredential } from './shared.mjs'
+import { fetchWithRetry } from './shared.mjs'
 
 export const CHANNEL_ID = 'accio'
 export const DISPLAY_NAME = 'Accio (阿里)'
@@ -96,19 +92,16 @@ const sgKOf = (requestId) => createHash('md5').update(requestId, 'utf8').digest(
 const messageIdOf = (requestId) =>
   createHash('md5').update(`${requestId}:${randomBytes(16).toString('hex')}`, 'utf8').digest('hex')
 
-/** utdid：装机级稳定 id（阿里网关用它做风控基线；缺失会吃到 200+风控拦截页）。 */
+/**
+ * utdid：装机级稳定 id（阿里网关用它做风控基线；缺失会吃到 200+风控拦截页）。
+ *
+ * ⚠️ v0.5.0 起**只放在进程内存**（`process.esk.accioUtdid`），不再写
+ *    `~/.config/magpie/accio-state.json` —— 插件不往 magpie 的配置目录写任何
+ *    文件（PR #502 审核第 2 条）。代价：magpie 重启后 utdid 换新 —— 阿里网关
+ *    只把它当风控基线，换新不拦（真机登录链路不依赖它的连续性）。
+ */
 function loadUtdid() {
-  const p = join(homedir(), '.config', 'magpie', 'accio-state.json')
-  try {
-    if (existsSync(p)) {
-      const parsed = JSON.parse(readFileSync(p, 'utf8'))
-      if (typeof parsed?.utdid === 'string' && parsed.utdid !== '') return parsed.utdid
-    }
-  } catch { /* 损坏就重生成 */ }
   const utdid = `accio-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`
-  try {
-    writeFileSync(p, JSON.stringify({ utdid }, null, 2), 'utf8')
-  } catch { /* 存不下来就进程内临时值 */ }
   return utdid
 }
 

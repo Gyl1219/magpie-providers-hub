@@ -1,51 +1,45 @@
-// 多供应商层：**一个插件，十个供应商**（每个供应商 = 一个渠道）。
+// 多供应商层：**一个插件，五条供应商**（每个供应商 = 一个渠道）。
 //
 // ## 形态：一个渠道一个供应商（v0.4.0 起）
 //
-// `makeHubPlugin(channel)` 为每个渠道造一个插件函数；`index.mjs` 导出十个
-// ⇒ magpie 里出现十条供应商（`hub-officeace`、`hub-astudio`…），各自登录/额度/
-// 开关/故障转移。模型 id 由 magpie 拼成 `hub-officeace/glm-5.3`（**渠道前缀已去掉**，
+// `makeHubPlugin(channel)` 为每个渠道造一个插件函数；`index.mjs` 导出五个
+// ⇒ magpie 里出现五条供应商（`hub-astudio`、`hub-accio`…），各自登录/额度/
+// 开关/故障转移。模型 id 由 magpie 拼成 `hub-astudio/glm-5.3`（**渠道前缀已去掉**，
 // 因为一个供应商只服务一个渠道）。
 //
 // 历史：v0.3.x 是「一个供应商 `providers-hub` 内部聚合十渠道」，模型 id 形如
 // `providers-hub/officeace/glm-5.3`。拆开的原因：magpie 的 failover / 单渠道开关
 // 都是 **provider 粒度**，聚合形态下二者都做不到（见 README「已知边界」）。
+// v0.5.0 起只保留五条：与社区 registry 现有插件重叠的五条已从包里删除，见 index.mjs 头注。
 //
-// ## 凭据：magpie 账号槽（多账号）
+// ## 凭据：只存 magpie 账号槽（多账号），插件侧只在内存里流转
 //
 // 每次登录 = 一个账号条目，auth 里带 `channel` 字段标记归属渠道 ——
 // 同渠道可挂多个账号（不再互相覆盖），magpie 网关在额度耗尽时自动换槽。
 // 旧版（聚合形态）在 `providers-hub*` 槽里的账号由 `migrateLegacySlots()` 一次性搬过来。
 //
-// ## 存储：账号槽为主，旁路文件为兜底（双写）
-//
-// - **主**：magpie 账号槽存 `{type:'oauth', channel, ...凭据, expires}` ——
-//   loader/refresh/checkin/usage 全部以 `getAuth()` 拿到的账号为口径；
-// - **兜底**：`~/.config/magpie/<channel>-credential.json` 旁路文件继续写
-//   （迁移前已登录的账号不至于失效；magpie 轮到**别的渠道**的账号槽时，
-//   请求靠它照常发出去 —— 旁路内容 = 最近一次成功使用的该渠道凭据）。
+// ⚠️⚠️ **v0.5.0 起插件不写任何宿主文件**（PR #502 审核第 2 条）：
+//   · 账号槽是唯一落盘位置（`client.auth.set`），magpie 自己的文件它自己写；
+//   · 插件侧只在 `memoryCredentials` 里缓存本进程见过的凭据，进程结束即消失；
+//   · 曾经那份「旁路凭据文件」已删 —— 它写在 magpie 的配置目录里且默认 0644，
+//     本机任何用户可读（yetone 在第 2 条里点名）。
+//   副作用：冷启动时 sweep 没有凭据，靠实例的 `authGetters` 向 magpie 要一次。
 //
 // ## 为什么去重闸按「凭据身份」而不是渠道 id 键控
 //
-// refresh_token 会轮换的渠道（minimaxintl / accio / officeace STS），同渠道
-// 两个账号并发续期是**合法**场景 —— 按渠道键控会让第二个账号共享第一个的
-// 续期结果（拿到别人的凭据）。按 `channel + refresh_token`（或 access）键控：
-// 同一凭据并发共享一个在途请求，不同凭据各走各的。
+// refresh_token 会轮换的渠道（如 accio），同渠道两个账号并发续期是**合法**场景 ——
+// 按渠道键控会让第二个账号共享第一个的续期结果（拿到别人的凭据）。
+// 按 `channel + refresh_token`（或 access）键控：同一凭据并发共享一个在途请求，
+// 不同凭据各走各的。
 
-import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
-import { spawn, spawnSync } from 'node:child_process'
-import { loadCredential, saveCredential, notSignedIn, untilText, readMagpieAuthEntries, readMagpieAuthSlots, debugLog, hubSwitchPath } from './shared.mjs'
-import { officeaceChannel } from './officeace.mjs'
+import { notSignedIn, untilText, readMagpieAuthSlots, readOwnAuthEntries, debugLog } from './shared.mjs'
 import { astudioChannel } from './astudio.mjs'
-import { minimaxintlChannel } from './minimaxintl.mjs'
 import { accioChannel } from './accio.mjs'
-import { autoclawChannel, autoclawIntlChannel } from './autoclaw.mjs'
-import { loomyChannel } from './loomy.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
-import { sanitizeXff } from './minimax-transport.mjs'
 
 /** 旧版（聚合形态）的供应商 id —— 账号槽迁移的读来源，别再拿去注册。 */
 const LEGACY_PROVIDER = 'providers-hub'
@@ -53,120 +47,30 @@ const LEGACY_PROVIDER = 'providers-hub'
 /** 新供应商 id 前缀：`hub-<渠道 id>`。⚠️ ASCII、发布后不可改（登录态/模型名按它认领）。 */
 const HUB_PREFIX = 'hub-'
 
-/**
- * 渠道显示名的少量覆盖（其余用渠道自己的 displayName）。
- * 供应商名会出现在 magpie 供应商列表、登录按钮、用量卡标题上。
- */
-const PROVIDER_NAME_OVERRIDES = {
-  officeace: '华为云 OfficeAce',
-}
+/** 渠道显示名的覆盖（当前五条都用渠道自己的 displayName，保留机制备用）。 */
+const PROVIDER_NAME_OVERRIDES = {}
 
-/** 所有注册进来的渠道。加渠道 = 往这里加一项（并在上面 import + index.mjs 导出）。 */
-const CHANNELS = [officeaceChannel, astudioChannel, minimaxintlChannel, accioChannel, autoclawChannel, autoclawIntlChannel, loomyChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel]
+/**
+ * 所有注册进来的渠道 —— **只有五条**。
+ *
+ * ⚠️ 与社区 registry 现有插件重叠的五条（OfficeAce / AutoClaw 国内+国际 /
+ *    Loomy / MiniMax 国际版）已在 v0.5.0 **从包里删除**（PR #502 审核意见）。
+ *    删代码而不只是「不注册」的两个理由：它们各自带着与本插件无关的敏感能力
+ *    （AutoClaw 的 DPAPI 解密他人凭据、MiniMax 国际版的 XFF 伪造），留着就是
+ *    给审核和使用者添加风险面。老用户改装对应的社区插件即可，README 有指引。
+ */
+const CHANNELS = [astudioChannel, accioChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel]
 
 /** 供应商 id / 显示名（一个渠道一个供应商）。 */
 export const providerIdOf = (channel) => `${HUB_PREFIX}${channel.id}`
 export const providerNameOf = (channel) => PROVIDER_NAME_OVERRIDES[channel.id] ?? channel.displayName
 export const PROVIDER_IDS = CHANNELS.map(providerIdOf)
 
+/** registry 条目列的就是这五个（旧名，工具与文档沿用）。 */
+export const DEFAULT_PROVIDER_IDS = PROVIDER_IDS
+
 // 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
 export { CHANNELS as REGISTERED_CHANNELS }
-
-// ── 与 registry 现有插件重叠的渠道：默认不注册（可开关打开）────────────────
-//
-// ⚠️ 社区审核（magpie-community/plugins PR #502，yetone）的原话：registry 里
-//    同一个订阅出现两个入口、两套登录、两套额度，「用户会搞不清该装哪个，出了
-//    问题也说不清是哪个插件的」。重叠的四/五个渠道：
-//
-//    | 本插件                 | registry 已有            | 包                       |
-//    |----------------------|------------------------|------------------------|
-//    | hub-officeace        | officeace              | officeace-auth           |
-//    | hub-autoclaw(intl)   | autoclaw / autoclaw-cn | opencode-autoclaw-auth   |
-//    | hub-loomy            | loomy                  | opencode-loomy-auth      |
-//    | hub-minimaxintl      | minimax-code-global    | opencode-minimax-auth    |
-//
-//    故这五个**默认不注册**（入口导出的是占位对象，magpie 不会把它当插件），
-//    registry 条目也只列不重叠的五个。要用它们：设环境变量打开，登录后照常。
-//    ⚠️ 代码留在包里不删 —— 已经登录的用户不会因为升级而掉线。
-export const OVERLAPPING_CHANNEL_IDS = ['officeace', 'autoclaw', 'autoclawintl', 'loomy', 'minimaxintl']
-
-/** 打开重叠渠道的开关（逗号分隔的渠道 id，或 `all`）。 */
-export const EXTRA_CHANNELS_ENV = 'MAGPIE_HUB_EXTRA_CHANNELS'
-
-/** 默认注册的渠道（不重叠的那几个）—— registry 条目列的就是这些。 */
-export const DEFAULT_PROVIDER_IDS = CHANNELS
-  .filter((c) => !OVERLAPPING_CHANNEL_IDS.includes(c.id))
-  .map(providerIdOf)
-
-/** 解析开关：{ all, ids }。空串 = 没开任何额外渠道。 */
-export function extraChannelsFrom(raw) {
-  const list = String(raw ?? '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean)
-  return { all: list.includes('all'), ids: new Set(list) }
-}
-
-/**
- * 开关文件（`~/.config/magpie/providers-hub.json`）里的值 → 逗号串。
- * 认两种形态：`"all"` 或 `["officeace", …]`；坏 JSON / 缺字段 = 没开。
- */
-export function extraChannelsFromFileRaw(fileRaw) {
-  if (!fileRaw) return ''
-  try {
-    const v = JSON.parse(String(fileRaw))?.extraChannels
-    if (v === 'all') return 'all'
-    if (Array.isArray(v)) return v.join(',')
-    if (typeof v === 'string') return v
-    return ''
-  } catch {
-    return ''
-  }
-}
-
-/** 环境变量与开关文件**取并集**（任一处写 all 即全开）。 */
-export function extraSwitchFrom(envRaw, fileRaw) {
-  const a = extraChannelsFrom(envRaw)
-  const b = extraChannelsFrom(extraChannelsFromFileRaw(fileRaw))
-  return {
-    all: a.all || b.all,
-    ids: new Set([...a.ids, ...b.ids]),
-  }
-}
-
-/** 读开关文件（只读；不存在 / 读不了 = 没开）。 */
-function readSwitchFileRaw() {
-  try {
-    return readFileSync(hubSwitchPath(), 'utf8')
-  } catch {
-    return ''
-  }
-}
-
-/**
- * 该渠道这次要不要注册成供应商。
- *
- * 两个开关取并集：环境变量 `MAGPIE_HUB_EXTRA_CHANNELS`（逗号分隔 id 或 all）
- * 和开关文件 `~/.config/magpie/providers-hub.json`（用户手工/工具创建，插件只读）。
- *
- * @param {string} channelId
- * @param {NodeJS.ProcessEnv} [env]
- * @param {string} [fileRaw] 开关文件内容；缺省真读磁盘（测试可注入）
- */
-export function channelRegistered(channelId, env = process.env, fileRaw) {
-  if (!OVERLAPPING_CHANNEL_IDS.includes(channelId)) return true
-  const { all, ids } = extraSwitchFrom(env?.[EXTRA_CHANNELS_ENV], fileRaw === undefined ? readSwitchFileRaw() : fileRaw)
-  return all || ids.has(String(channelId).toLowerCase())
-}
-
-/** 未注册渠道的占位值：**对象**导出，magpie 不会把它当成插件函数。 */
-export function disabledChannelMarker(channelId) {
-  return Object.freeze({
-    disabled: true,
-    providerId: providerIdOf({ id: channelId }),
-    reason: `与 magpie 社区 registry 里已有的插件重叠，默认不注册；设 ${EXTRA_CHANNELS_ENV}=${channelId}（或 all）后重启 magpie 即可启用`,
-  })
-}
 
 /** magpie 在到期前这么多毫秒调 auth.refresh（对齐各渠道 10 分钟临期口径）。 */
 const REFRESH_LEAD_MS = 10 * 60 * 1000
@@ -227,34 +131,34 @@ export function expiresMsOf(credential) {
 const identityOf = (credential) =>
   String(credential?.refreshToken ?? credential?.refresh_token ?? credential?.access ?? credential?.access_token ?? '')
 
-// ── 旁路文件（兜底）：内存缓存 + 磁盘 ────────────────────────────────────
+// ── 凭据：**只在内存里**，绝不落盘 ──────────────────────────────────────
+//
+// ⚠️ PR #502 审核（yetone）第 2 条：插件不得往 magpie 的配置目录写文件。
+//    旧实现在 magpie 的配置目录里为每个渠道写一份「旁路凭据」文件
+//    （`writeFileSync` 不指定 mode ⇒ 默认 umask 0644，本机任何用户可读），
+//    路径还用 `homedir()` 拼 —— 设了 `XDG_CONFIG_HOME` 或用便携版 magpie 时
+//    指的就不是 magpie 真正的目录。
+//    ⇒ 现在：**账号只存 magpie 账号槽**（`client.auth.set` / `getAuth`），
+//      插件侧最多在内存里缓存本进程见过的那份，进程结束即消失。
+const memoryCredentials = new Map()
 
-const sidecar = new Map()
-/** 最近一次写旁路的凭据身份（身份没变就不重复写盘 —— 请求热路径不做 IO）。 */
-const sidecarIdentity = new Map()
-
-function sidecarCredentialOf(channel) {
-  if (sidecar.has(channel.id)) return sidecar.get(channel.id)
-  const stored = loadCredential(channel.id)
-  if (stored) sidecar.set(channel.id, stored)
-  return stored
+/** 记住/更新本进程见过的凭据（纯内存，不触盘）。 */
+function rememberCredential(channel, credential) {
+  if (credential === undefined || credential === null) memoryCredentials.delete(channel.id)
+  else memoryCredentials.set(channel.id, credential)
+  return credential
 }
 
-/** 写旁路（仅当凭据身份变化时落盘；首次见到也写）。 */
-function writeSidecar(channel, credential) {
-  const identity = identityOf(credential)
-  sidecar.set(channel.id, credential)
-  if (sidecarIdentity.get(channel.id) === identity) return
-  // ⚠️ **写盘成功才记身份**：旧实现无条件记，于是「STS 续期成功、落盘却失败」
-  //    这一次的新 refresh_token 再也**没有第二次机会**落盘（下次 identity 相同
-  //    直接 return），盘上永远是已消费的旧 token → STS5.1806 永久作废
-  //    （真机 2026-10-29：OfficeAce 只能重新登录）。写失败要留着下次重试。
-  if (saveCredential(channel.id, credentialOfAuth(credential))) {
-    sidecarIdentity.set(channel.id, identity)
-  }
-}
+/** 本进程缓存里该渠道的凭据（冷启动为空 —— sweep 靠下面的 authGetters 补）。 */
+const cachedCredentialOf = (channel) => memoryCredentials.get(channel.id)
 
-// ── 续期：去重闸 + 双写落盘 ──────────────────────────────────────────────
+/**
+ * 每个供应商实例的 `getAuth`（模块级收集，供模块级 sweep 取凭据）。
+ * ⚠️ 插件是「每账号一份凭据」，sweep 没有 magpie 的调用栈，只能借实例的 getAuth。
+ */
+const authGetters = new Map()
+
+// ── 续期：去重闸 ────────────────────────────────────────────────────────
 
 /**
  * **聚合层级的续期去重闸**：同一凭据同一时刻只允许一个在途续期。
@@ -263,9 +167,9 @@ function writeSidecar(channel, credential) {
  *    同一账号的并发入口（loader 临期软续期 / chat 401 硬续期 / magpie refresh）
  *    共享同一个在途请求。
  *
- * ⚠️ refresh_token 一次性渠道（officeace STS）的「消费即落盘」纪律：
- *    渠道 refresh 的第二参 persist 回调只写**旁路**（此刻 modelInfo 还没合并，
- *    写账号槽会丢 channel 等字段）；账号槽在最终结果处一次写齐。
+ * ⚠️ refresh_token 一次性渠道的「消费即记住」纪律：渠道 refresh 的第二参
+ *    persist 回调只更新内存缓存；账号槽由 magpie 的 refresh 返回值和
+ *    `client.auth.set` 落定（插件不写任何宿主文件）。
  */
 const renewInFlight = new Map()
 
@@ -274,15 +178,14 @@ function gatedRenew(channel, current) {
   const pending = renewInFlight.get(key)
   if (pending !== undefined) return pending
   const bare = credentialOfAuth(current)
-  const task = channel.refresh(bare, (partial) => writeSidecar(channel, partial))
+  const task = channel.refresh(bare, (partial) => rememberCredential(channel, partial))
     .then((next) => {
       // current 是 auth（带 channel 字段）就合并回 auth 形状；是裸凭据就保持裸
       // ⚠️ type 认 'success'（我们写进账号槽的形状）与 'oauth'（社区插件形状）
       const merged = current?.type === 'oauth' || current?.type === 'success'
         ? { ...current, ...next }
         : next
-      writeSidecar(channel, merged)
-      return merged
+      return rememberCredential(channel, merged)
     })
     .finally(() => renewInFlight.delete(key))
   renewInFlight.set(key, task)
@@ -302,27 +205,23 @@ async function renewSoft(channel, current) {
   }
 }
 
-/** 旁路路径的取凭据 + 临期软续期（迁移前的账号走这条）。 */
+/** 内存缓存取凭据 + 临期软续期（没有 ⇒ 未登录；不再有磁盘兜底）。 */
 async function ensure(channel) {
-  let current = sidecarCredentialOf(channel)
+  let current = cachedCredentialOf(channel)
   if (!current) throw notSignedIn(`未登录：请先在插件里登录 ${channel.displayName}`)
   if (channel.expired?.(current)) current = await renewSoft(channel, current)
   return current
 }
 
-/**
- * 账号路径的取凭据 + 临期软续期。**账号是活的就顺带刷新旁路**
- * （旁路内容 = 最近一次成功使用的该渠道凭据 —— 目录/兜底路径靠它）。
- */
+/** 账号路径的取凭据 + 临期软续期（只更新内存，不写文件）。 */
 async function ensureAuth(channel, auth) {
   let current = auth
   if (channel.expired?.(auth)) current = await renewSoft(channel, auth)
-  writeSidecar(channel, current)
-  return current
+  return rememberCredential(channel, current)
 }
 
-/** 已登录渠道（旁路口径 —— 目录合并用；账号槽由 magpie 自管）。 */
-const signedIn = (channel) => Boolean(sidecarCredentialOf(channel))
+/** 本进程见过该渠道的凭据（内存口径 —— 目录/签到/额度共用）。 */
+const signedIn = (channel) => Boolean(cachedCredentialOf(channel))
 
 // ── 目录：单渠道目录，key 不带渠道前缀 ────────────────────────────────────
 
@@ -464,9 +363,11 @@ function buildSnapshot() {
   // 每渠道的 magpie 账号槽数：一个渠道一个供应商，槽的 key 形如 `hub-<渠道>` /
   // `hub-<渠道>#<slot>`。accountId 相同 = 原地更新（magpie 原生语义）；
   // 不同 accountId 并存 = 真多账号。
-  const slots = readMagpieAuthEntries()
+  // ⚠️ 只读**本插件自己**的槽（`hub-*` / `providers-hub*`）—— 别的供应商的 auth
+  //    连值都不碰（PR #502 审核第 3 条）。
+  const slots = readOwnAuthEntries()
   const channels = CHANNELS.map((channel) => {
-    const credential = sidecarCredentialOf(channel)
+    const credential = cachedCredentialOf(channel)
     const signedInNow = Boolean(credential)
     let expired
     if (signedInNow && typeof channel.expired === 'function') {
@@ -670,28 +571,29 @@ async function usageWindowsOf(channel, credential, extras = {}) {
 
 /** 该渠道在 magpie 里有没有账号槽（有 = 签到由 magpie 按账号调；没有 = 得自己补签）。 */
 function hasAccountSlot(channel) {
-  return readMagpieAuthEntries().some((entry) => entry.channel === channel.id)
+  // ⚠️ 只读本插件自己的槽（前缀过滤），别人的 auth 不经过这里。
+  return readOwnAuthEntries().some((entry) => entry.channel === channel.id)
 }
 
 /**
  * 旁路-only 渠道的每日补签（模块级 sweep 调用）。
  *
- * 一键导入的 AutoClaw 这类渠道没有走过 magpie 登录 ⇒ 没有账号槽 ⇒
- * magpie 永远不会为它调 checkin。旧版靠「任意账号签到顺带扫全渠道」兜住，
- * 拆成十个供应商后每个实例只看自己 —— 这条兜底必须搬到定时器里。
+ * 没有走过 magpie 登录 ⇒ 没有账号槽 ⇒ magpie 永远不会为它调 checkin。
  * 结果只写页面快照（不进任何账号的返回信息）。
+ *
+ * ⚠️ 凭据来源：本进程内存缓存为空时（冷启动），借**实例的 getAuth** 取一次
+ *   （`authGetters`），取不到就跳过 —— 不再有磁盘旁路可读。
  */
 async function sweepCheckins() {
   const tally = checkinTallyOf()
   for (const channel of CHANNELS) {
-    if (!channelRegistered(channel.id)) continue
     if (typeof channel.checkin !== 'function') continue
     if (!signedIn(channel)) continue
     if (hasAccountSlot(channel)) continue
     const cached = tally.get(channel.id)
     if (cached !== undefined && cached.outcome !== 'failed') continue
     try {
-      const outcome = await channel.checkin(sidecarCredentialOf(channel), { xff: sweepState.xff, proxy: sweepState.proxy })
+      const outcome = await channel.checkin(cachedCredentialOf(channel))
       tally.set(channel.id, {
         channel: channel.displayName,
         outcome: outcome.outcome,
@@ -720,8 +622,10 @@ export const _internal = {
     writeSnapshot()
   },
   resetMigrations: () => migrationsStarted.clear(),
-  /** 测试用：直接驱动旁路落盘（对象导出，不会被 magpie 当成供应商）。 */
-  writeSidecar: (channel, credential) => writeSidecar(channel, credential),
+  /** 测试用：直接喂一份内存凭据（不再落盘，见 memoryCredentials）。 */
+  rememberCredential: (channel, credential) => rememberCredential(channel, credential),
+  /** 测试用：读回内存里的凭据（替代旧的磁盘旁路断言）。 */
+  cachedCredentialOf: (channel) => cachedCredentialOf(channel),
   /** 测试里前面用过 notify:false（会关掉快照写入），这里显式打开。 */
   enableSnapshotWrites: () => { snapshotWritesDisabled = false },
 }
@@ -742,7 +646,9 @@ async function migrateLegacySlots(authSet, channel, providerId) {
   const task = (async () => {
     try {
       if (readMagpieAuthSlots(providerId).length > 0) return
-      const legacy = readMagpieAuthEntries(LEGACY_PROVIDER).filter((entry) => entry.channel === channel.id)
+      // ⚠️ 只读**旧版本插件自己的槽**（`providers-hub*`）；withValue 是因为要整份复制。
+      const legacy = readOwnAuthEntries({ providerId: LEGACY_PROVIDER, withValue: true })
+        .filter((entry) => entry.channel === channel.id)
       for (const entry of legacy) {
         try {
           await authSet({ path: { id: providerId }, body: entry.value })
@@ -763,21 +669,25 @@ async function migrateLegacySlots(authSet, channel, providerId) {
  */
 async function sweepAllChannels() {
   for (const each of CHANNELS) {
-    // ⚠️ 默认不注册的渠道（与 registry 重叠那五个）连 sweep 也不跑：
-    //    「默认不注册」不是只藏卡片 —— 不扫额度、不补签、不出现在快照里，
-    //    否则网络请求照发，等于后门注册（PR #502 审核语义）。
-    if (!channelRegistered(each.id)) continue
+    // ⚠️ 凭据来源只有两条：本进程内存缓存，或**该实例的 getAuth**（冷启动用）。
+    //    不再有磁盘旁路可读（v0.5.0 起插件不写任何宿主文件）。
+    const getAuth = authGetters.get(each.id)
+    if (typeof getAuth === 'function') {
+      let auth
+      try { auth = await getAuth() } catch { auth = undefined }
+      if (authOfChannel(auth, each)) {
+        try { await ensureAuth(each, auth) } catch { /* 续期失败沿用原凭据 */ }
+      }
+    }
     if (!signedIn(each)) continue
-    // ⚠️ 走 ensure（临期软续期）：AutoClaw 的 access_token 只活 24h，
-    //    旁路凭据不续期的话卡片第二天就报「额度查询失败」。
     let credential
     try {
       credential = await ensure(each)
     } catch {
-      credential = sidecarCredentialOf(each)
+      credential = undefined
     }
     if (credential === undefined) continue
-    const eachWindows = await usageWindowsOf(each, credential, { xff: sweepState.xff, proxy: sweepState.proxy })
+    const eachWindows = await usageWindowsOf(each, credential, {})
     snapshotCache.buckets.set(each.id, eachWindows)
   }
   await sweepCheckins()
@@ -805,67 +715,15 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
    * 「no fs writes, child_process, eval or HOME/cache paths」。
    *
    * 卡片标题/绿标的正路是 **registry.json 收录**（PR 进 magpie-community/plugins），
-   * 不是本地改缓存。本机想提前看到效果：`node tools/register-local.mjs`
-   * （在仓库里、不随 npm 包发布，见 tools/README 说明）。
-   */
-  /**
-   * MiniMax 国际版的可选绕行 IP（`magpie plugin options providers-hub
-   * '{"minimaxXff":"<海外IP>"}'` 设置）。⚠️ 默认关闭；`sanitizeXff` 白名单
-   * （IP 字面量）防 CRLF 头注入，非法值静默不附头。
-   */
-  const minimaxXff = sanitizeXff(options.minimaxXff)
-  /**
-   * MiniMax 国际版的可选**出口代理**（'{"minimaxProxy":"http://127.0.0.1:7890"}'）。
+   * 不是本地改缓存。
    *
-   * 与 XFF 的分工：XFF 是声明式（上游信不信随它）；代理是**真换出口**
-   *（流量实际出海，TLS 指纹分流也无效）—— 设了代理后 XFF 自动降为兜底。
-   * ⚠️ 只作用于 minimaxintl 的调用链（中国站类渠道境内直连最优，刻意不全局）；
-   * 只支持 http(s)://（Bun 原生 init.proxy；socks5 等真有需求再补）。
-   * 非法值静默直连（填错的体验是「仍被分流」，geo 报错文案教他核对）。
+   * ⚠️⚠️ **也没有系统通知了**（PR #502 审核第 1 条：Windows 上 spawn PowerShell 拼
+   *    字符串存在命令注入 —— 外部文案来自厂商接口，`esc()` 不转义单引号）。登录/签到
+   *    结果只走 `client.tui.showToast`（宿主原生渲染，无任何文本拼接进脚本）。
    */
-  const minimaxProxy = typeof options.minimaxProxy === 'string' ? options.minimaxProxy : undefined
   // 快照写入开关（模块层 writeSnapshot 读这个变量 —— 见其定义处的说明）
   snapshotWritesDisabled = options.notify === false
-  /**
-   * Windows 系统通知（PowerShell WinRT toast）—— 登录/签到结果的**可靠反馈**：
-   * magpie 桌面 GUI 没有 toast 渲染端（TUI 才显示），系统通知是绕开它的正解。
-   *
-   * 实现：spawn PowerShell `-EncodedCommand`（base64 UTF-16LE，免一切引号转义），
-   * AppId 用 PowerShell 自己的 AUMID（无需注册）；fire-and-forget（不阻塞、不等待）。
-   * ⚠️ 测试进程不弹：显式 options.notify === false 关闭（**不用** NODE_TEST_CONTEXT
-   *    判断 —— 真机实证 magpie 给 bun 宿主的环境里它有值，会把生产通知全吞掉）。
-   * 非 Windows 平台静默跳过。
-   */
-  const notifyDisabled = options.notify === false
-  const notify = (title, message) => {
-    if (notifyDisabled) return
-    if (process.platform !== 'win32') return
-    debugLog(`notify entered: ${title}`)
-    try {
-      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      const ps = [
-        // ⚠️ 两个 WinRT 程序集**都要先加载**：只加载 Notifications 的话，
-        //    XmlDocument 解析不到（New-Object TypeNotFound）→ 整条链失败
-        //    （真机 2026-10-27：toast 静默失败，一条通知都弹不出来）。
-        '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
-        '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
-        '$d = New-Object Windows.Data.Xml.Dom.XmlDocument',
-        `$d.LoadXml('<toast><visual><binding template="ToastGeneric"><text>${esc(title)}</text><text>${esc(message)}</text></binding></visual></toast>')`,
-        '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(\'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe\').Show([Windows.UI.Notifications.ToastNotification]::new($d))',
-      ].join('; ')
-      // ⚠️ **spawnSync + 捕获输出**：detached+ignore 让 PowerShell 的报错完全
-      //    不可见（真机排查两天找不到原因）——同步跑、把退出码/stderr 记进日志。
-      //    阻塞 ~1-2 秒可接受（登录/签到反馈是低频操作）。
-      const psExe = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-      const r = spawnSync(psExe, ['-NoProfile', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], {
-        windowsHide: true, timeout: 20_000,
-      })
-      debugLog(`notify spawn: status=${r.status} err=${(r.stderr?.toString() ?? '').slice(0, 200) || '(空)'}`)
-    } catch (e) {
-      debugLog(`notify threw: ${e.message}`)
-    }
-  }
-  /** magpie 的 auth 存储（社区插件同款 `client.auth.set`；不可用则只写旁路）。 */
+  /** magpie 的 auth 存储（社区插件同款 `client.auth.set`）。 */
   const authSet = typeof input?.client?.auth?.set === 'function' ? input.client.auth.set : undefined
   /**
    * 宿主 toast（登录结果反馈 —— 用户报障「登录后一点提示都没有」）。
@@ -879,7 +737,7 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   const saveAuth = async (auth) => {
     try {
       await authSet?.({ path: { id: PROVIDER }, body: auth })
-    } catch { /* magpie 存储失败不阻断：旁路已有兜底 */ }
+    } catch { /* magpie 存储失败不阻断 */ }
   }
   /** getAuth 的安全包装（未登录/异常 → undefined，不抛）。 */
   const safeGetAuth = async (getAuth) => {
@@ -889,6 +747,12 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       return undefined
     }
   }
+  // ⚠️ 模块级 sweep 取凭据靠实例的 getAuth（插件不再从磁盘读任何凭据）。
+  //    magpie 的 getAuth 是按账号取的；冷启动 sweep 借它把内存缓存填上。
+  authGetters.set(channel.id, async () => {
+    const auth = await safeGetAuth(input?.client?.auth?.get)
+    return auth
+  })
 
   /** 请求体里的 model 可能是 `glm-5.3` / `hub-officeace/glm-5.3` / 旧 `officeace/glm-5.3`。 */
   const resolve = (modelId) => {
@@ -917,8 +781,6 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   //    ⚠️ 不能用 NODE_TEST_CONTEXT 判断测试：magpie 的 bun 宿主环境里它有值，
   //    会把生产 sweep 整个关掉）。可用 options.snapshotRefreshMinutes 调（默认 5 分钟，0 = 关闭）。
   const sweepMinutes = Number(options.snapshotRefreshMinutes)
-  sweepState.xff = minimaxXff
-  sweepState.proxy = minimaxProxy
   const sweepEveryMs = (Number.isFinite(sweepMinutes) && sweepMinutes > 0 ? sweepMinutes : 5) * 60_000
   if (sweepMinutes !== 0 && sweepState.everyMs === undefined) {
     sweepState.everyMs = sweepEveryMs
@@ -928,8 +790,8 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
     sweepState.timer.unref?.()
   }
 
-  /** 本渠道的用量窗口（带本实例的 xff/proxy 选项）。 */
-  const windowsOf = (credential) => usageWindowsOf(channel, credential, { xff: minimaxXff, proxy: minimaxProxy })
+  /** 本渠道的用量窗口。 */
+  const windowsOf = (credential) => usageWindowsOf(channel, credential, {})
 
   // 旧版账号槽 → 本供应商槽（一次性、幂等；见函数注释）。失败不影响启动。
   if (options.migrateLegacySlots !== false) {
@@ -965,17 +827,14 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       // authorize() 必须**立刻**返回 { url, method, callback } —— 在这里 await
       // 用户完成登录会与 magpie 双向死锁；真正等登录的是 callback()。
       // 渠道契约 beginLogin() → { url, result }。
-      // 渠道可声明多登录入口（`loginMethods: [{label, arg}]`，如 autoclawintl 的
-      // 「Google 账号 / z.ai 账号」——vendor 在 authorize 参数层定死，引导页不再
-      // 有选择步骤 ⇒ 不会出现「重开一次登录覆盖旧会话」的 state 失配）。
+      // 渠道可声明多登录入口（`loginMethods: [{label, arg}]`）；
       // 未声明时退化为单入口 `登录 <displayName>`。
       methods: ((channel) => {
         const buildOne = (label, arg) => ({
           type: 'oauth',
           label,
           async authorize() {
-            // xff 只对 minimaxintl 有意义，其余渠道忽略该参数
-            const started = await channel.beginLogin(openBrowser, { xff: minimaxXff, proxy: minimaxProxy, ...(arg !== undefined ? { loginArg: arg } : {}) })
+            const started = await channel.beginLogin(openBrowser, {})
             // 登录前的账号槽状态（accountId → 此前凭据是否已过期）—— 判据见下
             const preSlots = new Map(
               readMagpieAuthSlots(PROVIDER)
@@ -991,18 +850,20 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
             const pre = preSlots.get(resolveAccountId(credential))
             return pre !== undefined && !pre.expired
           }
-          // ⚠️⚠️ 通知/快照挂在**自己的完成链**上，不挂在 callback 里 ——
+          // ⚠️⚠️ 反馈/快照挂在**自己的完成链**上，不挂在 callback 里 ——
           //    真机实证（2026-10-27 微信扫码重登）：登录落盘后 magpie 弹了
-          //    「已添加」但 **callback 从未被调用**（notify 日志不存在）——
-          //    magpie 对 auto 流程只监听 auth.set 事件即认定完成，未必回调。
+          //    「已添加」但 **callback 从未被调用** —— magpie 对 auto 流程
+          //    只监听 auth.set 事件即认定完成，未必回调。
           //    started.result 由载体服务自己 settle，必触发。
           //
-          //    ⚠️⚠️ 通知规则（用户定案）：
-          //    · 新账号                                    → 弹「登录成功（新增账号）」
-          //    · 已有账号且**未过期**（重复登录）           → 弹「⚠️ 账号重复」，
+          //    ⚠️⚠️ 反馈规则（用户定案）：
+          //    · 新账号                                    → 「登录成功（新增账号）」
+          //    · 已有账号且**未过期**（重复登录）           → 「⚠️ 账号重复」，
           //                                                  **且不覆盖原账号槽**（callback 里跳过写入）
-          //    · 已有账号但**已过期**（重新登录/续期）       → 弹「已更新登录（已续期）」+ 写入
+          //    · 已有账号但**已过期**（重新登录/续期）       → 「已更新登录（已续期）」+ 写入
           //    · 登录失败                                  → 弹失败
+          //    ⚠️ 全部走 toast（宿主原生渲染）—— 系统通知（spawn PowerShell）已删，
+          //       外部文案拼脚本有命令注入面（PR #502 审核第 1 条）。
           void started.result.then((credential) => {
             try {
               debugLog(`chain fired: ${channel.id}`)
@@ -1011,15 +872,12 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
               const pre = preSlots.get(accountId)
               if (pre === undefined) {
                 debugLog(`chain: 新账号 ${channel.id} ${accountId}`)
-                notify('Providers Hub', `${channel.displayName}：登录成功（新增账号）`)
                 toast(`${channel.displayName}：登录成功（新增账号）`)
               } else if (pre.expired) {
                 debugLog(`chain: 过期账号重新登录 ${channel.id} ${accountId}`)
-                notify('Providers Hub', `${channel.displayName}：已更新登录（已续期）`)
                 toast(`${channel.displayName}：已更新登录（已续期）`)
               } else {
                 debugLog(`chain: 账号重复（保留原槽，不覆盖）${channel.id} ${accountId}`)
-                notify('⚠️ 账号重复', `${channel.displayName} 的「${accountId}」此前已登录且仍有效 —— 本次未覆盖原账号槽`)
                 toast(`${channel.displayName}：账号重复 —— 已保留原账号（未覆盖）`, 'warning')
               }
             } catch (e) { debugLog(`chain threw: ${e.message}`) }
@@ -1034,9 +892,8 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
               try {
                 const credential = await started.result
                 const expires = expiresMsOf(credential)
-                // 双写：账号槽（主，magpie 按 auth.channel 归属这个账号）+ 旁路（兜底）。
-                // accountId 优先用渠道带回的账号名（minimaxintl 登录时查真名）——
-                // 多账号时卡片显示真名而不是同一个渠道名。
+                // 账号槽（主）+ 内存缓存（本进程内供 sweep/目录用）。
+                // accountId 优先用渠道带回的账号名 —— 多账号时卡片显示真名。
                 const auth = {
                   type: 'success',
                   channel: channel.id,
@@ -1050,13 +907,12 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
                   debugLog(`callback: 账号重复，跳过写入（保留原槽）${channel.id} ${auth.accountId}`)
                   return auth
                 }
-                writeSidecar(channel, { type: 'oauth', channel: channel.id, ...credential })
+                rememberCredential(channel, credential)
                 await saveAuth(auth)
                 return auth
               } catch (error) {
                 // 登录失败也弹（否则「在等流程」和「失败了」分不清）
                 const message = error instanceof Error ? error.message : String(error)
-                notify(`${channel.displayName} 登录失败`, message)
                 toast(`${channel.displayName} 登录失败：${message}`, 'error')
                 throw error
               }
@@ -1073,7 +929,7 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
        * 按账号发请求：`getAuth()` 拿**当前账号槽**的 auth。
        *
        * - auth 属于本渠道 → 用它（同渠道多账号：magpie 换槽即换号）；
-       * - 读不到（如旁路-only 的账号）→ 旁路兜底（最近一次成功使用的凭据）；
+       * - 读不到 → 本进程内存缓存兜底（本进程内登录过就有）；
        * - 都没有 → 明确的未登录响应（不炸会话）。
        */
       async loader(getAuth) {
@@ -1116,11 +972,8 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
               // **硬**续期（异常透传）：渠道靠它区分「续期没成功」与「续期成功但没变」；
               // 走凭据身份键控的去重闸（同账号并发共享，多账号不串号）。
               renew: (current) => gatedRenew(hit.channel, current),
-              // MiniMax 国际版的可选绕行 IP（其余渠道忽略该字段）
-              xff: minimaxXff, proxy: minimaxProxy,
             })
-            // 续期后渠道拿到新凭据时同步双写（chat 的 renew 返回值不经手，这里
-            // 由 gatedRenew 内部的 writeSidecar 完成；账号槽由 magpie refresh 兜）
+            // 续期后的新凭据已由 gatedRenew 记进内存缓存；账号槽由 magpie refresh 兜
             return response
           },
         }
@@ -1191,7 +1044,7 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
             const credential = authOfChannel(auth, channel)
               ? await ensureAuth(channel, auth)
               : await ensure(channel)
-            const outcome = await channel.checkin(credential, { xff: minimaxXff, proxy: minimaxProxy })
+            const outcome = await channel.checkin(credential)
             tally.set(channel.id, {
               channel: channel.displayName,
               outcome: outcome.outcome,

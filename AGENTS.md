@@ -55,10 +55,11 @@ async function usage(credential) {
 
 ### 两类渠道：到期包型 vs 余额/重置型
 
-- **到期包型**（有作废时间）→ 全部走滚动指针：astudio / minimaxintl / officeace /
-  magicrew（共享工具）；autoclaw ×2 / lobsterai（自带同款实现，门禁白名单豁免）。
+- **到期包型**（有作废时间）→ 全部走滚动指针：astudio / magicrew（共享工具）；
+  lobsterai（自带同款实现，门禁白名单豁免）。
 - **余额/重置型**（只有永久余额 + 每日重置窗，无作废包）→ **滚动指针不适用**，
-  现状正确，别硬套：loomy（永久积分 + 每日赠送 resetsAt）、accio（不下发作废时间）。
+  现状正确，别硬套：accio（不下发作废时间）。
+- ⚠️ v0.5.0 起 minimaxintl / officeace / loomy / autoclaw 已从包里删除，不再适用本节。
 
 ## 2. 签到：归属、判定、「已领过」语义
 
@@ -71,10 +72,10 @@ async function usage(credential) {
   别的渠道的签到结果**绝不**进本账号的返回信息。
   —— 真机报障（0.3.x 聚合形态）：全渠道明细怼到每个账号底下（Loomy 卡片挂着
   OfficeAce/MiniMax/AutoClaw 一整屏），用户原话「谁失败在谁下面啊，你全怼到一块干嘛」。
-- 没账号槽、只有旁路凭据的渠道（一键导入的 AutoClaw 这类，magpie 不会为它调
-  checkin）→ 由**模块级 sweep 每日补签一次**，结果**只进页面快照**
+- 没账号槽、只有内存凭据的渠道（magpie 不会为它调 checkin）→ 由**模块级 sweep
+  每日补签一次**，结果**只进页面快照**
   （`snapshotCache.checkin`）。
-- 既没账号也没旁路 → `inactive`（不是 failed，别把卡片涂红）。
+- 既没账号也没内存凭据 → `inactive`（不是 failed，别把卡片涂红）。
 
 ### 判定顺序：claimed → done → failed → inactive
 
@@ -88,21 +89,21 @@ async function usage(credential) {
 magpie 的渲染：`claimed/done` + **`again:true`**（magpie 对**中午前的 done**自动标）
 → 黄色「回复已签到…稍后再问」；`claimed` 无 again → 绿色「今日已签到 +N」。
 所以：渠道签到发现「今天已领过」时，**今日的奖励确实入账了** → 报
-`claimed` + 今日发放量（loomy 的 alreadyProcessed → claimed+dailyQuota；
+`claimed` + 今日发放量（lobsterai 的 alreadyProcessed → claimed+dailyQuota；
 magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
-「确实无可领」（如 officeace 无活动）。
+「确实无可领」。
 
 ### 占位必须 inactive
 
 渠道无签到端点/不做签到 → `outcome: 'inactive'`。**绝不返回 failed**（会把聚合
-判定拖成失败，每个账号挂红字）。参照 lobsterai/minimaxintl 的 inactive 用法。
+判定拖成失败，每个账号挂红字）。参照 lobsterai / accio 的 inactive 用法。
 
 ## 3. 门禁
 
 `tests/expiry-bands-required.test.mjs`：
 1. 锁死 `expiryBandedWindows` 的分档语义（临期/长期合并/永久/已耗尽/aside/不挂 runsOutAt）；
 2. 源码扫描 —— 渠道有到期逻辑却没引用 banding 工具 → 红。
-   白名单 `GRANDFATHERED`（autoclaw/lobsterai/loomy）是存量豁免，
+   白名单 `GRANDFATHERED`（lobsterai）是存量豁免，
    **新增渠道不得加入**。
 
 ## 4. 环境与宿主陷阱（真机踩过，别再踩）
@@ -114,9 +115,12 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
   快照从此静默不更新）。
 - **writeSnapshot 在模块层**，引用工厂内的 const 会 ReferenceError 被静默吞掉 ——
   用模块层开关（`snapshotWritesDisabled`）。
-- **Windows 通知**走 spawnSync PowerShell WinRT（`notify`）：
-  两个程序集都要先加载（Notifications + XmlDocument）、绝对路径、
-  spawnSync 捕获 stderr（detached+ignore 让报错不可见，排查两天）。
+- **没有系统通知，也不许再加**：老实现用 spawnSync 跑 PowerShell 拼 toast XML，
+  外部文案（厂商报错、账号昵称）拼进单引号字符串 ⇒ **命令注入**（PR #502 审核
+  实测可执行任意命令）。现在所有反馈只走 `client.tui.showToast`，且**插件不再
+  spawn 子进程**（唯一例外：MagiCrew 登录要拉起本机 Chrome 读 localStorage）。
+- **不写任何宿主文件**：凭据只在内存（`memoryCredentials`）+ magpie 账号槽；
+  诊断日志要 `DSH_HUB_DEBUG=1` 才写，落点是**系统临时目录**。
 - **插件更新**：GitHub 源（`github:owner/repo` spec）走 `magpie plugin update`
   拉 codeload tarball（不经被墙的 raw）；本地路径 spec 不会远程更新。
 - **页面沙盒**：只能读快照（`page/snapshot.js`），没有网络、没有 `magpie.read`；
@@ -150,26 +154,24 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 
 ## 6. 其它既有约定（简记）
 
-- 供应商 id = `hub-<渠道 id>`，一旦发布不能改（用户登录态按它认领，改名 = 十个渠道集体掉线）；
-  渠道 `id` 也别改（它是 `<渠道>-credential.json` 与模型前缀的来源）
+- 供应商 id = `hub-<渠道 id>`，一旦发布不能改（用户登录态按它认领，改名 = 全部渠道集体掉线）；
+  渠道 `id` 也别改（它是 provider id 与模型前缀的来源）
 - 登录走 `beginLogin(openBrowser)` → `{ url, result }`；`authorize()` 立刻返回，
   真正等登录的是 `callback()`；**通知/快照挂自己的完成链**
   （`started.result.then`）—— magpie 对 auto 流程未必回调 callback（真机实证）
 - 防重复登录：登录前记账号槽快照；**未过期的重复登录不覆盖原槽**
-  （callback 跳过 saveAuth/writeSidecar），报「账号重复」；过期重登 = 覆盖 +
+  （callback 跳过 saveAuth），报「账号重复」；过期重登 = 覆盖 +
   「已更新登录（已续期）」
-- 凭据双写：magpie 账号槽（`client.auth.set`）+ 旁路 sidecar（`saveCredential`）
-- OfficeAce 的 refresh_token 一次性（STS5.1806）：STS 成功**立即落盘** +
-  并发去重闸（refreshInFlight）—— 已消费的救不回，只能重登
-- **凭据落盘的两条命门**（真机 2026-10-29：OfficeAce 新 refresh_token 从未落盘 →
-  下次续期 STS5.1806，卡片只会报 401 APIG.0301）：
-  ① `saveCredential` **拒绝下调**：盘上凭据到期更晚就不覆盖（旧凭据回写不能吞掉
-     轮转出来的新 token）；写失败**必须 console.warn 并返回 false**（不许静默）。
-  ② `writeSidecar` **写盘成功才记 identity**：否则这一次的新 refresh_token
-     再没有第二次落盘机会。
+- **凭据只在两处**：magpie 账号槽（`client.auth.set` / `getAuth`）+ 本进程内存
+  （`memoryCredentials`）。**没有旁路凭据文件**（v0.5.0 起不再写
+  `~/.config/magpie/<渠道>-credential.json` —— PR #502 审核第 2 条：
+  那里默认 0644，本机任何用户可读）。
+- 续期去重闸按**凭据身份**键控（`channel + refresh_token|access_token`）：
+  同一凭据并发共享一次在途请求，多账号不串号。refresh_token 一次性的渠道
+  消费后救不回，只能重登。
 - 提交信息用 `-F <file>`（PowerShell 内联多行会乱）；临时草稿文件进 .gitignore
 
-## 7. 形态：一个插件，十个供应商（v0.4.0）
+## 7. 形态：一个插件，五条供应商（v0.5.0）
 
 0.3.x 是「一个 provider id `providers-hub` 内部聚合十渠道」。v0.4.0 拆成
 **每个渠道一条供应商**：magpie 的 failover 与开关都是 provider 粒度，聚合形态下
@@ -181,17 +183,18 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 - 供应商 id = `hub-<渠道 id>`，**必须 ASCII**：它会进模型名、CLI 参数、
   `<provider>/<account>` 槽 key。中文 id 会让 `magpie plugin login <id>`
   与模型 id 都出问题（故显示名用中文 `PROVIDER_NAME_OVERRIDES`，不是 id）。
-- 目录返回**裸模型名**（`glm-5.3`），由 magpie 拼成 `hub-officeace/glm-5.3`；
+- 目录返回**裸模型名**（`spark-x`），由 magpie 拼成 `hub-astudio/spark-x`；
   `resolve()` 三种写法都认：裸名 / `hub-<渠道>/名` / 旧 `渠道/名`，
   别的供应商 id → 404（不静默转发）。
-- **共享的模块级状态**（十个实例共用，别塞进工厂）：
-  `snapshotCache`（页面快照）、`sweepState`（5 分钟扫额度 + 旁路渠道补签）、
+- **共享的模块级状态**（所有实例共用，别塞进工厂）：
+  `snapshotCache`（页面快照）、`sweepState`（5 分钟扫额度 + 补签）、
   `checkinTally`（当日记账）、`migrationsStarted`（旧槽迁移只做一次）、
-  `selfRegistered`（市场缓存只注册一次）。
-  ⚠️ 定时器只能建**一次**：工厂里 `setInterval` 会随 magpie 加载十个实例起十个。
+  `memoryCredentials`（本进程见过的凭据，**不落盘**）、`authGetters`（各实例的
+  getAuth，供 sweep 冷启动取凭据）。
+  ⚠️ 定时器只能建**一次**：工厂里 `setInterval` 会随 magpie 加载多个实例起多个。
 - **旧账号槽迁移**：`migrateLegacySlots()` 把 `providers-hub*` 的槽按 `channel`
   字段搬到 `hub-<渠道>`，幂等（新槽已存在就不动）、可用 `options.migrateLegacySlots:false`
-  关掉。搬不动的旁路 sidecar 凭据照常供对话/额度/签到使用。
+  关掉。
 - **测试**：`tests/setup.mjs` 把 HOME 与快照路径都重定向到临时目录 —— 否则测试会读到
   本机真实凭据，「未登录回落」类用例真的去请求上游（实测每个死凭据等 10s）。
   单测要改 HOME 的用例，记得同时改 `DSH_HUB_AUTH_PATH`（env 优先级高于 HOME）。

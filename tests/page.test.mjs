@@ -108,17 +108,18 @@ test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async
   process.env.USERPROFILE = sandbox
   process.env.HOME = sandbox
   try {
-    const { saveCredential } = await import('../src/shared.mjs')
-    // 造一份含敏感字段的凭据（模拟各渠道真实形状）
-    saveCredential('officeace', {
+    // ⚠️ v0.5.0 起**没有旁路凭据文件**：凭据只在本进程内存缓存（`memoryCredentials`）。
+    // 这里用 `_internal.rememberCredential` 模拟登录态。
+    const { HUB_PLUGINS } = await import('../index.mjs')
+    const { _internal } = await import('../src/aggregate.mjs')
+    _internal.rememberCredential({ id: 'astudio' }, {
       access: 'SECRET_ACCESS_TOKEN_SHOULD_NOT_LEAK',
       refresh_token: 'SECRET_REFRESH_TOKEN_SHOULD_NOT_LEAK',
       accessKeyId: 'SECRET_AK_SHOULD_NOT_LEAK',
       secretAccessKey: 'SECRET_SK_SHOULD_NOT_LEAK',
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     })
-    const { HUB_PLUGINS } = await import('../index.mjs')
-    const plugin = await HUB_PLUGINS.HubOfficeAcePlugin({}, {})
+    const plugin = await HUB_PLUGINS.HubAStudioPlugin({}, {})
     await plugin.config({})
     // 触发 provider.models（会写快照）—— 用临时 provider.props 空对象
     await plugin.provider.models({ models: {} })
@@ -136,8 +137,8 @@ test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async
     const body = snap.replace(/^window\.__PROVIDERS_HUB_SNAPSHOT__\s*=\s*/, '').replace(/;\s*$/, '')
     const obj = JSON.parse(body)
     assert.ok(Array.isArray(obj.channels))
-    assert.ok(obj.channels.length >= 5, '应含全部渠道')
-    // 拆成十个供应商后，每个渠道都标着自己的供应商 id（页面上「关掉哪个会关掉它」）
+    assert.equal(obj.channels.length, 5, 'v0.5.0 起只有五条渠道')
+    // 每条渠道都标着自己的供应商 id（页面上「关掉哪个会关掉它」）
     assert.ok(obj.channels.every((c) => typeof c.provider === 'string' && c.provider.startsWith('hub-')),
       `渠道行缺 provider 字段：${JSON.stringify(obj.channels.map((c) => c.provider))}`)
   } finally {

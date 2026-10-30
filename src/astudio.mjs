@@ -30,7 +30,7 @@
 
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { loadCredential, saveCredential, assignExpiryBands, debugLog } from './shared.mjs'
+import { assignExpiryBands, debugLog } from './shared.mjs'
 
 const PROVIDER = 'astudio'
 const DISPLAY = 'AStudio（讯飞）'

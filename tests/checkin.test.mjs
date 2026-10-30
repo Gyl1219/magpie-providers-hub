@@ -1,6 +1,6 @@
-// 签到移植语义回归（全部 stub fetch）。
-// minimaxintl 走 Bearer + minimaxFetch（timezone_id 是 query 必填）；
+// 签到语义回归（全部 stub fetch）。
 // astudio 走 Cookie 四字段串 + client-popups（componentType 才是真字段）。
+// ⚠️ v0.5.0 起 minimaxintl / officeace 已从包里删除，它们的面板解析用例一并移除。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,7 +13,6 @@ const originalHome = process.env.USERPROFILE
 process.env.USERPROFILE = sandbox
 process.env.HOME = sandbox
 
-const { parseSigninPanel, checkin: minimaxCheckin, minimaxintlChannel } = await import('../src/minimaxintl.mjs')
 const { astudioChannel } = await import('../src/astudio.mjs')
 const { makeHubPlugin, REGISTERED_CHANNELS } = await import('../src/aggregate.mjs')
 
@@ -54,132 +53,19 @@ const stubFetch = (routes) => {
   return { restore: () => { globalThis.fetch = original } }
 }
 
-// ── 面板解析（完整复刻官方 validateSigninPanel 的硬约束）────────────────
-
-test('面板硬约束：6 天 / 非法 status / 2 条可领 / 2 条今日 / scene 越界 → 一律 undefined（不编造）', () => {
-  const good = panel(2)
-  assert.equal(parseSigninPanel(good)?.days.length, 7)
-  assert.equal(parseSigninPanel({ ...good, days: good.days.slice(0, 6) }), undefined)
-  assert.equal(parseSigninPanel({ ...good, days: good.days.map((d, i) => ({ ...d, status: i === 3 ? 9 : 1 })) }), undefined)
-  assert.equal(parseSigninPanel({
-    ...good,
-    days: good.days.map((d, i) => ({ ...d, status: i === 3 || i === 4 ? 2 : 1 })),
-  }), undefined, '最多 1 条可领')
-  assert.equal(parseSigninPanel({
-    ...good,
-    days: good.days.map((d, i) => ({ ...d, is_today: i === 3 || i === 5 })),
-  }), undefined, '最多 1 条今日')
-  assert.equal(parseSigninPanel({ ...good, scene: 9 }), undefined)
-  assert.equal(parseSigninPanel(null), undefined)
-})
-
-// ── minimaxintl checkin ─────────────────────────────────────────────────
-
-test('签到：今日已领（status=3）→ done + 连续天数', async () => {
-  const stub = stubFetch([{
-    match: '/signin/status',
-    respond: ({ url }) => {
-      assert.ok(url.includes('timezone_id='), 'timezone_id 必须是 query 参数（放请求头无效）')
-      return sseJson({ data: panel(3), base_resp: { status_code: 0, status_msg: 'ok' } })
-    },
-  }])
-  try {
-    const outcome = await minimaxCheckin(CRED)
-    assert.equal(outcome.outcome, 'done')
-    assert.equal(outcome.credit, 103)
-    assert.equal(outcome.streak, 4, '今日已领：从今日向前数连续 Claimed（4 天）')
-  } finally {
-    stub.restore()
-  }
-})
-
-test('签到：今日可领（status=2）→ claim → claim_result=1 → claimed', async () => {
-  const claimedPanel = panel(3) // 领取后的面板
-  const stub = stubFetch([
-    { match: '/signin/status', respond: () => sseJson({ data: panel(2), base_resp: { status_code: 0 } }) },
-    {
-      match: '/signin/claim',
-      respond: ({ init }) => {
-        assert.equal(init.body, '{}', 'claim 的 body 是空对象串')
-        return sseJson({
-          data: { claim_result: 1, points: 400, panel: claimedPanel },
-          base_resp: { status_code: 0 },
-        })
-      },
-    },
-  ])
-  try {
-    const outcome = await minimaxCheckin(CRED)
-    assert.equal(outcome.outcome, 'claimed')
-    assert.equal(outcome.credit, 400, 'credit 取 points 总数（已含 bonus_points，不相加）')
-    assert.equal(outcome.streak, 4, '连续天数以领取后回传的面板为准')
-  } finally {
-    stub.restore()
-  }
-})
-
-test('签到：claim_result=2 → done（幂等判据不是 HTTP 状态码）', async () => {
-  const stub = stubFetch([
-    { match: '/signin/status', respond: () => sseJson({ data: panel(2), base_resp: { status_code: 0 } }) },
-    { match: '/signin/claim', respond: () => sseJson({ data: { claim_result: 2, points: 400 }, base_resp: { status_code: 0 } }) },
-  ])
-  try {
-    const outcome = await minimaxCheckin(CRED)
-    assert.equal(outcome.outcome, 'done')
-  } finally {
-    stub.restore()
-  }
-})
-
-test('签到：status=1 未开始 → inactive；status=4 → ineligible', async () => {
-  {
-    const stub = stubFetch([{ match: '/signin/status', respond: () => sseJson({ data: panel(1), base_resp: { status_code: 0 } }) }])
-    try { assert.equal((await minimaxCheckin(CRED)).outcome, 'inactive') } finally { stub.restore() }
-  }
-  {
-    const stub = stubFetch([{ match: '/signin/status', respond: () => sseJson({ data: panel(4), base_resp: { status_code: 0 } }) }])
-    try { assert.equal((await minimaxCheckin(CRED)).outcome, 'ineligible') } finally { stub.restore() }
-  }
-})
-
-test('签到：业务码在 base_resp.status_code（HTTP 200 + invalid timezone_id 同形）→ failed', async () => {
-  const stub = stubFetch([{
-    match: '/signin/status',
-    respond: () => sseJson({ base_resp: { status_code: 400, status_msg: 'invalid timezone_id' } }),
-  }])
-  try {
-    const outcome = await minimaxCheckin(CRED)
-    assert.equal(outcome.outcome, 'failed')
-    assert.match(outcome.message, /invalid timezone_id/)
-  } finally {
-    stub.restore()
-  }
-})
-
-test('签到：地理分流（307→中国站）后的 401 必须报「出口 IP」而不是「凭据失效」', async () => {
-  // 中国大陆直连出口的真实形态：agent.minimax.io 恒 307 → agent.minimaxi.com，
-  // 国际站 token 打到中国站 = 401 invalid access token（与凭据真失效逐字同形）。
-  const stub = stubFetch([
-    { match: 'agent.minimax.io', respond: () => new Response(null, { status: 307, headers: { location: 'https://agent.minimaxi.com/minimax-cloud/api/v1/signin/status' } }) },
-    { match: 'agent.minimaxi.com', respond: () => new Response('{"error":"invalid access token"}', { status: 401 }) },
-  ])
-  try {
-    const outcome = await minimaxCheckin(CRED)
-    assert.equal(outcome.outcome, 'failed')
-    assert.match(outcome.message, /出口 IP|分流/, '必须指向真实原因（换出口/XFF），误导成重登会白烧一次登录')
-    assert.doesNotMatch(outcome.message, /凭据已失效/)
-  } finally {
-    stub.restore()
-  }
-})
-
 test('渠道对象挂了 checkin；accio 没有签到端点（跳过不占失败名额）', async () => {
-  assert.equal(typeof minimaxintlChannel.checkin, 'function')
-  assert.equal(typeof astudioChannel.checkin, 'function')
-  const { officeaceChannel } = await import('../src/officeace.mjs')
+  assert.equal(typeof astudioChannel.checkin, 'function', 'astudio 有签到（client-popups）')
   const { accioChannel } = await import('../src/accio.mjs')
-  assert.equal(typeof officeaceChannel.checkin, 'function', 'officeace 有签到（每日 bonus/claim，1000 积分当日作废）')
   assert.equal(accioChannel.checkin, undefined, 'Accio 每日 200 积分由登录触发，无签到端点')
+  // 保留的其余渠道也各有签到实现
+  const { lobsteraiChannel } = await import('../src/lobsterai.mjs')
+  const { magicrewChannel } = await import('../src/magicrew.mjs')
+  assert.equal(typeof lobsteraiChannel.checkin, 'function')
+  assert.equal(typeof magicrewChannel.checkin, 'function')
+  // 已删渠道不许再出现
+  for (const gone of ['officeace', 'minimaxintl', 'autoclaw', 'loomy']) {
+    assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
+  }
 })
 
 // ── astudio checkin ─────────────────────────────────────────────────────
@@ -293,9 +179,9 @@ test('签到只报自己：别的渠道失败不会串到本账号（谁失败�
   for (const c of channels) c.checkin = async () => ({ outcome: 'done', message: `${c.displayName} OK` })
   // other 渠道签到失败
   other.checkin = async () => ({ outcome: 'failed', message: `${other.displayName} 炸了` })
-  // 让 other 有旁路凭据 —— 生产里「一键导入」的渠道就是这种形态
-  const { saveCredential } = await import('../src/shared.mjs')
-  saveCredential(other.id, { access_token: 't' })
+  // ⚠️ v0.5.0 起**没有旁路凭据文件**：用内存缓存模拟「一键导入」形态
+  const { _internal } = await import('../src/aggregate.mjs')
+  _internal.rememberCredential(other, { access_token: 't' })
   try {
     const outcome = await ownPlugin.auth.checkin(async () => ({ type: 'success', channel: own.id }))
     assert.equal(outcome.outcome, 'done', '本账号渠道的结果')

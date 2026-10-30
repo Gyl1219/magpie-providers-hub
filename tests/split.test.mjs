@@ -45,10 +45,16 @@ const readSnapshot = () => {
   }
 }
 
-test('十个渠道 ↔ 十个供应商 id ↔ 十个插件导出，一一对应', async () => {
-  assert.equal(REGISTERED_CHANNELS.length, 10, '渠道数应是 10（漏注册会静默少一个供应商）')
+test('五个渠道 ↔ 五个供应商 id ↔ 五个插件导出，一一对应', async () => {
+  // ⚠️ v0.5.0 起只有五条：与社区 registry 现有插件重叠的五条已从包里删除
+  //    （PR #502 审核意见：一个订阅两个入口 + 它们带着与本插件无关的敏感能力）。
+  assert.equal(REGISTERED_CHANNELS.length, 5, '渠道数应是 5（删渠道或漏注册都会静默改变供应商数量）')
   assert.deepEqual(PROVIDER_IDS, REGISTERED_CHANNELS.map(providerIdOf), 'PROVIDER_IDS 必须与渠道一一对应')
-  assert.equal(Object.keys(HUB_PLUGINS).length, 10, 'index.mjs 必须导出 10 个插件函数')
+  assert.equal(Object.keys(HUB_PLUGINS).length, 5, 'index.mjs 必须导出 5 个插件函数')
+  // 已删渠道的代码不许再打进包里
+  for (const gone of ['officeace', 'autoclaw', 'autoclawintl', 'loomy', 'minimaxintl']) {
+    assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
+  }
   const seen = new Set()
   for (const channel of REGISTERED_CHANNELS) {
     const plugin = await makeHubPlugin(channel)({}, { notify: false })
@@ -60,7 +66,7 @@ test('十个渠道 ↔ 十个供应商 id ↔ 十个插件导出，一一对应'
     await plugin.config(cfg)
     assert.equal(cfg.provider[plugin.provider.id].name, providerNameOf(channel), '供应商显示名要跟渠道对上')
   }
-  assert.equal(seen.size, 10)
+  assert.equal(seen.size, 5)
 })
 
 test('旧账号槽 providers-hub* → hub-<渠道>：搬迁一次、幂等、可关', async () => {
@@ -128,15 +134,14 @@ test('旧账号槽 providers-hub* → hub-<渠道>：搬迁一次、幂等、可
   assert.equal(offSaved.length, 0, 'migrateLegacySlots:false 必须完全不动 magpie 的槽')
 })
 
-test('旁路口径的渠道由模块级 sweep 补签，结果只进快照', async () => {
-  // 一个没有任何 magpie 账号槽、只有旁路凭据的渠道（生产里「一键导入」即此形态）。
-  // ⚠️ 必须用**默认注册**的渠道（lobsterai）：重叠的五条默认不注册，sweep 会跳过。
+test('内存凭据的渠道由模块级 sweep 补签，结果只进快照', async () => {
+  // 一个没有任何 magpie 账号槽、只有内存凭据的渠道（生产里「一键导入」即此形态）。
   const channel = REGISTERED_CHANNELS.find((c) => c.id === 'lobsterai')
-  const skipped = REGISTERED_CHANNELS.find((c) => c.id === 'minimaxintl')
+  // 完全没有凭据的渠道 → sweep 必须跳过它
+  const skipped = REGISTERED_CHANNELS.find((c) => c.id === 'accio')
   writeAuthSlots({})
-  const { saveCredential } = await import('../src/shared.mjs')
-  saveCredential(channel.id, { access_token: 'sidecar-only' })
-  saveCredential(skipped.id, { access_token: 'sidecar-only' })
+  // ⚠️ v0.5.0 起**没有旁路凭据文件**（PR #502 审核第 2 条）：凭据只在本进程内存里。
+  _internal.rememberCredential(channel, { access_token: 'sidecar-only' })
   let calls = 0
   let skippedCalls = 0
   const original = channel.checkin
@@ -153,7 +158,7 @@ test('旁路口径的渠道由模块级 sweep 补签，结果只进快照', asyn
     _internal.enableSnapshotWrites()
     await _internal.sweepAllChannels()
     assert.equal(calls, 1, '没有账号槽的渠道必须被 sweep 补签')
-    assert.equal(skippedCalls, 0, '默认不注册的渠道（minimaxintl）sweep 绝不能跑')
+    assert.equal(skippedCalls, 0, '没有任何凭据的渠道 sweep 绝不能跑')
     const snap = readSnapshot()
     const row = snap?.channels?.find((c) => c.id === channel.id)
     assert.ok(row, '快照里应有该渠道')
