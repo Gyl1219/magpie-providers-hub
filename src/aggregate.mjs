@@ -36,7 +36,7 @@ import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mk
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
-import { loadCredential, saveCredential, notSignedIn, untilText, readMagpieAuthEntries, readMagpieAuthSlots, debugLog } from './shared.mjs'
+import { loadCredential, saveCredential, notSignedIn, untilText, readMagpieAuthEntries, readMagpieAuthSlots, debugLog, hubSwitchPath } from './shared.mjs'
 import { officeaceChannel } from './officeace.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { minimaxintlChannel } from './minimaxintl.mjs'
@@ -108,13 +108,54 @@ export function extraChannelsFrom(raw) {
 }
 
 /**
+ * 开关文件（`~/.config/magpie/providers-hub.json`）里的值 → 逗号串。
+ * 认两种形态：`"all"` 或 `["officeace", …]`；坏 JSON / 缺字段 = 没开。
+ */
+export function extraChannelsFromFileRaw(fileRaw) {
+  if (!fileRaw) return ''
+  try {
+    const v = JSON.parse(String(fileRaw))?.extraChannels
+    if (v === 'all') return 'all'
+    if (Array.isArray(v)) return v.join(',')
+    if (typeof v === 'string') return v
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/** 环境变量与开关文件**取并集**（任一处写 all 即全开）。 */
+export function extraSwitchFrom(envRaw, fileRaw) {
+  const a = extraChannelsFrom(envRaw)
+  const b = extraChannelsFrom(extraChannelsFromFileRaw(fileRaw))
+  return {
+    all: a.all || b.all,
+    ids: new Set([...a.ids, ...b.ids]),
+  }
+}
+
+/** 读开关文件（只读；不存在 / 读不了 = 没开）。 */
+function readSwitchFileRaw() {
+  try {
+    return readFileSync(hubSwitchPath(), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 该渠道这次要不要注册成供应商。
+ *
+ * 两个开关取并集：环境变量 `MAGPIE_HUB_EXTRA_CHANNELS`（逗号分隔 id 或 all）
+ * 和开关文件 `~/.config/magpie/providers-hub.json`（用户手工/工具创建，插件只读）。
+ *
  * @param {string} channelId
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [fileRaw] 开关文件内容；缺省真读磁盘（测试可注入）
  */
-export function channelRegistered(channelId, env = process.env) {
+export function channelRegistered(channelId, env = process.env, fileRaw) {
   if (!OVERLAPPING_CHANNEL_IDS.includes(channelId)) return true
-  const { all, ids } = extraChannelsFrom(env?.[EXTRA_CHANNELS_ENV])
+  const { all, ids } = extraSwitchFrom(env?.[EXTRA_CHANNELS_ENV], fileRaw === undefined ? readSwitchFileRaw() : fileRaw)
   return all || ids.has(String(channelId).toLowerCase())
 }
 

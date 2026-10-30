@@ -1,13 +1,12 @@
-﻿按审核意见收敛：重叠渠道默认不注册（可开关），registry 条目只列五条
+﻿重叠渠道开关补第二种形态：开关文件（插件只读）
 
-yetone 在 #502：与 registry 已有插件重叠的订阅不该出第二个入口
-（OfficeAce / AutoClaw 国内+国际 / Loomy / MiniMax 国际版）。
+环境变量对普通用户太重（setx + 重启 + 全局污染）。补一个
+~/.config/magpie/providers-hub.json：{"extraChannels": "all" | [id,…]}，
+插件加载时只读；用户手工创建或跑 node tools/set-channels.mjs（仓库内
+工具，不随 npm 发布）。环境变量与文件取并集，任一处 all 即全开。
 
-- src/aggregate.mjs：OVERLAPPING_CHANNEL_IDS + channelRegistered() +
-  MAGPIE_HUB_EXTRA_CHANNELS 开关（逗号分隔 id 或 all）
-- index.mjs：未启用的渠道导出**对象占位**（magpie 只把函数导出当插件）；
-  HUB_PLUGINS 仍带十条真函数（测试遍历用）
-- sweep/sweepCheckins：未注册渠道连后台扫描都不跑（不是只藏卡片）
-- tools/register-local.mjs / REGISTRY_PR.md：条目只列默认五条 + 新 summary
-- tests/overlap.test.mjs（8 例）+ split/no-host-writes 跟进；
-  tests/setup.mjs 钉死默认态，不受本机开关影响
+- shared.mjs：hubSwitchPath()（DSH_HUB_SWITCH_PATH 可重定向，测试用）
+- aggregate.mjs：extraChannelsFromFileRaw / extraSwitchFrom；
+  channelRegistered 第三参可注入文件内容
+- tools/set-channels.mjs：--show / --clear / all / id,id
+- tests/overlap.test.mjs +5 例（文件形态、并集、真读磁盘路径）

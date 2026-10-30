@@ -42,6 +42,17 @@ export function magpieAuthPath() {
 }
 
 /**
+ * 重叠渠道的开关文件（`providers-hub.json`）。
+ *
+ * ⚠️ **本插件对它只读**：文件由用户手工创建，或跑 `node tools/set-channels.mjs`
+ *    （仓库内工具，不随 npm 发布）。格式：`{"extraChannels": "all"}` 或
+ *    `{"extraChannels": ["officeace", "autoclawintl"]}`。坏 JSON / 不存在 = 没开。
+ */
+export function hubSwitchPath() {
+  return process.env.DSH_HUB_SWITCH_PATH ?? join(storeDir(), 'providers-hub.json')
+}
+
+/**
  * 读 magpie 账号槽的**原始条目**：`[{key, channel, value}]`（value 是 magpie 存的整个 auth）。
  * 只读，绝不写（那是 magpie 的地盘）；路径可用 env 重定向（测试）。
  *

@@ -9,9 +9,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
+import { rmSync } from 'node:fs'
 import {
   channelRegistered,
   extraChannelsFrom,
+  extraChannelsFromFileRaw,
+  extraSwitchFrom,
   disabledChannelMarker,
   OVERLAPPING_CHANNEL_IDS,
   EXTRA_CHANNELS_ENV,
@@ -55,6 +58,44 @@ test('开关 all：十个全开；大小写与空格都认', () => {
   for (const id of [...OVERLAPPING, ...DEFAULT_ONLY]) {
     assert.equal(channelRegistered(id, env), true, `${id} 在 all 下应注册`)
   }
+})
+
+test('开关文件：{"extraChannels": …} 两种形态都认，坏 JSON 当没开', () => {
+  assert.equal(extraChannelsFromFileRaw('{"extraChannels":"all"}'), 'all')
+  assert.equal(extraChannelsFromFileRaw('{"extraChannels":["officeace","loomy"]}'), 'officeace,loomy')
+  assert.equal(extraChannelsFromFileRaw('{"extraChannels":"officeace"}'), 'officeace')
+  assert.equal(extraChannelsFromFileRaw('{"别的字段":1}'), '')
+  assert.equal(extraChannelsFromFileRaw('不是 JSON'), '')
+  assert.equal(extraChannelsFromFileRaw(''), '')
+})
+
+test('开关文件：channelRegistered 直接吃文件内容', () => {
+  const env = { [EXTRA_CHANNELS_ENV]: '' }
+  assert.equal(channelRegistered('officeace', env, '{"extraChannels":["officeace"]}'), true)
+  assert.equal(channelRegistered('loomy', env, '{"extraChannels":["officeace"]}'), false)
+  assert.equal(channelRegistered('officeace', env, '{"extraChannels":"all"}'), true)
+  assert.equal(channelRegistered('loomy', env, '坏 JSON'), false, '坏 JSON = 没开')
+})
+
+test('环境变量与开关文件取并集（任一处 all 即全开）', () => {
+  const env = { [EXTRA_CHANNELS_ENV]: 'officeace' }
+  const s1 = extraSwitchFrom(env[EXTRA_CHANNELS_ENV], '{"extraChannels":["loomy"]}')
+  assert.equal(s1.all, false)
+  assert.deepEqual([...s1.ids].sort(), ['loomy', 'officeace'])
+  const s2 = extraSwitchFrom('officeace', '{"extraChannels":"all"}')
+  assert.equal(s2.all, true)
+})
+
+test('开关文件走 DSH_HUB_SWITCH_PATH（真读磁盘的路径）', async () => {
+  const { writeFileSync } = await import('node:fs')
+  const { hubSwitchPath } = await import('../src/shared.mjs')
+  const p = process.env.DSH_HUB_SWITCH_PATH
+  assert.ok(p, 'setup 必须把开关文件重定向进沙箱')
+  writeFileSync(p, '{"extraChannels":["autoclawintl"]}', 'utf8')
+  assert.equal(channelRegistered('autoclawintl'), true, '磁盘上的开关文件应生效')
+  assert.equal(channelRegistered('officeace'), false, '文件里没列的仍不注册')
+  rmSync(p, { force: true })
+  assert.equal(channelRegistered('autoclawintl'), false, '文件删掉即回默认态')
 })
 
 test('默认注册的 provider id = 条目里列的那五个', () => {
