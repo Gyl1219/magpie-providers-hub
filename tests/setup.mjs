@@ -20,3 +20,7 @@ process.env.HOME = sandbox
 
 process.env.DSH_HUB_SNAPSHOT_PATH = join(tmpdir(), `dsh-hub-snapshot-${process.pid}.js`)
 process.env.DSH_HUB_AUTH_PATH = join(sandbox, '.config', 'magpie', 'plugin-auth.json')
+
+// 重叠渠道开关：测试一律跑「默认态」（只注册不重叠的五条）。
+// 本机若为了自己用设了 MAGPIE_HUB_EXTRA_CHANNELS，不能让测试结果跟着变。
+process.env.MAGPIE_HUB_EXTRA_CHANNELS = ''

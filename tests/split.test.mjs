@@ -129,21 +129,31 @@ test('旧账号槽 providers-hub* → hub-<渠道>：搬迁一次、幂等、可
 })
 
 test('旁路口径的渠道由模块级 sweep 补签，结果只进快照', async () => {
-  // 一个没有任何 magpie 账号槽、只有旁路凭据的渠道（生产里「一键导入」即此形态）
-  const channel = REGISTERED_CHANNELS[2]
+  // 一个没有任何 magpie 账号槽、只有旁路凭据的渠道（生产里「一键导入」即此形态）。
+  // ⚠️ 必须用**默认注册**的渠道（lobsterai）：重叠的五条默认不注册，sweep 会跳过。
+  const channel = REGISTERED_CHANNELS.find((c) => c.id === 'lobsterai')
+  const skipped = REGISTERED_CHANNELS.find((c) => c.id === 'minimaxintl')
   writeAuthSlots({})
   const { saveCredential } = await import('../src/shared.mjs')
   saveCredential(channel.id, { access_token: 'sidecar-only' })
+  saveCredential(skipped.id, { access_token: 'sidecar-only' })
   let calls = 0
+  let skippedCalls = 0
   const original = channel.checkin
+  const originalSkipped = skipped.checkin
   channel.checkin = async () => {
     calls += 1
     return { outcome: 'claimed', credit: 30, message: '旁路补签 OK' }
+  }
+  skipped.checkin = async () => {
+    skippedCalls += 1
+    return { outcome: 'claimed', credit: 1 }
   }
   try {
     _internal.enableSnapshotWrites()
     await _internal.sweepAllChannels()
     assert.equal(calls, 1, '没有账号槽的渠道必须被 sweep 补签')
+    assert.equal(skippedCalls, 0, '默认不注册的渠道（minimaxintl）sweep 绝不能跑')
     const snap = readSnapshot()
     const row = snap?.channels?.find((c) => c.id === channel.id)
     assert.ok(row, '快照里应有该渠道')
@@ -154,6 +164,7 @@ test('旁路口径的渠道由模块级 sweep 补签，结果只进快照', asyn
     assert.equal(calls, 1, '同日已签的不重复打上游')
   } finally {
     channel.checkin = original
+    skipped.checkin = originalSkipped
   }
 })
 

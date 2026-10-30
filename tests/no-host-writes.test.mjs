@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 社区 registry 审核的硬门槛（MYCF711 的 officeace-auth #399 在 2026-10-27 被 block
  * 的原话）：插件**不得在加载/运行时改写 magpie 的宿主文件** —— 审核的 grep 标准是
  * 「no fs writes, child_process, eval or HOME/cache paths」，特指
@@ -103,5 +103,11 @@ test('自注册能力仍在仓库里（tools/），只是不随包发布', () =>
   assert.equal(existsSync(join(ROOT, 'tools', 'self-register.mjs')), true)
   const runner = readFileSync(join(ROOT, 'tools', 'register-local.mjs'), 'utf8')
   assert.match(runner, /magpie-providers-hub/)
-  assert.match(runner, /hub-officeace/, 'runner 要带上十个 provider id')
+  // 条目只列**默认注册**的五条（与社区 registry 不重叠）—— PR #502 的结论
+  for (const id of ['hub-astudio', 'hub-accio', 'hub-lobsterai', 'hub-magicrew', 'hub-magicrew-intl']) {
+    assert.ok(runner.includes(`'${id}'`), `条目该带 ${id}`)
+  }
+  for (const id of ['hub-officeace', 'hub-autoclaw', 'hub-loomy', 'hub-minimaxintl']) {
+    assert.equal(runner.includes(`'${id}'`), false, `重叠渠道 ${id} 不该进条目`)
+  }
 })

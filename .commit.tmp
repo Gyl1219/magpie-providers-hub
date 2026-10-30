@@ -1,8 +1,13 @@
-﻿诊断日志默认不再写 magpie 的目录（审核红线同类问题）
+﻿按审核意见收敛：重叠渠道默认不注册（可开关），registry 条目只列五条
 
-真机：~/.config/magpie/notify-debug.log 已被追加到 15KB —— 登录链路每次都写。
-yetone 在 officeace-auth #399 的原话是「That file is outside the plugin's
-folder and belongs to magpie」，这条对 config 目录同样成立。
+yetone 在 #502：与 registry 已有插件重叠的订阅不该出第二个入口
+（OfficeAce / AutoClaw 国内+国际 / Loomy / MiniMax 国际版）。
 
-- debugLog：DSH_HUB_DEBUG=1 才写，常态零写入
-- 回归网：tests/no-host-writes.test.mjs 补一条（默认不落盘 / 开开关才写）
+- src/aggregate.mjs：OVERLAPPING_CHANNEL_IDS + channelRegistered() +
+  MAGPIE_HUB_EXTRA_CHANNELS 开关（逗号分隔 id 或 all）
+- index.mjs：未启用的渠道导出**对象占位**（magpie 只把函数导出当插件）；
+  HUB_PLUGINS 仍带十条真函数（测试遍历用）
+- sweep/sweepCheckins：未注册渠道连后台扫描都不跑（不是只藏卡片）
+- tools/register-local.mjs / REGISTRY_PR.md：条目只列默认五条 + 新 summary
+- tests/overlap.test.mjs（8 例）+ split/no-host-writes 跟进；
+  tests/setup.mjs 钉死默认态，不受本机开关影响

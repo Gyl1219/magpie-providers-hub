@@ -72,6 +72,61 @@ export const PROVIDER_IDS = CHANNELS.map(providerIdOf)
 // 供测试遍历 stub（authorize 契约测试必须覆盖每一个渠道，漏一个就会真发网络请求）
 export { CHANNELS as REGISTERED_CHANNELS }
 
+// ── 与 registry 现有插件重叠的渠道：默认不注册（可开关打开）────────────────
+//
+// ⚠️ 社区审核（magpie-community/plugins PR #502，yetone）的原话：registry 里
+//    同一个订阅出现两个入口、两套登录、两套额度，「用户会搞不清该装哪个，出了
+//    问题也说不清是哪个插件的」。重叠的四/五个渠道：
+//
+//    | 本插件                 | registry 已有            | 包                       |
+//    |----------------------|------------------------|------------------------|
+//    | hub-officeace        | officeace              | officeace-auth           |
+//    | hub-autoclaw(intl)   | autoclaw / autoclaw-cn | opencode-autoclaw-auth   |
+//    | hub-loomy            | loomy                  | opencode-loomy-auth      |
+//    | hub-minimaxintl      | minimax-code-global    | opencode-minimax-auth    |
+//
+//    故这五个**默认不注册**（入口导出的是占位对象，magpie 不会把它当插件），
+//    registry 条目也只列不重叠的五个。要用它们：设环境变量打开，登录后照常。
+//    ⚠️ 代码留在包里不删 —— 已经登录的用户不会因为升级而掉线。
+export const OVERLAPPING_CHANNEL_IDS = ['officeace', 'autoclaw', 'autoclawintl', 'loomy', 'minimaxintl']
+
+/** 打开重叠渠道的开关（逗号分隔的渠道 id，或 `all`）。 */
+export const EXTRA_CHANNELS_ENV = 'MAGPIE_HUB_EXTRA_CHANNELS'
+
+/** 默认注册的渠道（不重叠的那几个）—— registry 条目列的就是这些。 */
+export const DEFAULT_PROVIDER_IDS = CHANNELS
+  .filter((c) => !OVERLAPPING_CHANNEL_IDS.includes(c.id))
+  .map(providerIdOf)
+
+/** 解析开关：{ all, ids }。空串 = 没开任何额外渠道。 */
+export function extraChannelsFrom(raw) {
+  const list = String(raw ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+  return { all: list.includes('all'), ids: new Set(list) }
+}
+
+/**
+ * 该渠道这次要不要注册成供应商。
+ * @param {string} channelId
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function channelRegistered(channelId, env = process.env) {
+  if (!OVERLAPPING_CHANNEL_IDS.includes(channelId)) return true
+  const { all, ids } = extraChannelsFrom(env?.[EXTRA_CHANNELS_ENV])
+  return all || ids.has(String(channelId).toLowerCase())
+}
+
+/** 未注册渠道的占位值：**对象**导出，magpie 不会把它当成插件函数。 */
+export function disabledChannelMarker(channelId) {
+  return Object.freeze({
+    disabled: true,
+    providerId: providerIdOf({ id: channelId }),
+    reason: `与 magpie 社区 registry 里已有的插件重叠，默认不注册；设 ${EXTRA_CHANNELS_ENV}=${channelId}（或 all）后重启 magpie 即可启用`,
+  })
+}
+
 /** magpie 在到期前这么多毫秒调 auth.refresh（对齐各渠道 10 分钟临期口径）。 */
 const REFRESH_LEAD_MS = 10 * 60 * 1000
 
@@ -588,6 +643,7 @@ function hasAccountSlot(channel) {
 async function sweepCheckins() {
   const tally = checkinTallyOf()
   for (const channel of CHANNELS) {
+    if (!channelRegistered(channel.id)) continue
     if (typeof channel.checkin !== 'function') continue
     if (!signedIn(channel)) continue
     if (hasAccountSlot(channel)) continue
@@ -666,6 +722,10 @@ async function migrateLegacySlots(authSet, channel, providerId) {
  */
 async function sweepAllChannels() {
   for (const each of CHANNELS) {
+    // ⚠️ 默认不注册的渠道（与 registry 重叠那五个）连 sweep 也不跑：
+    //    「默认不注册」不是只藏卡片 —— 不扫额度、不补签、不出现在快照里，
+    //    否则网络请求照发，等于后门注册（PR #502 审核语义）。
+    if (!channelRegistered(each.id)) continue
     if (!signedIn(each)) continue
     // ⚠️ 走 ensure（临期软续期）：AutoClaw 的 access_token 只活 24h，
     //    旁路凭据不续期的话卡片第二天就报「额度查询失败」。
