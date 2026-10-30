@@ -481,6 +481,29 @@ async function usage(credential) {
   const now = Date.now()
   const windows = []
   let sawAny = false
+  /**
+   * 每批的**发放量**（magpie 的「分母」）。
+   *
+   * ⚠️ 上游 `creditItems` 只有 `creditsRemaining` / `expiresAt` / `label`，**没有**
+   *    「原本发多少」。但同一 label 的批次发放量相同（实测：27 批「每日登录奖励」
+   *    里没动过的就是 100，最早那批 70.94 = 已经花掉 29）⇒ 用**同 label 的最大剩余量**
+   *    当分母。
+   * ⚠️ 证据门槛：同 label 至少 2 批才启用（要有"至少一批是满额"的证据）；
+   *    只有一批时宁可不给分母，也不拿它自己的剩余量冒充总量（那就是恒 100%）。
+   */
+  const grantByLabel = new Map()
+  for (const item of items) {
+    if (typeof item !== 'object' || item === null) continue
+    const r = readNumber(item.creditsRemaining)
+    if (r === undefined || r <= 0) continue
+    const key = typeof item.label === 'string' && item.label.length > 0
+      ? item.label
+      : (typeof item.type === 'string' ? item.type : '积分')
+    const rec = grantByLabel.get(key) ?? { max: 0, count: 0 }
+    rec.max = Math.max(rec.max, r)
+    rec.count += 1
+    grantByLabel.set(key, rec)
+  }
   for (const item of items) {
     if (typeof item !== 'object' || item === null) continue
     const remaining = readNumber(item.creditsRemaining)
@@ -493,11 +516,26 @@ async function usage(credential) {
     const expMs = expiresAt.length > 0 ? Date.parse(expiresAt) : NaN
     if (Number.isFinite(expMs) && expMs <= now) continue // 已过期的包不可用
     const until = Number.isFinite(expMs) ? untilText(new Date(expMs).toISOString(), now) : undefined
+    const grant = (() => {
+      const rec = grantByLabel.get(label)
+      if (rec === undefined || rec.count < 2) return undefined
+      return remaining <= rec.max ? rec.max : undefined // 剩余超最大值 = 不是纯该 label，别给分母
+    })()
     windows.push({
       name: `${label} · 剩 ${remaining}`,
-      used: 0,
-      // amount 供聚合层指针汇总求和（>3 桶自动折叠成 临期/长期/永久）
-      amount: remaining,
+      used: grant !== undefined ? Math.round(((grant - remaining) / grant) * 100) : 0,
+      // _qty：**批大小**，只给聚合层求和用（tierSummarize 读它，输出前会删掉）。
+      // ⚠️ 不能用 amount 兼这个职责：magpie 把 amount 当「已用量」，
+      //    有 limit 时它算 (limit - amount) / limit —— 语义正好相反。
+      _qty: remaining,
+      ...(grant !== undefined
+        ? {
+            // ⚠️ 收口两位：积分是浮点流水，100 - 70.94 = 29.060000000000002
+            amount: Math.round((grant - remaining) * 100) / 100,
+            limit: grant,
+            unit: '积分',
+          }
+        : {}),
       display: until !== undefined ? `剩 ${remaining} · ${until}` : `剩 ${remaining}`,
       // resetsAt = 窗口边界（magpie 靠它画「剩余额度走势」的投影虚线）；
       // runsOutAt 是「按速度什么时候用完」的作废语义，两者都给，各喂各的渲染。

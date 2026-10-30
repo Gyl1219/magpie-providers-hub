@@ -490,18 +490,39 @@ function readPreviousSnapshot() {
  *   （resetsAt 是旧形态兼容）。
  */
 export function tierSummarize(rows) {
-  const summable = rows.filter((r) => typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0)
+  /**
+   * 批大小（求和用）。
+   * ⚠️ 优先读 `_qty`：LobsterAI 的 `amount` 现在是 magpie 语义的「已用量」
+   *    （有分母时），不能再兼任「这批还剩多少」—— 两者语义相反。
+   *    没有 `_qty` 的老行仍按 `amount` 当批大小（向后兼容）。
+   */
+  const qtyOf = (r) => {
+    const q = r?._qty
+    if (typeof q === 'number' && Number.isFinite(q)) return q
+    const a = r?.amount
+    return typeof a === 'number' && Number.isFinite(a) ? a : undefined
+  }
+  /** 输出前删掉私有字段（magpie 不认识，也不该看到）。 */
+  const clean = (r) => {
+    if (r === null || typeof r !== 'object' || r._qty === undefined) return r
+    const { _qty, ...keep } = r
+    return keep
+  }
+  const summable = rows.filter((r) => {
+    const q = qtyOf(r)
+    return typeof q === 'number' && Number.isFinite(q) && q > 0
+  })
   if (summable.length <= 3) {
     // 小组数渠道保留原始命名，但**到期字段仍要剥**（浅灰行去重，用户报障）；
     // 渠道行带 runsOutAt 只是给本函数的分类输入，不该漏到卡片上。
     // ⚠️ resetsAt 例外：走势图投影虚线（even burn）只认它，剥了就没线。
     return rows.map((r) => {
-      if (!(typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0)) return r
+      if (!summable.includes(r)) return clean(r)
       const { runsOutAt, runsOut, ...keep } = r
-      return keep
+      return clean(keep)
     })
   }
-  const rest = rows.filter((r) => !(typeof r?.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0))
+  const rest = rows.filter((r) => !summable.includes(r))
   const expiryOf = (r) => r.runsOutAt ?? r.resetsAt
   const permanent = summable.filter((r) => expiryOf(r) === undefined)
   const expiring = summable
@@ -514,10 +535,10 @@ export function tierSummarize(rows) {
     out.push({
       ...pointer,
       // 长小数收口（LobsterAI 的 creditItems 是浮点流水：72.01688…）
-      name: `临期 · 剩 ${tidyNumber(pointer.amount)}`,
+      name: `临期 · 剩 ${tidyNumber(qtyOf(pointer))}`,
       // ⚠️ display 只放倒计时 —— 剩余量已在 name 里（重复了用户会看到两遍）；
       //    倒计时必须进**亮色主文本**：「将于 X 过期」辅助行浅灰看不清（用户报障）
-      display: untilText(expiry) ?? `剩 ${tidyNumber(pointer.amount)}`,
+      display: untilText(expiry) ?? `剩 ${tidyNumber(qtyOf(pointer))}`,
     })
     // ⚠️ 刻意不挂 runsOutAt/runsOut：亮色行已带倒计时，再挂会让 magpie 渲染
     //    出第三行浅灰「N 将于 X 过期」（用户报障：重复）。
@@ -534,22 +555,39 @@ export function tierSummarize(rows) {
   if (longTerm.length > 0) {
     const earliest = longTerm[0]
     // ⚠️ 浮点流水求和会有漂移（2158.4905040000003）—— 先求和再收口到两位
-    const amount = tidyNumber(longTerm.reduce((s, r) => s + r.amount, 0))
+    const amount = tidyNumber(longTerm.reduce((s, r) => s + qtyOf(r), 0))
     const expiry = expiryOf(earliest)
     // ⚠️ untilText() 本身已带「…后作废」，不要再拼「作废」（否则出「作废作废」）
     const untilEarliest = untilText(expiry)
+    /**
+     * 合并窗口的分母：**每批分母之和**（只有当每一批都给出了 limit 才算，
+     * 缺一批就不给 —— 半真半假的比例比没有更误导）。
+     */
+    const limits = longTerm.map((r) => r.limit)
+    const amounts = longTerm.map((r) => r.amount)
+    const limitSum = limits.every((v) => typeof v === 'number' && Number.isFinite(v))
+      ? tidyNumber(limits.reduce((s, v) => s + v, 0)) : undefined
+    const usedSum = amounts.every((v) => typeof v === 'number' && Number.isFinite(v))
+      ? tidyNumber(amounts.reduce((s, v) => s + v, 0)) : undefined
     out.push({
       ...earliest,
       name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
       amount: Number(amount),
       display: untilEarliest !== undefined ? `最早 ${untilEarliest}` : `剩 ${amount} · ${longTerm.length} 批`,
+      ...(limitSum !== undefined && usedSum !== undefined
+        ? {
+            limit: Number(limitSum),
+            amount: Number(usedSum),
+            used: limitSum > 0 ? Math.round((usedSum / limitSum) * 100) : 0,
+          }
+        : {}),
     })
     // 同上：runsOutAt/runsOut 去掉（重复行），resetsAt 留着（走势虚线要它）
     delete out[out.length - 1].runsOutAt
     delete out[out.length - 1].runsOut
   }
   if (permanent.length > 0) {
-    const amount = tidyNumber(permanent.reduce((s, r) => s + r.amount, 0))
+    const amount = tidyNumber(permanent.reduce((s, r) => s + qtyOf(r), 0))
     out.push({
       name: permanent.length === 1 && typeof permanent[0].name === 'string' ? permanent[0].name : `永久 · 剩 ${amount}`,
       used: 0,
@@ -557,7 +595,7 @@ export function tierSummarize(rows) {
       display: `剩 ${amount}`,
     })
   }
-  return [...out, ...rest]
+  return [...out, ...rest].map(clean)
 }
 
 /** 模块级 sweep 状态（十个实例共用一个定时器）。 */

@@ -134,13 +134,77 @@ test('余额：creditItems 逐笔输出（带 expiresAt 作废时刻），过期
   try {
     const windows = await lobsteraiChannel.usage(CRED)
     assert.equal(windows.length, 3, '过期笔不显示（不可用）')
-    // 逐笔带 amount + runsOutAt —— 聚合层据此折叠成 临期/长期/永久
-    assert.equal(windows[0].amount, 100)
+    // 逐笔带 _qty（批大小，聚合层求和用）+ runsOutAt —— 聚合层据此折叠成 临期/长期/永久
+    assert.equal(windows[0]._qty, 100, '批大小走 _qty')
+    // ⚠️ amount 是 magpie 语义的「已用量」，不是批大小（两者语义相反，别混用）
+    assert.equal(windows[0].limit, 100, '分母 = 同 label 的最大剩余量')
+    assert.equal(windows[0].amount, 0, '这批一分未动 → 已用 0')
     // 无时区本地串按本地解析回同一瞬间（round-trip 语义）
     assert.equal(windows[0].runsOutAt, new Date(iso(future1)).toISOString())
     assert.match(windows[0].display, /后作废/, '倒计时进 display（指针桶收起后仍可见）')
     assert.equal(windows[1].runsOutAt, new Date(iso(future2)).toISOString())
     assert.equal(windows[2].runsOutAt, undefined, '无到期 = 永久')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('余额：同 label 的满额批当分母 → 已花的批次给出真实百分比', async () => {
+  const future1 = Date.now() + 2 * 86400_000
+  const future2 = Date.now() + 3 * 86400_000
+  const iso = (ms) => {
+    const d = new Date(ms)
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  }
+  const stub = stubFetch([{
+    match: '/api/user/profile-summary',
+    respond: () => json({
+      code: 0,
+      data: {
+        totalCreditsRemaining: 170.94,
+        creditItems: [
+          // 最早那批已经花了 29.06（原本 100，同 label 的另一批没动 → 分母可证）
+          { label: '每日登录奖励', creditsRemaining: 70.94, expiresAt: iso(future1) },
+          { label: '每日登录奖励', creditsRemaining: 100, expiresAt: iso(future2) },
+        ],
+      },
+    }),
+  }])
+  try {
+    const windows = await lobsteraiChannel.usage(CRED)
+    assert.equal(windows[0].limit, 100, '分母 = 同 label 最大剩余量（100）')
+    assert.equal(windows[0].amount, 29.06, '已用 = 100 - 70.94')
+    assert.equal(windows[0].used, 29, 'used 是百分比（29.06/100 取整）')
+    assert.equal(windows[0].unit, '积分')
+    assert.equal(windows[1].amount, 0, '没动过的那批已用 0')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('余额：只有一批同 label 时不给分母（不拿剩余量冒充总量）', async () => {
+  const future1 = Date.now() + 2 * 86400_000
+  const iso = (ms) => {
+    const d = new Date(ms)
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  }
+  const stub = stubFetch([{
+    match: '/api/user/profile-summary',
+    respond: () => json({
+      code: 0,
+      data: {
+        totalCreditsRemaining: 70.94,
+        creditItems: [{ label: '每日登录奖励', creditsRemaining: 70.94, expiresAt: iso(future1) }],
+      },
+    }),
+  }])
+  try {
+    const windows = await lobsteraiChannel.usage(CRED)
+    assert.equal(windows[0].limit, undefined, '没有证据说明满额是多少 → 不给分母')
+    assert.equal(windows[0].amount, undefined, '也就没有「已用」')
+    assert.equal(windows[0]._qty, 70.94, '批大小照旧给聚合层')
   } finally {
     stub.restore()
   }
