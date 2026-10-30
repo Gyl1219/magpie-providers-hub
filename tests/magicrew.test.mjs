@@ -127,6 +127,13 @@ test('usage：无到期余额出永久桶；剩 0 出已耗尽桶（aside）', a
       const permanent = windows.find((w) => /永久/.test(w.name))
       assert.ok(permanent, '应有永久桶')
       assert.match(permanent.display, /剩余 500/)
+      // ⚠️ 永久桶必须**不带 balance**（2026-10-31 真机）：
+      //   magpie 的 quotaNoShare = !!text || used == null || balance != null，
+      //   带 balance 就被当「钱包」—— 不出百分比、不出进度条，只显示「500 积分」。
+      assert.equal(permanent.balance, undefined, '永久桶不能发 balance（会失去百分比和进度条）')
+      assert.ok(permanent.limit > 0, '永久桶要发 limit（quotaCount 靠它拼「N / M 积分」）')
+      assert.equal(permanent.amount, 0, 'amount = 已用量')
+      assert.equal(permanent.unit, '积分')
       const spent = windows.find((w) => /已耗尽/.test(w.name))
       assert.ok(spent, '应有已耗尽桶')
       assert.equal(spent.aside, true)

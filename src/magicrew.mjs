@@ -836,9 +836,27 @@ $('go-jwt').addEventListener('click', async () => {
       }
       // ③ 永久余额单独
       for (const b of buckets.filter((x) => x.band === '永久')) {
-        // balance/unit：magpie ≥0.1.1790 的一等「还剩多少」读数（路由按它认识账号，
-        // 池子大的排前、花光的垫底）；旧宿主不认识该字段，忽略无副作用。
-        windows.push({ name: `${b.label} · 永久`, used: 0, display: `剩余 ${b.remaining}`, balance: b.remaining, unit: '积分' })
+        // ⚠️⚠️ **不要发 balance**（2026-10-31 真机，用户报障「永久没有进度条和百分比」）。
+        //    magpie 的渲染规则（从二进制里的前端代码读到，非猜测）：
+        //      quotaNoShare(w) = !!w.text || w.used == null || **w.balance != null**
+        //      quotaText(w)    = w.balance != null ? "{n} left" : count + " · " + pct
+        //      if (!w.unlimited && !quotaNoShare(w)) 才 append(track)   ← 进度条
+        //    ⇒ 带 balance 的窗口被当成「钱包」，**永远不出百分比、不出进度条**，
+        //      只显示「981 积分」。这正是我们之前那张卡的样子。
+        //    正确形态（对齐 community 的 officeace-auth）：给 limit + amount + unit，
+        //      quotaCount = `${limit - amount} / ${limit} ${unit}`（quotaLeft 口径）
+        //      pct        = 100 - used
+        //    ⇒ 卡片显示「981 / 981 积分 · 剩余 100%」+ 满进度条。
+        //    ⚠️ 永久余额没有「上限」可言，limit 取当前余额（= 这堆存量一分未动），
+        //      与 officeace 对试用桶的做法同款（500 / 500 · 剩余 100%）。
+        windows.push({
+          name: `${b.label} · 永久`,
+          used: 0,
+          amount: 0,
+          limit: b.remaining,
+          unit: '积分',
+          display: `剩余 ${b.remaining}`,
+        })
       }
       // ④ 已耗尽 → aside 折叠（不占主位）
       for (const b of buckets.filter((x) => x.band === '已耗尽')) {

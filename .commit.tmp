@@ -1,13 +1,17 @@
-﻿修「0 models」：models() 认 magpie 传进来的 auth
+﻿修「永久窗口没有进度条和百分比」：别发 balance，改发 limit/amount/unit
 
-真机 2026-10-31：magicrew 两条渠道都显示 0 models（之前是 27/49）。
-根因：v0.5.0 去掉旁路凭据文件后凭据只在 memoryCredentials，**冷启动那一刻为空**
-⇒ signedIn() 为假 ⇒ 连远端目录都不拉 ⇒ 退回兜底表；magicrew 的兜底表是空的。
+真机 2026-10-31。从 magpie 二进制里内嵌的前端代码读到的渲染规则（不是猜）：
 
-- discoverModels(channel, fallback, auth)：优先用调用方给的 auth
-  （authOfChannel 命中则 ensureAuth，顺带写进内存缓存）
-- provider.models(provider, ctx)：取 ctx.auth ?? ctx.getAuth
-  （社区插件 sync models(provider, { auth }) 同款签名）
-- 回归：aggregate.test 断言 ctx.auth 在位时确实拉远端目录
+  quotaNoShare(w) = !!w.text || w.used == null || **w.balance != null**
+  quotaText(w)    = w.balance != null ? "{n} left" : quotaCount + " · " + pct
+  quotaCount(w)   = w.limit > 0 ? ${limit-amount} /   : w.display
+  if (!w.unlimited && !quotaNoShare(w)) 才渲染进度条
 
-另：0.5.3 已补 resetsAt（走势图投影虚线的依据），本版一并发布。
+⇒ 带 balance 的窗口被当成「钱包」：只显示「981 积分」，**没有百分比也没有进度条**。
+这正是超级麦吉卡片「积分余额 · 永久」那一行的样子（用户报障）。
+
+改法（对齐 community 的 officeace-auth：它两条窗口都显示「500 / 500 积分 · 剩余 100%」）：
+永久桶改发 used=0 + amount=0 + limit=当前余额 + unit='积分'，去掉 balance。
+永久余额没有上限，limit 取存量本身（这堆一分未动），与 officeace 对试用桶同款。
+
+回归：magicrew.test 断言永久桶 balance === undefined 且 limit/amount/unit 齐备。
