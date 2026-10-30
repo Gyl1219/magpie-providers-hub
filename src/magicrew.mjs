@@ -809,9 +809,23 @@ $('go-jwt').addEventListener('click', async () => {
       const pointer = buckets.find((b) => typeof b.band === 'string' && b.band.startsWith('临期'))
       if (pointer !== undefined) {
         const expiryShort = shortDate(pointer.expireRaw)
+        /**
+         * ⚠️ 「每日赠送」有**确定的分母**：`site.dailyGrant`（国内 200 / 国际 50，
+         * 与签到接口的发放量同源）。没有它时进度条只能恒满（`used: 0`），
+         * 用户看不出今天已经花掉多少 —— 真机 2026-10-31 报障。
+         * 只在这一桶的剩余量不超过发放量时启用（超了就说明不是纯当日赠送，
+         * 宁可不给分母，也不显示「250 / 200」这种不可能的数）。
+         */
+        const dailyTotal = pointer.label === '每日赠送' && Number.isFinite(site.dailyGrant)
+          && pointer.remaining <= site.dailyGrant ? site.dailyGrant : undefined
+        const usedAmount = dailyTotal !== undefined
+          ? Math.min(dailyTotal, Math.max(0, dailyTotal - pointer.remaining))
+          : undefined
         windows.push({
           name: `${pointer.label} · ${pointer.band}`,
-          used: 0,
+          used: usedAmount !== undefined ? Math.round((usedAmount / dailyTotal) * 100) : 0,
+          // 有分母才给 amount/limit/unit —— 有它们 magpie 才拼「剩余 / 总量 积分 · 剩余 X%」
+          ...(usedAmount !== undefined ? { amount: usedAmount, limit: dailyTotal, unit: '积分' } : {}),
           // resetsAt = 窗口边界：magpie 靠它画「剩余额度走势」的**投影虚线**
           //（不带就只有空坐标轴 —— 真机 2026-10-31 用户报障「没有虚线功能」）。
           ...(Number.isFinite(pointer.expireMs) ? { resetsAt: new Date(pointer.expireMs).toISOString() } : {}),

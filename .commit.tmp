@@ -1,19 +1,15 @@
-﻿修「多批次渠道没有走势虚线」：tierSummarize 别再删 resetsAt
+﻿magicrew：每日赠送补真实分母，进度条不再恒满
 
-真机 2026-10-31（LobsterAI 卡片）：两条窗口都有进度条，但「剩余额度走势」
-只有空坐标轴、没有 even-burn 投影虚线。同屏 OfficeAce 有。
+用户报障（2026-10-31）：LobsterAI / 超级麦吉 的额度条永远是 100%，看不出
+今天已经花掉多少。上游只给「这批还剩多少」，不给「原本发多少」，
+所以 used 只能写 0 —— 进度条恒满。
 
-从 magpie 二进制里的前端代码读到（非猜测）：
+「每日赠送」例外：分母是站点常量 site.dailyGrant（国内 200 / 国际 50，
+与签到发放量同源），直接用它：
+  limit = dailyGrant, amount = dailyGrant - remaining, used = 百分比
+⇒ 卡片显示「150 / 200 积分 · 剩余 75%」，进度条随消耗真实下降。
 
-  let reset = l.window.resetsAt ? Date.parse(l.window.resetsAt) : last.reset
-  if (c.reset && c.start < c.reset && !short) → 画 qc-even 虚线
+⚠️ 只在 remaining <= dailyGrant 时启用：超了就说明不是纯当日赠送，
+宁可不给分母，也不显示「250 / 200」这种不可能的数。
 
-⇒ 虚线**只认窗口的 resetsAt**。而 lobsterai 26 批走 tierSummarize 汇总时，
-  「去掉重复浅灰行」的规则把 runsOutAt / runsOut / **resetsAt** 一起删了
-  ⇒ 汇总出来的临期/长期两行没有窗口终点 ⇒ 没有虚线。
-
-改法：runsOutAt / runsOut 照旧删（它们才会造成「N 将于 X 过期」重复行），
-**resetsAt 保留**（临期 = 最早到期那批，长期 = 剩余批次里最早的那批）。
-≤3 桶的透传分支同样保留 resetsAt。
-
-回归：aggregate.test 断言两档都带 resetsAt、且仍不带 runsOutAt。
+回归：magicrew.test 两条（正常分母 / 超量不给分母）。

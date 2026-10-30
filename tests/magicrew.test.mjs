@@ -141,6 +141,42 @@ test('usage：无到期余额出永久桶；剩 0 出已耗尽桶（aside）', a
   )
 })
 
+test('usage：每日赠送有真实分母（进度条随消耗下降，不再恒满）', async () => {
+  const eod = new Date(); eod.setHours(23, 59, 59, 0)
+  const eodStr = `${eod.getFullYear()}-${String(eod.getMonth()+1).padStart(2,'0')}-${String(eod.getDate()).padStart(2,'0')} 23:59:59`
+  await withFetch(
+    () => ({ body: { code: 1000, data: { total_points: 1150, expiring_quota_details: [
+      { remaining_points: 150, expires_at: eodStr }, // 当天赠送 200，已花 50
+    ] } } }),
+    async () => {
+      const windows = await magicrewChannel.usage({ token: 'J', organizationCode: 'O' })
+      const pointer = windows.find((w) => /每日赠送/.test(w.name))
+      assert.ok(pointer, '应有每日赠送窗口')
+      // 站点常量 dailyGrant=200 → 「150 / 200 积分 · 剩余 75%」
+      assert.equal(pointer.limit, 200, '分母 = site.dailyGrant')
+      assert.equal(pointer.amount, 50, '已用 = 200 - 150')
+      assert.equal(pointer.used, 25, 'used 是百分比：50/200')
+      assert.equal(pointer.unit, '积分')
+    },
+  )
+})
+
+test('usage：剩余量超过发放量时不给分母（不显示「250 / 200」这种数）', async () => {
+  const eod = new Date(); eod.setHours(23, 59, 59, 0)
+  const eodStr = `${eod.getFullYear()}-${String(eod.getMonth()+1).padStart(2,'0')}-${String(eod.getDate()).padStart(2,'0')} 23:59:59`
+  await withFetch(
+    () => ({ body: { code: 1000, data: { total_points: 1250, expiring_quota_details: [
+      { remaining_points: 250, expires_at: eodStr },
+    ] } } }),
+    async () => {
+      const windows = await magicrewChannel.usage({ token: 'J', organizationCode: 'O' })
+      const pointer = windows.find((w) => /每日赠送/.test(w.name))
+      assert.equal(pointer.limit, undefined, '超出发放量就不给分母')
+      assert.equal(pointer.used, 0)
+    },
+  )
+})
+
 test('usage：401 → 提示重新登录（不炸）', async () => {
   await withFetch(() => ({ status: 401, body: { message: 'token expired' } }), async () => {
     const windows = await magicrewChannel.usage({ token: 'J', organizationCode: 'O' })
