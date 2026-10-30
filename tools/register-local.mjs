@@ -13,6 +13,7 @@
 //    收录（PR 进 magpie-community/plugins）—— 见 REGISTRY_PR.md。
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { cacheDirOf, registerSelf, _reset } from './self-register.mjs'
 
 const CONFIG_DIR = join(process.env.USERPROFILE ?? process.env.HOME ?? '.', '.config', 'magpie')
@@ -69,6 +70,9 @@ async function main() {
   console.log('保持运行 4 分钟，补上 magpie 官方拉取可能冲掉的条目…（Ctrl+C 可提前结束）')
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// ⚠️ 入口判断必须走 pathToFileURL：Windows 上 `file://${process.argv[1]}`
+//    会得到 `file://D:\…`（两斜杠 + 反斜杠），而 import.meta.url 是
+//    `file:///D:/…`（三斜杠 + 正斜杠）—— 两者永不相等，脚本会**静默不执行**。
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main()
 }
