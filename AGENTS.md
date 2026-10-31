@@ -199,6 +199,20 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 - 读用户给的 JSON 文件时**只读那一个文件**（不遍历目录），失败文案要把路径和
   `error.code` 说明白，并提示「也可以直接把 JSON 粘进这一栏」。
 
+### 栏位声明归渠道，不问聚合层
+
+手动导入的 `prompts` 来自 `channel.importCredential.manualPrompts`（文案是渠道自己的
+字段名），aggregate 只做「按声明问 + 把答案原样交给 `submit`」。现有四栏：
+`userId`（可选，留空从 JWT 取 uid）/ `token`（必填，整段 JSON 也认）/
+`refreshToken`（可选）/ `note`（可选，= 账号显示名）。
+
+- ⚠️ **refresh_token 不做硬必填**：真机上「只有 access_token」的账号正是最该导进来的
+  那批；缺它照常导入，只 warning「到期要重新导入」。别为了「提醒续期」把能用的账号挡掉。
+- **备注优先于昵称**（`accountIdOf`）：官方昵称打码成 `170****7196`，两个小号分不清。
+  重复导入不会因此改名 —— `importAccountId` 让按 token 命中的旧槽 `accountId` 优先。
+- **降级保护**（抄自 magpie-wpt）：旧槽的到期时间比这次导入的更晚 → 提示「覆盖反而是
+  降级」，只提示不拦。算在 `withPreviousSlot` 补字段**之前**，否则补过就不算降级。
+
 ## 8. 形态：一个插件，五条供应商（v0.5.0）
 
 0.3.x 是「一个 provider id `providers-hub` 内部聚合十渠道」。v0.4.0 拆成

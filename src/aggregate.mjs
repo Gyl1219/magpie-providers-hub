@@ -940,6 +940,24 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
     return filled
   }
 
+  /**
+   * 旧槽比这份凭据更晚到期 → 覆盖反而是降级（抄自 magpie-wpt 的防御约定）。
+   *
+   * 场景：用户手上有一份半年前的导出文件（access 还有效、refresh 早被别处消费），
+   * 又或者从别的小号抄错了行；导进去会把旧槽里更新鲜的凭据顶掉，账号从此更早过期。
+   * 只提示**不拦** —— 判断依据是两份凭据自报的到期时间，用户可能就是要换新设备登录。
+   */
+  const downgradeWarningOf = (credential) => {
+    const previous = sameSlotOf(credential)
+    if (previous === undefined) return undefined
+    const before = previous.expires ?? expiresMsOf({ expires_at: previous.expiresAt })
+    const next = expiresMsOf(credential)
+    if (before === undefined || next === undefined) return undefined
+    if (before <= next + 60_000) return undefined
+    const day = (ms) => new Date(ms).toISOString().slice(0, 10)
+    return '旧账号的凭据比这份更新（旧 ' + day(before) + ' 到期 / 新 ' + day(next) + ' 到期），覆盖反而会让账号更早过期'
+  }
+
   /** 账号卡片名（= accountId；重复导入与宿主 settle 都按它认账号）。 */
   const importAccountId = (credential) => {
     const same = sameSlotOf(credential)
@@ -1040,6 +1058,8 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       const accounts = Array.isArray(outcome?.accounts) ? outcome.accounts : []
       const warnings = Array.isArray(outcome?.warnings) ? outcome.warnings : []
       if (accounts.length === 0) throw new Error(warnings.join('；') || '没有可导入的账号')
+      // 降级提示要在 withPreviousSlot 补字段**之前**算：补过了就成了「没降级」。
+      for (const downgrade of new Set(accounts.map(downgradeWarningOf).filter(Boolean))) warnings.push(downgrade)
       const extra = await commitImportedAccounts(accounts, 1)
       const first = withPreviousSlot(accounts[0])
       const accountId = importAccountId(first)
@@ -1077,35 +1097,31 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       }
     }
 
-    // ① 手动导入：粘贴 access_token（也接受整段账号 JSON）
+    // ① 手动导入：user_id / access_token / refresh_token / 备注 四栏
+    //    ⚠️ 栏位声明来自渠道（importSpec.manualPrompts）：文案是渠道自己的字段名，
+    //       聚合层只负责「按声明问、把答案原样交给 submit」。
     const manual = {
       type: 'api',
       // keyless：宿主不渲染「API key」输入框，直接按 prompts 提问后调 authorize
       keyless: true,
-      label: importSpec.manualLabel ?? '手动导入（粘贴 token）',
-      prompts: [
-        {
+      label: importSpec.manualLabel ?? '手动导入（粘贴凭据）',
+      prompts: Array.isArray(importSpec.manualPrompts) && importSpec.manualPrompts.length > 0
+        ? importSpec.manualPrompts
+        : [{
           key: 'token',
           type: 'password',
-          message: 'LobsterAI access_token',
-          placeholder: 'eyJ…',
+          message: 'ACCESS_TOKEN（必填）',
           validate: (value) => (
-            typeof value === 'string' && value.trim() !== ''
-              ? null
-              : '请粘贴 access_token（也可以直接把整段账号 JSON 粘进来）'
+            typeof value === 'string' && value.trim() !== '' ? null : '请粘贴 access_token'
           ),
-        },
-        {
-          key: 'note',
-          type: 'text',
-          message: '账号备注（可选，留空 = 用上游昵称）',
-          placeholder: '小号 A',
-        },
-      ],
+        }],
       async authorize(inputs = {}) {
+        const text = (value) => (typeof value === 'string' ? value.trim() : '')
         return guard(() => runImport('manual', {
-          accessToken: typeof inputs.token === 'string' ? inputs.token.trim() : '',
-          note: typeof inputs.note === 'string' ? inputs.note.trim() : '',
+          accessToken: text(inputs.token),
+          refreshToken: text(inputs.refreshToken),
+          userId: text(inputs.userId),
+          note: text(inputs.note),
         }))
       },
     }

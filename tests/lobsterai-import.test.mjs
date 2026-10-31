@@ -179,14 +179,24 @@ test('导入入口是 magpie 原生表单：api + keyless + prompts', async () =
   assert.equal(manual.type, 'api')
   assert.equal(manual.keyless, true)
   assert.equal(typeof manual.authorize, 'function')
-  assert.deepEqual(manual.prompts.map((prompt) => prompt.key), ['token', 'note'])
-  assert.equal(manual.prompts[0].type, 'password')
-  assert.match(manual.prompts[0].message, /access_token/)
-  assert.match(manual.prompts[0].validate(''), /请粘贴/)
-  assert.match(manual.prompts[0].validate('   '), /请粘贴/)
-  assert.equal(manual.prompts[0].validate(TOKEN), null)
-  assert.equal(manual.prompts[1].type, 'text')
-  assert.equal(manual.prompts[1].validate, undefined, '备注是可选项，不校验')
+  // 四栏，顺序 = 官方导出文件的字段顺序（user_id → access → refresh → 备注）
+  assert.deepEqual(manual.prompts.map((prompt) => prompt.key), ['userId', 'token', 'refreshToken', 'note'])
+  const [userId, token, refresh, note] = manual.prompts
+  assert.equal(userId.type, 'text')
+  assert.match(userId.message, /USER ID/)
+  assert.match(userId.message, /留空/)
+  assert.equal(userId.validate, undefined, 'user_id 留空也能导入（自动从 token 识别）')
+  assert.equal(token.type, 'password')
+  assert.match(token.message, /ACCESS_TOKEN/)
+  assert.match(token.message, /必填/)
+  assert.match(token.validate(''), /请粘贴/)
+  assert.match(token.validate('   '), /请粘贴/)
+  assert.equal(token.validate(TOKEN), null)
+  assert.equal(refresh.type, 'password')
+  assert.match(refresh.message, /REFRESH_TOKEN/)
+  assert.equal(refresh.validate, undefined, 'refresh_token 可选：只有 access 的账号也要能导进来')
+  assert.equal(note.type, 'text')
+  assert.equal(note.validate, undefined, '备注是可选项，不校验')
 
   const file = plugin.auth.methods[2]
   assert.equal(file.type, 'api')
@@ -210,12 +220,16 @@ test('手动导入：结果带 refresh（宿主认的 oauth 形状），只有�
     submit: async ({ mode, fields }) => {
       assert.equal(mode, 'manual')
       assert.equal(fields.accessToken, TOKEN)
+      assert.equal(fields.refreshToken, REFRESH)
+      assert.equal(fields.userId, '151290')
       assert.equal(fields.note, '第二个号')
       return { accounts: [first, second], warnings: ['有 1 个账号 token 已失效，已跳过'] }
     },
   }, async () => {
     const { plugin, writes, toasts } = await build()
-    const out = await plugin.auth.methods[1].authorize({ token: '  ' + TOKEN + '  ', note: ' 第二个号 ' })
+    const out = await plugin.auth.methods[1].authorize({
+      token: '  ' + TOKEN + '  ', refreshToken: '  ' + REFRESH + '  ', userId: ' 151290 ', note: ' 第二个号 ',
+    })
 
     assert.equal(out.type, 'success')
     assert.equal(out.channel, 'lobsterai')
@@ -386,3 +400,93 @@ test('导入失败：读不到文件 / 文件里没有账号 / 一个账号都�
 
   assert.ok(toasts.some((toast) => String(toast.message).includes('导入失败')), '失败也要弹提示')
 })
+
+// ── 抄自 magpie-wpt 的两条防御约定 + 备注/手填 user_id ────────────────────
+
+test('到期键别名：expiry / expiration 也认（ISO 与秒级都行）', () => {
+  const iso = parseImportPayload({
+    mode: 'file',
+    fields: { text: JSON.stringify({ access_token: 'a'.repeat(32), expiry: '2027-01-02T03:04:05Z' }) },
+  })
+  assert.equal(iso.accounts[0].expires_at, String(Date.parse('2027-01-02T03:04:05Z')))
+
+  const seconds = parseImportPayload({
+    mode: 'file',
+    fields: { text: JSON.stringify({ access_token: 'b'.repeat(32), expiration: 1796051474 }) },
+  })
+  assert.equal(seconds.accounts[0].expires_at, String(1796051474 * 1000), '秒级要换算成毫秒')
+})
+
+test('备注就是账号名：填了用备注，没填才用上游昵称', async () => {
+  const named = parseImportPayload({
+    mode: 'manual',
+    fields: { accessToken: TOKEN, refreshToken: REFRESH, note: '手机小号 A' },
+  })
+  assert.equal(lobsteraiChannel.importCredential.accountIdOf(named.accounts[0]), '手机小号 A')
+
+  const fallbackName = parseImportPayload({
+    mode: 'file',
+    fields: { text: JSON.stringify({ nickname: '170****7196', access_token: TOKEN }) },
+  })
+  assert.equal(lobsteraiChannel.importCredential.accountIdOf(fallbackName.accounts[0]), '170****7196')
+
+  // 备注优先于昵称 —— 打码昵称两个小号根本分不清
+  const both = parseImportPayload({
+    mode: 'file',
+    fields: { text: JSON.stringify({ nickname: '170****7196', note: '小号 B', access_token: TOKEN }) },
+  })
+  assert.equal(lobsteraiChannel.importCredential.accountIdOf(both.accounts[0]), '小号 B')
+})
+
+test('手动导入的 user_id：填了按填的，留空从 token 里识别', () => {
+  const payload = Buffer.from(JSON.stringify({ uid: 998877 }), 'utf8').toString('base64url')
+  const jwt = 'h.' + payload + '.s'
+
+  const blank = parseImportPayload({ mode: 'manual', fields: { accessToken: jwt, userId: '' } })
+  assert.equal(blank.accounts[0].user_id, '998877', '留空 → 从 JWT 的 uid 识别')
+
+  const typed = parseImportPayload({ mode: 'manual', fields: { accessToken: jwt, userId: '151290' } })
+  assert.equal(typed.accounts[0].user_id, '151290', '手填的优先于 token 里的 uid')
+  assert.equal(typed.accounts[0].uid, '151290', 'uid 跟着手填的走（没有独立 uid 时两者同源）')
+})
+
+test('旧槽比这份凭据更新 → 提示「覆盖是降级」，但照常导入', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lobsterai-downgrade-'))
+  const authPath = join(dir, 'plugin-auth.json')
+  const newer = Date.now() + 400 * 24 * 3600_000
+  writeFileSync(authPath, JSON.stringify({
+    'hub-lobsterai': {
+      type: 'success',
+      channel: 'lobsterai',
+      accountId: '170****7196',
+      access_token: TOKEN,
+      refresh_token: REFRESH,
+      expires_at: String(newer),
+      expires: newer,
+    },
+  }))
+  const previous = process.env.DSH_HUB_AUTH_PATH
+  process.env.DSH_HUB_AUTH_PATH = authPath
+  try {
+    await withImporter({
+      // 手上那份是半年前的导出：access 还认，但到期比槽里那份早得多
+      submit: async () => ({
+        accounts: [{ nickname: '170****7196', access_token: TOKEN, refresh_token: REFRESH, expires_at: String(Date.now() + 7 * 24 * 3600_000) }],
+        warnings: [],
+      }),
+    }, async () => {
+      const { plugin, toasts } = await build()
+      const out = await plugin.auth.methods[1].authorize({ token: TOKEN, refreshToken: REFRESH, userId: '', note: '' })
+      assert.equal(out.type, 'success', '只提示，不拦导入')
+      assert.ok(
+        toasts.some((toast) => String(toast.message).includes('覆盖反而')),
+        '应提示旧槽更新鲜、覆盖是降级：' + JSON.stringify(toasts),
+      )
+    })
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HUB_AUTH_PATH
+    else process.env.DSH_HUB_AUTH_PATH = previous
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+

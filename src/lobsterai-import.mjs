@@ -41,7 +41,9 @@ function toEpochMs(value) {
 
 /** 从各种到期键里取毫秒：ISO / 空格时间 / 秒 / 毫秒 / expires_in 全认。 */
 function expiryOfRow(row) {
-  const keys = ['expires_at', 'expiresAt', 'expire_at', 'expires', 'expired_at']
+  // expiry / expiration 是别的导出工具（OAuth 通用命名）会用的键 —— 用户从别处
+  // 抄来的 JSON 里常见，认了不吃亏（实测官方客户端只用 expires_at）。
+  const keys = ['expires_at', 'expiresAt', 'expire_at', 'expires', 'expired_at', 'expiry', 'expiration']
   for (const key of keys) {
     const raw = row?.[key]
     if (typeof raw === 'string' && /[-T:]/.test(raw)) {
@@ -215,8 +217,17 @@ function mergeProfileInto(credential, data) {
 export function createImporter({ displayName, verify } = {}) {
   const fallbackName = typeof displayName === 'string' && displayName.length > 0 ? displayName : '账号'
 
-  /** 账号卡片的展示名（= 账号槽的 accountId；重复导入认它）。 */
-  const accountIdOf = (credential) => textOf(credential?.nickname) ?? textOf(credential?.yid)
+  /**
+   * 账号卡片的展示名（= 账号槽的 accountId；重复导入认它）。
+   *
+   * ⚠️ 顺序：**用户填的备注** > 上游昵称 > yid > user_id > uid > 渠道名。
+   *    备注排第一是刻意的：官方导出/接口给的昵称要么打码（`170****7196`）、
+   *    要么是一串手机号，两个小号根本分不清；用户手写的「手机小号 A」才是他
+   *    在 magpie 账号列表里想看到的东西。
+   *    重复导入时不会因此改名 —— aggregate 的 importAccountId 让旧槽的
+   *    accountId 优先（按 token 命中），只更新内容不换行。
+   */
+  const accountIdOf = (credential) => textOf(credential?.note) ?? textOf(credential?.nickname) ?? textOf(credential?.yid)
     ?? textOf(credential?.user_id) ?? textOf(credential?.uid) ?? fallbackName
 
   /**
@@ -255,11 +266,55 @@ export function createImporter({ displayName, verify } = {}) {
     return { accounts: accepted, warnings }
   }
 
+  /**
+   * 手动导入的四个栏位（magpie 原生表单逐题问的就是这些）。
+   *
+   * 只放**声明**（文案/占位/校验），不放问的顺序 —— 宿主按数组顺序问。
+   * 顺序照官方客户端导出文件里的字段排：user_id → access → refresh → 备注。
+   *
+   * ⚠️ refresh_token 故意**不做硬必填**：
+   *    真机上「只有 access_token」的账号正是最需要导进来的那批（客户端登录态还在、
+   *    refresh 已被别的地方消费）；要求必填等于把能用的账号挡在门外。缺它时
+   *    导入照常进行，只提示「到期要重新导入」（见 aggregate 的 warning）。
+   */
+  const manualPrompts = [
+    {
+      key: 'userId',
+      type: 'text',
+      message: 'USER ID（可选，留空自动从 token 里识别）',
+      placeholder: '数字 user_id',
+    },
+    {
+      key: 'token',
+      type: 'password',
+      message: 'ACCESS_TOKEN（必填）',
+      placeholder: '粘贴 accessToken',
+      validate: (value) => (
+        typeof value === 'string' && value.trim() !== ''
+          ? null
+          : '请粘贴 accessToken（也可以直接把整段账号 JSON 粘进来）'
+      ),
+    },
+    {
+      key: 'refreshToken',
+      type: 'password',
+      message: 'REFRESH_TOKEN（可选，建议填写：用来续期；只有 access 也能导入，到期要重新导入）',
+      placeholder: '粘贴 refreshToken',
+    },
+    {
+      key: 'note',
+      type: 'text',
+      message: '备注（可选，留空 = 用上游昵称；填了就是账号列表里显示的名字）',
+      placeholder: '例如：手机小号 A',
+    },
+  ]
+
   return {
-    manualLabel: '手动导入（粘贴 token）',
+    manualLabel: '手动导入（粘贴凭据）',
     fileLabel: '文件导入（账号 JSON）',
-    manualHint: '粘贴 access_token；也可以直接把整段账号 JSON（官方客户端导出的 lobsterai-1.json）粘进来。',
+    manualHint: '四个栏位：user_id（留空自动识别）/ access_token（必填）/ refresh_token（建议填，用来续期）/ 备注；ACCESS_TOKEN 那一栏也可以直接把整段账号 JSON（lobsterai-1.json）粘进来。',
     fileHint: '选择官方客户端导出的账号 JSON（单对象 / 数组 / {accounts:[…]} / JSONL 都可）。',
+    manualPrompts,
     submit,
     parse: parseImportPayload,
     accountIdOf,

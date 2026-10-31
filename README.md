@@ -115,14 +115,21 @@ Authorization**（带着会被拒，匿名头只有 Accept/Content-Type/User-Age
 `supportsToolCalling === false` 时才关（上游给 `null` = 未知，不是不支持）。
 
 **导入已有账号（不走网页登录）**：供应商的登录方式里除了「登录 …」还多两个入口 ——
-「手动导入（粘贴 token）」与「文件导入（账号 JSON）」。两个都是 magpie 的**原生表单**
+「手动导入（粘贴凭据）」与「文件导入（账号 JSON）」。两个都是 magpie 的**原生表单**
 （`type:'api'` + `keyless:true` + `prompts`）：点下去 magpie 自己弹输入框逐题问，
 答完当场落账号槽 —— **不打开网页、不监听端口、不写任何宿主文件**，配色和校验都是
 magpie 自己的。
 
-- 手动导入：粘 `access_token`（整段账号 JSON 直接粘进这一栏也行），第二个输入框是
-  可选的账号备注（留空就用上游昵称）。空值会被宿主拦在表单里；解析失败会把原因显示在
-  **同一张表单**上，改完再点一次即可，表单不关。
+- 手动导入四栏（顺序同官方导出文件的字段顺序）：
+  1. **USER ID**（可选）：留空就从 token 的 JWT 里取 `uid`（联网校验会再补一次）；填了按填的。
+  2. **ACCESS_TOKEN**（必填）：粘 token；整段账号 JSON 直接粘进这一栏也走同一个解析器。
+  3. **REFRESH_TOKEN**（可选但建议填）：**填了才能自动续期**。故意不做硬必填 ——
+     「只有 access_token」的账号正是最需要导进来的那批；缺它时导入照常，
+     只提示「到期要重新导入」。若同一个 token 已在本渠道某个槽里，旧槽的
+     `refresh_token` 会被自动补回来（不提示）。
+  4. **备注**（可选）：**填了就是账号列表里显示的名字**（优先于上游昵称）。官方昵称
+     要么打码成 `170****7196`、要么是一串手机号，两个小号根本分不清。
+  空值会被宿主拦在表单里；解析失败会把原因显示在**同一张表单**上，改完再点一次即可，表单不关。
 - 文件导入：填官方客户端导出的 `lobsterai-1.json` 路径（带引号也认、`~` 会展开成用户
   目录），或者直接把 JSON 内容粘进这一栏。
 
@@ -133,14 +140,19 @@ magpie 自己的。
 ```
 
 - 单个对象 / 数组 / `{"accounts":[…]}` / JSONL 都认；`expires_at` 秒或毫秒都换算成毫秒
-  （官方导出是**秒**，而本渠道 `expired()` 只认毫秒）；也认 `accessToken` 这类 camel 形态；
-  手动页直接把整段 JSON 粘进 access_token 框同样能解析。
+  （官方导出是**秒**，而本渠道 `expired()` 只认毫秒）；到期键除 `expires_at` / `expiresAt` /
+  `expire_at` / `expires` / `expired_at` 外也认 OAuth 通用名的 `expiry` / `expiration`；
+  也认 `accessToken` 这类 camel 形态；手动页直接把整段 JSON 粘进 access_token 框同样能解析。
 - 导入时默认联网校验一次：`profile-summary` 通 = 收下（顺手补齐昵称）；
   **401/403 判 token 无效并跳过**；风控 / 断网（如 40302）只提示、仍然导入 ——
   风控期目录与额度也是同一个错，不能因此判死 token。
 - 多账号导入：第一个账号以 oauth 形状交回 magpie（`refresh` 键必须在，宿主靠它决定写
   哪种槽位，再由 settle 按 `accountId` 合并），第 2..N 个插件自己 `auth.set` 到
   `hub-lobsterai#<随机>` 槽；同 `accountId` 重复导入 = 覆盖原槽（不产生重复账号）。
+  同一个 token 换了账号名（官方昵称打码 vs 联网校验拿到真名）也认得出：按 token 命中旧槽
+  后沿用旧 `accountId`，不会再建一行。
+- **降级保护**：若旧槽里那份凭据的到期时间比这次要导入的更晚，会提示「覆盖反而是降级」
+  （旧槽更早过期的才是升级）。只提示不拦 —— 判断只看两份凭据自报的到期时间。
 - 表单题目声明在 `auth.methods[].prompts`，由 magpie 的 `/api/plugin-signin/prompt`
   **实时**读取（`keyless` 则不渲染 API key 输入框、直接以 `key:''` 调 `authorize`）。
   它不会出现在 `plugin-providers.json` 里 —— 那份缓存只留 type/label/keyless，
