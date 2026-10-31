@@ -54,7 +54,10 @@ test('每个供应商一个登录入口（导入入口只能挂在首个登录�
     assert.equal(methods[0].type, 'oauth', `${exportName} 的登录入口应是 oauth`)
     assert.match(methods[0].label, /^登录 .+$/)
     for (const extra of methods.slice(1)) {
-      assert.equal(extra.type, 'oauth', `${exportName}: 导入入口也要是 magpie 认的 oauth 形状`)
+      // 导入入口是 magpie 原生表单：api + keyless（不渲染 API key 框）+ prompts
+      assert.equal(extra.type, 'api', `${exportName}: 导入入口应是 api 形状（原生表单）`)
+      assert.equal(extra.keyless, true, `${exportName}: 导入入口应 keyless`)
+      assert.ok(Array.isArray(extra.prompts) && extra.prompts.length > 0, `${exportName}: 导入入口缺 prompts`)
       assert.match(extra.label, /导入/, `${exportName}: 登录之后只允许挂导入入口`)
     }
   }

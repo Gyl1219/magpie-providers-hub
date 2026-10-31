@@ -37,7 +37,7 @@ import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { notSignedIn, untilText, readMagpieAuthSlots, readOwnAuthEntries, debugLog } from './shared.mjs'
-import { startImportWindow } from './import-window.mjs'
+import { join } from 'node:path'
 import { astudioChannel } from './astudio.mjs'
 import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
@@ -880,26 +880,81 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   /** 本渠道的用量窗口。 */
   const windowsOf = (credential) => usageWindowsOf(channel, credential, {})
 
-  // ── 账号导入（手动粘贴 token / 文件导入）─────────────────────────────────
+  // ── 账号导入（magpie 原生表单，不开浏览器窗口、不监听端口）─────────────────
   //
-  // 两件事：① 起一个本地一次性页面（magpie 的 auth.methods.prompts 存不下来，
-  // 见 src/import-window.mjs 头注）；② 把拿到的凭据写进**账号槽**。
+  // 两个入口都是 magpie 的 `type:'api'` + `keyless:true` 方法：
+  //   窗口先按 `prompts` 逐题问（/api/plugin-signin/prompt → 宿主的 nextPrompt），
+  //   答完以 `key:''` 调 `authorize(inputs)`。
+  // 全程在 magpie 自己的供应商编辑器里 —— 主题/键盘/校验都是宿主的，
+  // 不打开网页、不起 http server、不写任何宿主文件。
   //
-  // ⚠️ 写槽用的是 authorize 里拿到的 authSet 句柄 —— 宿主用 AsyncLocalStorage 记
-  //    会话作用域，"在 authorize 内注册"的完成链（settled.then）仍然写在**本次会话
-  //    的账号槽**上（和扫码登录同一条路）。
-  // ⚠️ 文件里可能有多个账号：第一条写会话槽位，其余写 `<provider>#<rand6>`。
-  //    magpie 的账号列表按 provider / provider#* 前缀收，所以这些槽都会显示出来。
-  const importAccountId = (credential) => {
+  // ⚠️ 结果形状（宿主 save() 的两条分支）：
+  //    · 带 `refresh` → setAuth(at, {type:'oauth', refresh, access, expires, ...extra})，
+  //      再由 settle() 把同 accountId 的旧槽合并（重复导入不产生重复账号）；
+  //    · 否则带 `key`（keyless 时是空串，falsy）→ 写成 api 槽；
+  //    · 两者都没有 → **一个字段都不写**，settle 返回 false（连 auth 事件都不发，
+  //      账号列表不刷新）。所以**第一个**账号以 oauth 形状交回宿主写，第 2..N 个自己写。
+  // ⚠️ 宿主的槽形状是 `access`/`refresh`，而本插件 loader 与渠道读的是
+  //    `access_token`/`refresh_token`/`expires_at` —— 结果里把凭据再原样带一份，
+  //    它们会进 `...extra` 一起落槽（`credentialOfAuth` 只剥 type/channel/expires/accountId）。
+
+  /** 渠道声明的导入器（没声明 importCredential 的渠道就没有导入入口）。 */
+  const importSpec = channel.importCredential ?? undefined
+
+  /**
+   * 同一个 token 已经在本渠道某个槽里 → 返回那个槽。
+   *
+   * 为什么需要（真机实测）：官方导出的昵称是**打码的**（`170****7196`），导入时联网
+   * 校验能拿到真名（`17027477196`）⇒ accountId 变了 ⇒ 宿主的 settle 认不出是同一个
+   * 账号，在旧槽旁边又建一行（同一个账号两行）；而且旧槽里的 refresh_token 会随覆盖
+   * 一起丢（只剩 access_token 就没法续期）。按 token 命中旧槽后：账号名沿用旧的
+   * （settle 按 whoOf 合并），续期字段也补齐。
+   */
+  const sameSlotOf = (credential) => {
+    const mine = [credential?.access_token, credential?.refresh_token]
+      .filter((token) => typeof token === 'string' && token !== '')
+    if (mine.length === 0) return undefined
     try {
-      const id = channel.importCredential?.accountIdOf?.(credential)
+      return readMagpieAuthSlots(PROVIDER).find((slot) => {
+        if (slot.channel !== channel.id) return false
+        const theirs = [slot.accessToken, slot.refreshToken]
+          .filter((token) => typeof token === 'string' && token !== '')
+        return theirs.some((token) => mine.includes(token))
+      })
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 老槽有、这次没有的续期字段（refresh_token / expires_at / uid）—— 补上再交回去。 */
+  const withPreviousSlot = (credential) => {
+    const previous = sameSlotOf(credential)
+    if (previous === undefined) return credential
+    const filled = { ...credential }
+    if (typeof filled.refresh_token !== 'string' && previous.refreshToken !== '') {
+      filled.refresh_token = previous.refreshToken
+    }
+    if (filled.expires_at === undefined && previous.expiresAt !== '') filled.expires_at = previous.expiresAt
+    if (filled.uid === undefined && previous.uid !== '') filled.uid = previous.uid
+    if (filled.user_id === undefined && previous.userId !== '') filled.user_id = previous.userId
+    return filled
+  }
+
+  /** 账号卡片名（= accountId；重复导入与宿主 settle 都按它认账号）。 */
+  const importAccountId = (credential) => {
+    const same = sameSlotOf(credential)
+    if (typeof same?.accountId === 'string' && same.accountId !== '') return same.accountId
+    try {
+      const id = importSpec?.accountIdOf?.(credential)
       return typeof id === 'string' && id !== '' ? id : channel.displayName
     } catch {
       return channel.displayName
     }
   }
 
-  const importAuthOf = (credential) => {
+  /** 账号槽里的 auth（本插件的形状；`expires` 是毫秒，`expires_at` 留给渠道判到期）。 */
+  const importAuthOf = (rawCredential) => {
+    const credential = withPreviousSlot(rawCredential)
     const expires = expiresMsOf(credential)
     return {
       type: 'success',
@@ -930,15 +985,18 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
     })
   }
 
-  /** 凭据落槽 + 进内存缓存（本进程内的目录/额度刷新立刻能用）。返回写入的账号名。 */
-  const commitImportedAccounts = async (accounts) => {
-    const keys = slotKeysForImport(accounts.map(importAccountId))
+  /**
+   * 把第 `start` 个之后的账号写进账号槽（第 0 个交回宿主写，见上面 ⚠️）。
+   * 返回写成功的账号名（用于 toast）。
+   */
+  const commitImportedAccounts = async (accounts, start = 0) => {
+    const rest = accounts.slice(start)
+    const keys = slotKeysForImport(rest.map(importAccountId))
     const written = []
-    for (let i = 0; i < accounts.length; i += 1) {
-      const credential = accounts[i]
+    for (let i = 0; i < rest.length; i += 1) {
+      const credential = rest[i]
       const auth = importAuthOf(credential)
       try {
-        rememberCredential(channel, credential)
         await authSet?.({ path: { id: keys[i] }, body: auth })
         written.push(auth.accountId)
         debugLog('import: wrote slot ' + keys[i] + ' (' + channel.id + ')')
@@ -946,66 +1004,136 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
         debugLog('import: write failed ' + keys[i] + ': ' + (error instanceof Error ? error.message : String(error)))
       }
     }
+    for (const credential of accounts) rememberCredential(channel, credential)
     writeSnapshot()
     return written
   }
 
-  /** 两个导入入口（渠道声明了 importCredential 才有）。 */
+  /**
+   * 「账号 JSON」一栏既可以是文件路径，也可以直接粘 JSON。
+   * 只读用户给的那一个文件（不遍历目录、不猜路径）。
+   */
+  const readImportSource = (raw) => {
+    const text = typeof raw === 'string' ? raw.trim() : ''
+    if (text === '') throw new Error('请填写账号 JSON 文件路径，或直接把 JSON 粘进这一栏')
+    const unquoted = text.replace(/^["']+/, '').replace(/["']+$/, '').trim()
+    if (unquoted.startsWith('{') || unquoted.startsWith('[')) return unquoted
+    const file = unquoted.startsWith('~') ? join(homedir(), unquoted.slice(1)) : unquoted
+    try {
+      return readFileSync(file, 'utf8')
+    } catch (error) {
+      const code = error?.code ?? 'IO'
+      throw new Error('读不到文件 ' + file + '（' + code + '）；也可以直接把 JSON 粘进这一栏')
+    }
+  }
+
+  /** 两个导入入口（magpie 原生表单；渠道声明了 importCredential 才有）。 */
   const buildImportMethods = () => {
-    const spec = channel.importCredential
-    if (spec === undefined || spec === null) return []
-    const buildImportMethod = (mode) => ({
-      type: 'oauth',
-      label: mode === 'file'
-        ? (spec.fileLabel ?? '文件导入')
-        : (spec.manualLabel ?? '手动导入'),
-      async authorize() {
-        const win = await startImportWindow({
-          title: '导入 ' + channel.displayName + ' 账号',
-          subtitle: mode === 'file' ? (spec.fileHint ?? '') : (spec.manualHint ?? ''),
-          onSubmit: (payload) => spec.submit({ ...payload, mode }),
-          opener: openBrowser,
-        })
-        debugLog('import window: ' + channel.id + ' ' + mode + ' ' + win.url)
-        const settled = win.result
-        // ⚠️ 反馈/落槽挂**自己的完成链**，不挂 callback —— magpie 对 auto 流程
-        //    未必回调（扫码登录真机实证过），这条链由页面提交/超时自己 settle。
-        void settled.then(async (outcome) => {
-          if (outcome?.ok !== true) {
-            if (outcome?.reason !== 'cancelled') {
-              toast(channel.displayName + '：' + (outcome?.message ?? '导入未完成'), 'warning')
-            }
-            return
-          }
-          const written = await commitImportedAccounts(outcome.accounts)
-          const warnings = Array.isArray(outcome.warnings) ? outcome.warnings : []
-          toast(channel.displayName + '：已导入 ' + written.length + ' 个账号（' + written.join('、') + '）')
-          if (warnings.length > 0) {
-            toast(channel.displayName + ' 导入提示：' + warnings.slice(0, 3).join('；'), 'warning')
-          }
-        }).catch((error) => {
-          const message = error instanceof Error ? error.message : String(error)
-          debugLog('import chain failed: ' + message)
-          toast(channel.displayName + ' 导入失败：' + message, 'error')
-        })
-        return {
-          url: win.url,
-          method: 'auto',
-          instructions: mode === 'file'
-            ? '在打开的页面里选择账号 JSON，点「导入」。'
-            : '在打开的页面里粘贴 access_token，点「导入」。',
-          async callback() {
-            const outcome = await settled
-            if (outcome?.ok !== true) throw new Error(outcome?.message ?? '导入已取消')
-            // callback 只能回一个账号；多账号已由完成链全部写进槽
-            const first = outcome.accounts[0]
-            rememberCredential(channel, first)
-            return importAuthOf(first)
-          },
-        }
+    if (importSpec === undefined || importSpec === null) return []
+
+    /**
+     * 提交 → 落槽 → toast → 把第一个账号以 oauth 形状交回宿主。
+     * 解析/校验失败**抛错**：宿主把 error 文本显示在同一个表单里（表单不关，能改）。
+     */
+    const runImport = async (mode, fields) => {
+      const outcome = await importSpec.submit({ mode, fields })
+      const accounts = Array.isArray(outcome?.accounts) ? outcome.accounts : []
+      const warnings = Array.isArray(outcome?.warnings) ? outcome.warnings : []
+      if (accounts.length === 0) throw new Error(warnings.join('；') || '没有可导入的账号')
+      const extra = await commitImportedAccounts(accounts, 1)
+      const first = withPreviousSlot(accounts[0])
+      const accountId = importAccountId(first)
+      const names = [accountId, ...extra]
+      if (typeof first.refresh_token !== 'string') {
+        warnings.push('这次只有 access_token，没有 refresh_token：到期后要重新导入（用官方导出的账号 JSON 文件导入可自动续期）')
+      }
+      toast(channel.displayName + '：已导入 ' + names.length + ' 个账号（' + names.join('、') + '）')
+      if (warnings.length > 0) toast(channel.displayName + ' 导入提示：' + warnings.slice(0, 3).join('；'), 'warning')
+      debugLog('import: ' + channel.id + ' ' + mode + ' -> ' + names.join(','))
+      const expires = expiresMsOf(first)
+      // ⚠️ `refresh` 必须出现在结果里（宿主用 'refresh' in result 判分支，
+      //    没有 refresh_token 时也保留这个键 —— 宿主只看键存不存在）。
+      const result = {
+        type: 'success',
+        ...first,
+        channel: channel.id,
+        accountId,
+        refresh: typeof first.refresh_token === 'string' ? first.refresh_token : undefined,
+        access: first.access_token,
+      }
+      if (expires !== undefined) result.expires = expires
+      return result
+    }
+
+    /** 提交失败 → 宿主认的失败形状（表单里显示 error 文本，不抛栈也不弹浏览器）。 */
+    const guard = async (run) => {
+      try {
+        return await run()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        debugLog('import failed: ' + channel.id + ': ' + message)
+        toast(channel.displayName + ' 导入失败：' + message, 'error')
+        return { type: 'failed', error: message }
+      }
+    }
+
+    // ① 手动导入：粘贴 access_token（也接受整段账号 JSON）
+    const manual = {
+      type: 'api',
+      // keyless：宿主不渲染「API key」输入框，直接按 prompts 提问后调 authorize
+      keyless: true,
+      label: importSpec.manualLabel ?? '手动导入（粘贴 token）',
+      prompts: [
+        {
+          key: 'token',
+          type: 'password',
+          message: 'LobsterAI access_token',
+          placeholder: 'eyJ…',
+          validate: (value) => (
+            typeof value === 'string' && value.trim() !== ''
+              ? null
+              : '请粘贴 access_token（也可以直接把整段账号 JSON 粘进来）'
+          ),
+        },
+        {
+          key: 'note',
+          type: 'text',
+          message: '账号备注（可选，留空 = 用上游昵称）',
+          placeholder: '小号 A',
+        },
+      ],
+      async authorize(inputs = {}) {
+        return guard(() => runImport('manual', {
+          accessToken: typeof inputs.token === 'string' ? inputs.token.trim() : '',
+          note: typeof inputs.note === 'string' ? inputs.note.trim() : '',
+        }))
       },
-    })
-    return [buildImportMethod('manual'), buildImportMethod('file')]
+    }
+
+    // ② 文件导入：给路径（读那个文件）或直接粘 JSON
+    const file = {
+      type: 'api',
+      keyless: true,
+      label: importSpec.fileLabel ?? '文件导入（账号 JSON）',
+      prompts: [
+        {
+          key: 'source',
+          type: 'text',
+          message: '账号 JSON 的文件路径，或直接粘贴 JSON',
+          placeholder: 'C:\\Users\\you\\lobsterai-1.json',
+          validate: (value) => (
+            typeof value === 'string' && value.trim() !== ''
+              ? null
+              : '请填写 JSON 文件路径，或直接把 JSON 粘进来'
+          ),
+        },
+      ],
+      async authorize(inputs = {}) {
+        return guard(async () => runImport('file', { text: readImportSource(inputs.source) }))
+      },
+    }
+
+    return [manual, file]
   }
   // 旧版账号槽 → 本供应商槽（一次性、幂等；见函数注释）。失败不影响启动。
   if (options.migrateLegacySlots !== false) {

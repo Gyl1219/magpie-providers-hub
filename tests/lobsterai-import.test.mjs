@@ -1,18 +1,22 @@
-// 账号导入（手动 / 文件）+ 一次性本地页面。
+// 账号导入（手动 / 文件）+ magpie 原生表单（type:'api' + keyless）。
 //
 // 全本地用例：不触网、不落盘到真实配置目录（tests/setup.mjs 已把 HOME 与
 // DSH_HUB_SNAPSHOT_PATH 重定向到临时目录）。
 //
-// ⚠️ 这里验证的是三件真机必踩的事：
+// ⚠️ 这里验证的是真机必踩的几件事：
 //   1. 官方客户端导出的 expires_at 是**秒**，本渠道 expired() 只认毫秒；
-//   2. 导入页面必须带一次性 nonce 才能 POST（本地端口也怕 CSRF）；
-//   3. 导入结果要落到**账号槽**（client.auth.set），且槽 key 不能把已有账号冲掉。
+//   2. 导入入口是 magpie 原生表单（prompts 逐题问、keyless 不渲染 API key 框），
+//      不再起本地页面、不监听端口；
+//   3. 结果**必须带 refresh 键**（宿主 save() 只看 'refresh' in result）——第一个账号
+//      以 oauth 形状交回宿主 settle 落槽，第 2..N 个插件自己 auth.set，槽 key 不互相冲掉。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { parseImportPayload, createImporter } from '../src/lobsterai-import.mjs'
-import { startImportWindow } from '../src/import-window.mjs'
 import { lobsteraiChannel } from '../src/lobsterai.mjs'
 import { makeHubPlugin } from '../src/aggregate.mjs'
 
@@ -31,27 +35,45 @@ const OFFICIAL = {
   account_mode: 'personal',
 }
 
-const nonceOf = (html) => {
-  const hit = /var NONCE = "([^"]+)"/.exec(html)
-  assert.ok(hit, '导入页面里应有一次性 nonce')
-  return hit[1]
+/** 建一个插件实例：记录 auth.set 的写入与 toast 文案。 */
+const build = async (channel = lobsteraiChannel, input = {}) => {
+  const writes = []
+  const toasts = []
+  const client = {
+    auth: { set: async ({ path, body }) => { writes.push({ key: path.id, body }) } },
+    tui: { showToast: (payload) => { toasts.push(payload.body) } },
+    ...(input.client ?? {}),
+  }
+  const plugin = await makeHubPlugin(channel)({ ...input, client }, { notify: false })
+  return { plugin, writes, toasts }
 }
 
-const postSubmit = (base, nonce, body) => fetch(base + 'submit', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', 'x-import-nonce': nonce },
-  body: JSON.stringify(body),
-})
-
-const readJson = async (response) => ({ status: response.status, body: await response.json() })
-
-const waitFor = async (check, timeoutMs = 3_000) => {
-  const started = Date.now()
-  while (Date.now() - started < timeoutMs) {
-    if (check()) return true
-    await new Promise((resolve) => setTimeout(resolve, 25))
+/**
+ * 换掉渠道的导入器（只换 submit，其余字段照旧）。
+ * ⚠️ createImporter() 在模块加载时就捕获了 verify，改 importCredential.verify 无效；
+ *    要「不联网跑通导入」只能换掉整个 submit。
+ */
+const withImporter = async (spec, run) => {
+  const original = lobsteraiChannel.importCredential
+  lobsteraiChannel.importCredential = { ...original, ...spec }
+  try {
+    return await run()
+  } finally {
+    lobsteraiChannel.importCredential = original
   }
-  return check()
+}
+
+// ⚠️ 必须 await 回调：直接 return 一个 promise 的话 finally 会在回调跑完前就删目录，
+//    第二、三次读文件就成了「读不到文件」（真机上不会发生，测试里会）。
+const withTempFile = async (name, content, run) => {
+  const dir = mkdtempSync(join(tmpdir(), 'lobsterai-import-'))
+  const file = join(dir, name)
+  writeFileSync(file, content)
+  try {
+    return await run(file)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 test('解析官方导出文件：秒级 expires_at 换毫秒字符串', () => {
@@ -85,7 +107,7 @@ test('多种文件形态都能读：数组 / {accounts} / JSONL，重复 token �
   assert.match(dup.warnings.join('；'), /重复/)
 })
 
-test('手动页直接粘整段 JSON 也走同一个解析器', () => {
+test('手动栏直接粘整段 JSON 也走同一个解析器', () => {
   const out = parseImportPayload({
     mode: 'manual',
     verify: false,
@@ -104,7 +126,7 @@ test('JWT 里的 uid / exp 能补出 userId 与到期时间', () => {
   assert.equal(out.accounts[0].expires_at, String(1796051474 * 1000))
 })
 
-test('没有 token / token 太短 → 抛错（页面显示红字，窗口不关）', () => {
+test('没有 token / token 太短 → 抛错（表单里显示红字，表单不关）', () => {
   assert.throws(() => parseImportPayload({ mode: 'manual', fields: {} }), /太短|缺少/)
   assert.throws(() => parseImportPayload({ mode: 'manual', fields: { accessToken: 'short' } }), /太短/)
   assert.throws(() => parseImportPayload({ mode: 'file', fields: { text: '{}' } }), /缺少 access_token/)
@@ -142,93 +164,8 @@ test('联网校验三分支：通过 / token 无效跳过 / 风控只提示仍�
   assert.equal(skipped.accounts.length, 1)
 })
 
-test('一次性页面：GET 出表单、POST 必须带 nonce、提交后 server 关闭', async () => {
-  const calls = []
-  const win = await startImportWindow({
-    title: '导入 测试渠道 账号',
-    subtitle: '这是副标题',
-    onSubmit: async (payload) => {
-      calls.push(payload)
-      return { accounts: [{ access_token: 't'.repeat(32) }], message: '已解析 1 个账号' }
-    },
-  })
-  assert.match(win.url, /^http:\/\/127\.0\.0\.1:\d+\/$/)
-
-  const page = await (await fetch(win.url)).text()
-  assert.ok(page.includes('手动导入') && page.includes('文件导入'), '页面两个 tab 都要在')
-  assert.ok(page.includes('导入 测试渠道 账号') && page.includes('这是副标题'))
-  const nonce = nonceOf(page)
-
-  const rejected = await readJson(await fetch(win.url + 'submit', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}',
-  }))
-  assert.equal(rejected.status, 403, '没有 nonce 的 POST 必须被拒')
-
-  const wrong = await readJson(await postSubmit(win.url, nonce + 'x', { mode: 'manual', fields: {} }))
-  assert.equal(wrong.status, 403)
-
-  const accepted = await readJson(await postSubmit(win.url, nonce, { mode: 'manual', fields: { accessToken: TOKEN } }))
-  assert.equal(accepted.status, 200)
-  assert.equal(accepted.body.ok, true)
-  assert.equal(accepted.body.message, '已解析 1 个账号')
-
-  const outcome = await win.result
-  assert.equal(outcome.ok, true)
-  assert.equal(outcome.mode, 'manual')
-  assert.equal(outcome.accounts.length, 1)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].fields.accessToken, TOKEN)
-
-  // 提交完成即关端口（一次性页面）
-  await assert.rejects(() => fetch(win.url))
-})
-
-test('页面提交出错：400 + 窗口仍然可用（改完能再点一次）', async () => {
-  let attempt = 0
-  const win = await startImportWindow({
-    onSubmit: async () => {
-      attempt += 1
-      if (attempt === 1) throw new Error('没有解析出任何账号（JSON 里没有账号对象？）')
-      return { accounts: [{ access_token: 'z'.repeat(32) }] }
-    },
-  })
-  let settled = false
-  void win.result.then(() => { settled = true })
-  const page = await (await fetch(win.url)).text()
-  const nonce = nonceOf(page)
-
-  const first = await readJson(await postSubmit(win.url, nonce, { mode: 'file', fields: { text: '{}' } }))
-  assert.equal(first.status, 400)
-  assert.match(first.body.message, /没有解析出任何账号/)
-  await new Promise((resolve) => setTimeout(resolve, 80))
-  assert.equal(settled, false, '解析失败不应结束会话')
-
-  const second = await readJson(await postSubmit(win.url, nonce, { mode: 'file', fields: { text: '{"access_token":"y"}' } }))
-  assert.equal(second.status, 200)
-  const outcome = await win.result
-  assert.equal(outcome.ok, true)
-})
-
-test('close() → cancelled（用户点取消/关掉卡片）', async () => {
-  const win = await startImportWindow({ onSubmit: async () => ({ accounts: [] }) })
-  assert.equal(win.close(), true)
-  const outcome = await win.result
-  assert.equal(outcome.ok, false)
-  assert.equal(outcome.reason, 'cancelled')
-})
-
-test('聚合层：导入入口挂在登录方式末尾，导入结果写账号槽', async () => {
-  const writes = []
-  const toasts = []
-  const input = {
-    client: {
-      auth: { set: async ({ path, body }) => { writes.push({ key: path.id, body }) } },
-      tui: { showToast: (payload) => { toasts.push(payload.body) } },
-    },
-  }
-  const plugin = await makeHubPlugin(lobsteraiChannel)(input, { notify: false })
+test('导入入口是 magpie 原生表单：api + keyless + prompts', async () => {
+  const { plugin } = await build()
   const labels = plugin.auth.methods.map((method) => method.label)
   assert.equal(labels.length, 3, '登录 + 手动导入 + 文件导入')
   assert.equal(labels[0].startsWith('登录'), true)
@@ -237,42 +174,215 @@ test('聚合层：导入入口挂在登录方式末尾，导入结果写账号�
     lobsteraiChannel.importCredential.fileLabel,
   ])
 
-  // ① 手动导入（整段 JSON：带 nickname，账号名认得出）
   const manual = plugin.auth.methods[1]
-  const handle = await manual.authorize()
-  assert.match(handle.url, /^http:\/\/127\.0\.0\.1:\d+\/$/)
-  assert.equal(handle.method, 'auto')
-  const page = await (await fetch(handle.url)).text()
-  const payload = {
-    mode: 'manual',
-    verify: false,
-    fields: { accessToken: JSON.stringify({ nickname: '小号 A', access_token: 'k'.repeat(32) }) },
+  // keyless api：宿主不渲染「API key」输入框，只按 prompts 逐题问
+  assert.equal(manual.type, 'api')
+  assert.equal(manual.keyless, true)
+  assert.equal(typeof manual.authorize, 'function')
+  assert.deepEqual(manual.prompts.map((prompt) => prompt.key), ['token', 'note'])
+  assert.equal(manual.prompts[0].type, 'password')
+  assert.match(manual.prompts[0].message, /access_token/)
+  assert.match(manual.prompts[0].validate(''), /请粘贴/)
+  assert.match(manual.prompts[0].validate('   '), /请粘贴/)
+  assert.equal(manual.prompts[0].validate(TOKEN), null)
+  assert.equal(manual.prompts[1].type, 'text')
+  assert.equal(manual.prompts[1].validate, undefined, '备注是可选项，不校验')
+
+  const file = plugin.auth.methods[2]
+  assert.equal(file.type, 'api')
+  assert.equal(file.keyless, true)
+  assert.equal(typeof file.authorize, 'function')
+  assert.deepEqual(file.prompts.map((prompt) => prompt.key), ['source'])
+  assert.match(file.prompts[0].validate(''), /请填写/)
+  assert.equal(file.prompts[0].validate('C:/tmp/a.json'), null)
+})
+
+test('手动导入：结果带 refresh（宿主认的 oauth 形状），只有第 2..N 个自己落槽', async () => {
+  const first = {
+    nickname: '小号 A',
+    access_token: TOKEN,
+    refresh_token: REFRESH,
+    uid: '17',
+    expires_at: String(1796051474 * 1000),
   }
-  const posted = await postSubmit(handle.url, nonceOf(page), payload)
-  assert.equal(posted.status, 200)
-  assert.equal(await waitFor(() => writes.length === 1), true, '提交后应写入账号槽')
+  const second = { nickname: '小号 B', access_token: 'b'.repeat(48) }
+  await withImporter({
+    submit: async ({ mode, fields }) => {
+      assert.equal(mode, 'manual')
+      assert.equal(fields.accessToken, TOKEN)
+      assert.equal(fields.note, '第二个号')
+      return { accounts: [first, second], warnings: ['有 1 个账号 token 已失效，已跳过'] }
+    },
+  }, async () => {
+    const { plugin, writes, toasts } = await build()
+    const out = await plugin.auth.methods[1].authorize({ token: '  ' + TOKEN + '  ', note: ' 第二个号 ' })
 
-  assert.equal(writes[0].key, 'hub-lobsterai')
-  assert.equal(writes[0].body.type, 'success')
-  assert.equal(writes[0].body.channel, 'lobsterai')
-  assert.equal(writes[0].body.accountId, '小号 A')
-  // ⚠️ 不含 refresh 键：宿主 save() 见到 refresh 会整体替换槽（甚至连 ws 提示都变）
-  assert.equal('refresh' in writes[0].body, false)
+    assert.equal(out.type, 'success')
+    assert.equal(out.channel, 'lobsterai')
+    assert.equal(out.accountId, '小号 A')
+    // ⚠️ 宿主 save() 只看 'refresh' in result：有它就按 oauth 存（access/refresh/expires）
+    assert.equal('refresh' in out, true)
+    assert.equal(out.refresh, REFRESH)
+    assert.equal(out.access, TOKEN)
+    // 渠道 loader / expired() 读的是本插件命名的字段
+    assert.equal(out.access_token, TOKEN)
+    assert.equal(out.refresh_token, REFRESH)
+    assert.equal(out.expires, 1796051474000)
 
-  // ② 文件导入两个账号：第一条占用本体槽，第二条必须另起一个槽，不能互相覆盖
-  const fileMethod = plugin.auth.methods[2]
-  const fileHandle = await fileMethod.authorize()
-  const filePage = await (await fetch(fileHandle.url)).text()
-  const text = JSON.stringify([
-    { nickname: '乙', access_token: 'b'.repeat(32) },
-    { nickname: '丙', access_token: 'c'.repeat(32), refresh_token: 'd'.repeat(32) },
-  ])
-  const multi = await postSubmit(fileHandle.url, nonceOf(filePage), { mode: 'file', verify: false, fields: { text } })
-  assert.equal(multi.status, 200)
-  assert.equal(await waitFor(() => writes.length === 3), true, '两个账号都要落槽')
+    // 第 1 个交给宿主 settle（插件不写），其余自己写 —— 且不覆盖同一个槽
+    assert.equal(writes.length, 1)
+    assert.equal(writes[0].body.accountId, '小号 B')
+    assert.equal(writes[0].body.channel, 'lobsterai')
+    assert.equal(writes[0].body.access_token, 'b'.repeat(48))
+    assert.equal(writes[0].body.type, 'success')
+    assert.equal('refresh' in writes[0].body, false, '自己写的槽不带 refresh（与旧版一致）')
 
-  assert.equal(writes[1].key, 'hub-lobsterai')
-  assert.match(writes[2].key, /^hub-lobsterai#[0-9a-f]{6}$/)
-  assert.deepEqual(writes.slice(1).map((write) => write.body.accountId), ['乙', '丙'])
-  assert.ok(toasts.some((toast) => String(toast.message).includes('已导入')), '应弹出导入结果提示')
+    assert.ok(toasts.some((toast) => String(toast.message).includes('已导入 2 个账号（小号 A、小号 B）')),
+      '应弹出导入结果提示')
+    assert.ok(toasts.some((toast) => String(toast.message).includes('已跳过')), '解析告警也要提示')
+  })
+})
+
+test('手动导入：没有 refresh_token 时结果仍带 refresh 键（宿主照常落槽）', async () => {
+  await withImporter({
+    submit: async () => ({ accounts: [{ nickname: '只有 access', access_token: TOKEN }], warnings: [] }),
+  }, async () => {
+    const { plugin, writes } = await build()
+    const out = await plugin.auth.methods[1].authorize({ token: TOKEN, note: '' })
+    assert.equal(out.type, 'success')
+    assert.equal('refresh' in out, true)
+    assert.equal(out.refresh, undefined)
+    assert.equal(out.access, TOKEN)
+    assert.equal(writes.length, 0, '单账号导入不需要插件自己写槽')
+  })
+})
+
+test('同一个 token 重复导入：沿用旧槽账号名，并补齐 refresh_token / expires_at', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lobsterai-slot-'))
+  const authPath = join(dir, 'plugin-auth.json')
+  // 真机形状：官方导出的昵称是打码的（旧槽 accountId 就是它），导入时联网校验能拿到真名。
+  writeFileSync(authPath, JSON.stringify({
+    'hub-lobsterai#2834fe': {
+      type: 'success',
+      channel: 'lobsterai',
+      accountId: '170****7196',
+      access_token: TOKEN,
+      refresh_token: REFRESH,
+      expires_at: String(1796051474 * 1000),
+      uid: '151290',
+      user_id: '151290',
+    },
+    // 别的渠道的槽：同一个 token 也不许串号
+    'hub-astudio': { type: 'success', channel: 'astudio', accountId: '别的渠道', access_token: TOKEN },
+  }))
+  const previous = process.env.DSH_HUB_AUTH_PATH
+  process.env.DSH_HUB_AUTH_PATH = authPath
+  try {
+    await withImporter({
+      submit: async () => ({
+        accounts: [{ nickname: '17027477196', access_token: TOKEN, uid: '151290', user_id: '151290' }],
+        warnings: [],
+      }),
+    }, async () => {
+      const { plugin, toasts } = await build()
+      const out = await plugin.auth.methods[1].authorize({ token: TOKEN, note: '' })
+      assert.equal(out.type, 'success')
+      // 账号名沿用旧槽 → 宿主 settle 的 whoOf 命中，覆盖旧槽而不是新建一行
+      assert.equal(out.accountId, '170****7196')
+      // 旧槽的续期凭据补回来（否则覆盖时 refresh_token 丢掉，access 到期只能重登）
+      assert.equal(out.refresh, REFRESH)
+      assert.equal(out.refresh_token, REFRESH)
+      assert.equal(out.expires, 1796051474000)
+      assert.equal(
+        toasts.some((toast) => String(toast.message).includes('没有 refresh_token')),
+        false,
+        '补齐了就不该再提示缺 refresh_token',
+      )
+    })
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HUB_AUTH_PATH
+    else process.env.DSH_HUB_AUTH_PATH = previous
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('只有 access_token 又对不上旧槽：照常导入，但提示到期要重新导入', async () => {
+  await withImporter({
+    submit: async () => ({ accounts: [{ nickname: '新号', access_token: TOKEN }], warnings: [] }),
+  }, async () => {
+    const { plugin, toasts } = await build()
+    const out = await plugin.auth.methods[1].authorize({ token: TOKEN, note: '' })
+    assert.equal(out.type, 'success')
+    assert.equal(out.accountId, '新号')
+    assert.equal(out.refresh, undefined)
+    assert.ok(toasts.some((toast) => String(toast.message).includes('没有 refresh_token')), '应提示缺 refresh_token')
+  })
+})
+
+test('文件导入：既能给路径（含引号包住的），也能直接粘 JSON', async () => {
+  const seen = []
+  const account = { nickname: '文件账号', access_token: TOKEN, refresh_token: REFRESH }
+  const raw = JSON.stringify(OFFICIAL)
+  await withImporter({
+    submit: async ({ mode, fields }) => {
+      seen.push({ mode, fields })
+      return { accounts: [account], warnings: [] }
+    },
+  }, async () => {
+    const { plugin } = await build()
+    const method = plugin.auth.methods[2]
+
+    await withTempFile('lobsterai-1.json', raw, async (file) => {
+      assert.equal((await method.authorize({ source: file })).type, 'success')
+      assert.equal(seen[0].mode, 'file')
+      assert.equal(seen[0].fields.text, raw, '读到的应是文件原文')
+
+      // Windows 资源管理器「复制为路径」会带引号
+      seen.length = 0
+      await method.authorize({ source: '"' + file + '"' })
+      assert.equal(seen[0].fields.text, raw)
+    })
+
+    // 直接粘 JSON 不读盘
+    seen.length = 0
+    const pasted = JSON.stringify({ access_token: TOKEN })
+    await method.authorize({ source: '  ' + pasted + '  ' })
+    assert.equal(seen[0].fields.text, pasted)
+  })
+})
+
+test('导入失败：读不到文件 / 文件里没有账号 / 一个账号都没解析出 → type:failed + error', async () => {
+  const { plugin, toasts } = await build()
+  const method = plugin.auth.methods[2]
+
+  const missing = await method.authorize({ source: join(tmpdir(), 'lobsterai-nope-' + Date.now() + '.json') })
+  assert.equal(missing.type, 'failed')
+  assert.match(missing.error, /读不到文件/)
+
+  // 文件真被读到、内容是垃圾 → 报解析错（证明不是「没读盘」）
+  await withTempFile('bad.json', '{"not":"an account"}', async (file) => {
+    const bad = await method.authorize({ source: file })
+    assert.equal(bad.type, 'failed')
+    assert.match(bad.error, /缺少 access_token|没有解析出任何账号/)
+  })
+
+  await withImporter({
+    submit: async () => ({ accounts: [], warnings: ['账号已过期，全部跳过'] }),
+  }, async () => {
+    const fresh = await build()
+    const empty = await fresh.plugin.auth.methods[1].authorize({ token: TOKEN, note: '' })
+    assert.equal(empty.type, 'failed')
+    assert.equal(empty.error, '账号已过期，全部跳过')
+  })
+
+  await withImporter({
+    submit: async () => { throw new Error('解析炸了') },
+  }, async () => {
+    const fresh = await build()
+    const threw = await fresh.plugin.auth.methods[1].authorize({ token: TOKEN, note: '' })
+    assert.equal(threw.type, 'failed')
+    assert.equal(threw.error, '解析炸了')
+  })
+
+  assert.ok(toasts.some((toast) => String(toast.message).includes('导入失败')), '失败也要弹提示')
 })

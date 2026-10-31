@@ -115,9 +115,16 @@ Authorization**（带着会被拒，匿名头只有 Accept/Content-Type/User-Age
 `supportsToolCalling === false` 时才关（上游给 `null` = 未知，不是不支持）。
 
 **导入已有账号（不走网页登录）**：供应商的登录方式里除了「登录 …」还多两个入口 ——
-「手动导入（粘贴 token）」与「文件导入（账号 JSON）」。点下去插件会起一个**只监听
-127.0.0.1 的一次性页面**（10 分钟无提交自动关、POST 必须带一次性 nonce，端口拿完就走），
-在页面里粘贴 token 或拖入官方客户端导出的 `lobsterai-1.json` 即可。
+「手动导入（粘贴 token）」与「文件导入（账号 JSON）」。两个都是 magpie 的**原生表单**
+（`type:'api'` + `keyless:true` + `prompts`）：点下去 magpie 自己弹输入框逐题问，
+答完当场落账号槽 —— **不打开网页、不监听端口、不写任何宿主文件**，配色和校验都是
+magpie 自己的。
+
+- 手动导入：粘 `access_token`（整段账号 JSON 直接粘进这一栏也行），第二个输入框是
+  可选的账号备注（留空就用上游昵称）。空值会被宿主拦在表单里；解析失败会把原因显示在
+  **同一张表单**上，改完再点一次即可，表单不关。
+- 文件导入：填官方客户端导出的 `lobsterai-1.json` 路径（带引号也认、`~` 会展开成用户
+  目录），或者直接把 JSON 内容粘进这一栏。
 
 ```
 { "user_id": 151290, "uid": 151290, "nickname": "170****7196",
@@ -128,13 +135,16 @@ Authorization**（带着会被拒，匿名头只有 Accept/Content-Type/User-Age
 - 单个对象 / 数组 / `{"accounts":[…]}` / JSONL 都认；`expires_at` 秒或毫秒都换算成毫秒
   （官方导出是**秒**，而本渠道 `expired()` 只认毫秒）；也认 `accessToken` 这类 camel 形态；
   手动页直接把整段 JSON 粘进 access_token 框同样能解析。
-- 默认勾选「导入前联网校验 token」：`profile-summary` 通 = 收下（顺手补齐昵称）；
+- 导入时默认联网校验一次：`profile-summary` 通 = 收下（顺手补齐昵称）；
   **401/403 判 token 无效并跳过**；风控 / 断网（如 40302）只提示、仍然导入 ——
   风控期目录与额度也是同一个错，不能因此判死 token。
-- 多账号导入：第一条进本供应商槽位，其余另起 `hub-lobsterai#<摘要>` 槽；同 `accountId`
-  重复导入 = 覆盖原槽（不产生重复账号）。
-- 为什么不用 magpie 的 `auth.methods[].prompts`：**那个字段在 provider 模型里存不下来**
-  （连官方插件声明的 prompts 都会被丢），写了也不会出现输入框，只能插件自己起页面。
+- 多账号导入：第一个账号以 oauth 形状交回 magpie（`refresh` 键必须在，宿主靠它决定写
+  哪种槽位，再由 settle 按 `accountId` 合并），第 2..N 个插件自己 `auth.set` 到
+  `hub-lobsterai#<随机>` 槽；同 `accountId` 重复导入 = 覆盖原槽（不产生重复账号）。
+- 表单题目声明在 `auth.methods[].prompts`，由 magpie 的 `/api/plugin-signin/prompt`
+  **实时**读取（`keyless` 则不渲染 API key 输入框、直接以 `key:''` 调 `authorize`）。
+  它不会出现在 `plugin-providers.json` 里 —— 那份缓存只留 type/label/keyless，
+  所以「缓存里没有 prompts」不等于「写了不生效」。
 
 ### magicrew / magicrew-intl（超级麦吉）
 
@@ -242,20 +252,19 @@ npm test
 OfficeAce 续期五缺口、MiniMax 传输（307 保凭据/白名单/地理路由）、
 OpenAI↔Anthropic 翻译、目录口径、设备码认证、额度到期分档（滚动指针门禁）、
 超级麦吉凭据三段式（api_key 自续 / `isoMs` 过期判定 / 内嵌 base64 JWT）、
-签到归属与判定顺序、账号导入（秒/毫秒到期换算、nonce 校验、多账号落槽不互相覆盖）。
+签到归属与判定顺序、账号导入（秒/毫秒到期换算、magpie 原生 prompts 表单 + 首个账号交宿主 settle、多账号落槽不互相覆盖）。
 
 ## 结构
 
 ```
 index.mjs                  五个具名插件导出（每个渠道一个供应商）+ HUB_PLUGINS
-src/aggregate.mjs          供应商工厂：makeHubPlugin(channel)、模块级快照/sweep/迁移、导入入口
+src/aggregate.mjs          供应商工厂：makeHubPlugin(channel)、模块级快照/sweep/迁移、导入入口（原生表单）
 src/astudio.mjs            讯飞渠道（载体页登录 / 模型配置目录）
 src/accio.mjs              Accio（阿里）渠道（Gemini 风格信封 + 工具分片合并）
 src/lobsterai.mjs          LobsterAI（有道）渠道（信封 + 裸 SSE 对话 / 门户 OAuth 回调）
 src/lobsterai-import.mjs   LobsterAI 账号导入解析（官方导出 JSON / token → 凭据）
 src/magicrew.mjs           超级麦吉国内+国际渠道（三段式凭据 / 积分到期分档 / 签到与新手任务）
 src/magicrew-browser.mjs   超级麦吉 CDP 浏览器登录（复用本机 Edge/Chrome 登录态）
-src/import-window.mjs      一次性本地导入页面（127.0.0.1 + nonce，成功即关端口）
 src/shared.mjs             凭据存取、信封解析、到期分档
 tests/                     node --test
 NOTICE.md                  协议来源与边界声明

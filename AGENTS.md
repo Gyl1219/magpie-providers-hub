@@ -171,7 +171,35 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
   消费后救不回，只能重登。
 - 提交信息用 `-F <file>`（PowerShell 内联多行会乱）；临时草稿文件进 .gitignore
 
-## 7. 形态：一个插件，五条供应商（v0.5.0）
+## 7. 账号导入入口：magpie 原生表单（v0.5.x，lobsterai）
+
+导入已有账号**不进浏览器、不起本地 http**，用 magpie 的 api 型登录方式：
+
+```js
+{ type: 'api', keyless: true, label: '手动导入（粘贴 token）',
+  prompts: [{ key: 'token', type: 'password', message, placeholder, validate }],
+  async authorize(inputs) { ... } }
+```
+
+- 宿主流程：先按 `prompts` 逐题问（`/api/plugin-signin/prompt` → 宿主的
+  `nextPrompt`，**实时从插件读**，不读 `plugin-providers.json` 里那份缓存），
+  `keyless` 时不渲染 API key 框，答完以 `key:''` 调 `authorize(inputs)`。
+  `validate` 返回字符串 = 原表单显示红字，表单不关。
+- 返回 `{type:'failed', error}` 是**唯一**的失败形状（宿主把 error 显示在表单里）；
+  不要把错误抛出去。
+- ⚠️ **结果必须带 `refresh` 键**：宿主 `save()` 只看 `'refresh' in result`。
+  有它 → 按 oauth 存（`refresh/access/expires` + 其余字段进 extra）并 settle 账号名；
+  没有它且 `key` 为空（keyless）→ **宿主一个字段都不写、连 auth 事件都不发**。
+- 多账号：**第一个**账号的凭据作为 `authorize` 的返回值交宿主写；第 2..N 个在
+  `authorize` 里自己 `client.auth.set`（key 用 `PROVIDER#rand`，先查同 `accountId`
+  的旧槽以免重复账号）。
+- 槽里同时留两套字段名：宿主的 `access/refresh` 与本插件的
+  `access_token/refresh_token/expires_at`（后者走 `...extra`）；`credentialOfAuth`
+  只剥 `type/channel/expires/accountId`，loader 与渠道仍读得到。
+- 读用户给的 JSON 文件时**只读那一个文件**（不遍历目录），失败文案要把路径和
+  `error.code` 说明白，并提示「也可以直接把 JSON 粘进这一栏」。
+
+## 8. 形态：一个插件，五条供应商（v0.5.0）
 
 0.3.x 是「一个 provider id `providers-hub` 内部聚合十渠道」。v0.4.0 拆成
 **每个渠道一条供应商**：magpie 的 failover 与开关都是 provider 粒度，聚合形态下

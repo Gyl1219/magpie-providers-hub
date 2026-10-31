@@ -44,7 +44,8 @@ const build = async (channel) => {
 }
 
 // 导入账号入口（手动 / 文件）也是 auth.methods 的一项，但它**不是 OAuth 登录**：
-// 它起本地一次性页面（import-window），不调 beginLogin、也不接受 stub 的 FAKE 凭据。
+// 它是 magpie 原生表单（type:'api' + keyless + prompts），不调 beginLogin、
+// 不接受 stub 的 FAKE 凭据、也不走 authorize()/callback() 双段握手。
 // 所以「登录方式」的契约用例只跑前 N 项，导入入口由 lobsterai-import.test.mjs 端到端覆盖。
 const importCountOf = (channel) => (channel.importCredential === undefined ? 0 : 2)
 const loginMethodsOf = (plugin, channel) => {
@@ -105,7 +106,7 @@ test('callback 兑现凭据：success + channel 归属 + 进内存缓存', async
   }
 })
 
-test('导入账号入口：挂在登录方式末尾，且是 oauth 形状', async () => {
+test('导入账号入口：挂在登录方式末尾，是 magpie 原生表单（api + keyless）', async () => {
   for (const channel of REGISTERED_CHANNELS) {
     const plugin = await build(channel)
     const extra = importCountOf(channel)
@@ -116,8 +117,16 @@ test('导入账号入口：挂在登录方式末尾，且是 oauth 形状', asyn
       : [channel.importCredential.manualLabel, channel.importCredential.fileLabel]
     assert.deepEqual(tail.map((method) => method.label), expected, `${channel.id}: 导入入口标题`)
     for (const method of tail) {
-      // magpie 的 provider 编辑器只渲染 oauth / api 两种形状
-      assert.equal(method.type, 'oauth')
+      // 宿主对 api 型方法：先按 prompts 逐题问，keyless 时不渲染 API key 框，
+      // 最后以 key:'' 调 authorize(inputs) 拿结果。
+      assert.equal(method.type, 'api')
+      assert.equal(method.keyless, true, `${method.label}: 导入不该让用户填 API key`)
+      assert.ok(Array.isArray(method.prompts) && method.prompts.length > 0, `${method.label}: 缺 prompts`)
+      for (const prompt of method.prompts) {
+        assert.equal(typeof prompt.key, 'string')
+        assert.ok(['text', 'password', 'select'].includes(prompt.type), `${method.label}: prompt 类型`)
+        assert.equal(typeof prompt.message, 'string')
+      }
       assert.equal(typeof method.authorize, 'function')
     }
   }
