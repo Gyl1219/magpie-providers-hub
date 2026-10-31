@@ -60,7 +60,7 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 |---|---|---|---|---|---|
 | `astudio` | `hub-astudio` | 讯飞 AstronStudio | 本地载体页（极验 + 短信 / 密码 / 微信） | `/api/v1/model-manager/models` | ❌ 不支持（会话一年，不滑动） |
 | `accio` | `hub-accio` | Accio Work（阿里） | OAuth PKCE + 本地 loopback 回调 | `POST /api/llm/config/v2` | ✅ refresh（⚠️ 轮换 refresh_token，已串行化） |
-| `lobsterai` | `hub-lobsterai` | 有道 LobsterAI（龙虾） | 官方门户 OAuth + 本机 loopback 回调 | `/api/models/available` | ✅ 标准 refresh_token 轮换 |
+| `lobsterai` | `hub-lobsterai` | 有道 LobsterAI（龙虾） | 官方门户 OAuth + 本机 loopback 回调；**也可手动 / 文件导入已有账号** | `/api/models/available` | ✅ 标准 refresh_token 轮换 |
 | 超级麦吉（国内） | `hub-magicrew` | 超级麦吉（letsmagic.cn） | 载体页：CDP 浏览器登录 / 手机号密码 / 粘贴 JWT | `/api/v1/flows/models` | ✅ refresh_token（⚠️ PUT 一次轮换一次）+ `mgw_` api_key 2h 自续 |
 | MagiCrew（国际） | `hub-magicrew-intl` | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
 
@@ -113,6 +113,28 @@ Authorization**（带着会被拒，匿名头只有 Accept/Content-Type/User-Age
 （对齐官方客户端形态），但**实测已不再影响返回条数**（无头也是 19 条）。
 图片能力读 `supportsImage`，推理能力读 `supportsThinking`，工具调用只在
 `supportsToolCalling === false` 时才关（上游给 `null` = 未知，不是不支持）。
+
+**导入已有账号（不走网页登录）**：供应商的登录方式里除了「登录 …」还多两个入口 ——
+「手动导入（粘贴 token）」与「文件导入（账号 JSON）」。点下去插件会起一个**只监听
+127.0.0.1 的一次性页面**（10 分钟无提交自动关、POST 必须带一次性 nonce，端口拿完就走），
+在页面里粘贴 token 或拖入官方客户端导出的 `lobsterai-1.json` 即可。
+
+```
+{ "user_id": 151290, "uid": 151290, "nickname": "170****7196",
+  "yid": "urs-phoneyd….@163.com", "access_token": "eyJ…",
+  "refresh_token": "eyJ…", "expires_at": 1796051474, "account_mode": "personal" }
+```
+
+- 单个对象 / 数组 / `{"accounts":[…]}` / JSONL 都认；`expires_at` 秒或毫秒都换算成毫秒
+  （官方导出是**秒**，而本渠道 `expired()` 只认毫秒）；也认 `accessToken` 这类 camel 形态；
+  手动页直接把整段 JSON 粘进 access_token 框同样能解析。
+- 默认勾选「导入前联网校验 token」：`profile-summary` 通 = 收下（顺手补齐昵称）；
+  **401/403 判 token 无效并跳过**；风控 / 断网（如 40302）只提示、仍然导入 ——
+  风控期目录与额度也是同一个错，不能因此判死 token。
+- 多账号导入：第一条进本供应商槽位，其余另起 `hub-lobsterai#<摘要>` 槽；同 `accountId`
+  重复导入 = 覆盖原槽（不产生重复账号）。
+- 为什么不用 magpie 的 `auth.methods[].prompts`：**那个字段在 provider 模型里存不下来**
+  （连官方插件声明的 prompts 都会被丢），写了也不会出现输入框，只能插件自己起页面。
 
 ### magicrew / magicrew-intl（超级麦吉）
 
@@ -220,24 +242,20 @@ npm test
 OfficeAce 续期五缺口、MiniMax 传输（307 保凭据/白名单/地理路由）、
 OpenAI↔Anthropic 翻译、目录口径、设备码认证、额度到期分档（滚动指针门禁）、
 超级麦吉凭据三段式（api_key 自续 / `isoMs` 过期判定 / 内嵌 base64 JWT）、
-签到归属与判定顺序、AutoClaw 的 chat body 清洗（tidyWire）。
+签到归属与判定顺序、账号导入（秒/毫秒到期换算、nonce 校验、多账号落槽不互相覆盖）。
 
 ## 结构
 
 ```
-index.mjs                  十个具名插件导出（每个渠道一个供应商）+ HUB_PLUGINS
-src/aggregate.mjs          供应商工厂：makeHubPlugin(channel)、模块级快照/sweep/迁移
-src/officeace.mjs          华为云渠道
-src/astudio.mjs            讯飞渠道
-src/minimaxintl.mjs        MiniMax 国际版渠道（设备码 + PKCE）
-src/minimax-transport.mjs  MiniMax 传输层（307 保凭据跟随、传输重试、地理路由）
-src/minimax-bridge.mjs     OpenAI↔Anthropic 翻译桥（含 SSE）
+index.mjs                  五个具名插件导出（每个渠道一个供应商）+ HUB_PLUGINS
+src/aggregate.mjs          供应商工厂：makeHubPlugin(channel)、模块级快照/sweep/迁移、导入入口
+src/astudio.mjs            讯飞渠道（载体页登录 / 模型配置目录）
 src/accio.mjs              Accio（阿里）渠道（Gemini 风格信封 + 工具分片合并）
-src/autoclaw.mjs           AutoClaw 国内+国际渠道（MD5 签名 / 406 白名单 / Z.ai OAuth / 凭据导入）
-src/loomy.mjs              Loomy（讯飞）渠道（双认证头 / 短信三步流 / 每日额度签到）
 src/lobsterai.mjs          LobsterAI（有道）渠道（信封 + 裸 SSE 对话 / 门户 OAuth 回调）
+src/lobsterai-import.mjs   LobsterAI 账号导入解析（官方导出 JSON / token → 凭据）
 src/magicrew.mjs           超级麦吉国内+国际渠道（三段式凭据 / 积分到期分档 / 签到与新手任务）
 src/magicrew-browser.mjs   超级麦吉 CDP 浏览器登录（复用本机 Edge/Chrome 登录态）
+src/import-window.mjs      一次性本地导入页面（127.0.0.1 + nonce，成功即关端口）
 src/shared.mjs             凭据存取、信封解析、到期分档
 tests/                     node --test
 NOTICE.md                  协议来源与边界声明

@@ -33,6 +33,7 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { untilText } from './shared.mjs'
+import { createImporter } from './lobsterai-import.mjs'
 
 export const CHANNEL_ID = 'lobsterai'
 export const DISPLAY_NAME = 'LobsterAI（有道龙虾）'
@@ -657,6 +658,40 @@ async function checkin(credential) {
   return { outcome: 'claimed', ...(credit > 0 ? { credit } : {}), ...(message ? { message } : {}) }
 }
 
+// ── 账号导入（手动粘贴 token / 文件导入）────────────────────────────────
+
+/**
+ * 只读校验：拿 profile-summary 试一次（不写任何东西）。
+ *
+ * 判「token 无效」只有两条硬证据：HTTP 401/403，或信封错误文案命中登录/凭证类关键词。
+ * 其余（断网、DNS、上游 40302 风控、5xx）一律**不拦** —— 那期间目录和额度同样是这个
+ * 错，拦下来等于逼用户反复试。
+ */
+async function verifyImportedCredential(credential) {
+  try {
+    const result = await requestJson(PROFILE_PATH, credential)
+    const envelope = parseEnvelope(result.body)
+    if (!result.ok) {
+      const message = envelope.ok ? 'HTTP ' + result.response.status : envelope.message
+      const signedOut = result.response.status === 401 || result.response.status === 403
+      return { ok: false, signedOut, message }
+    }
+    if (!envelope.ok) {
+      const signedOut = /登录|token|凭证|失效|过期|未授权|无权|40302/i.test(envelope.message ?? '')
+      return { ok: false, signedOut, message: envelope.message }
+    }
+    const data = typeof envelope.data === 'object' && envelope.data !== null ? envelope.data : {}
+    return { ok: true, data }
+  } catch (error) {
+    return { ok: false, signedOut: false, message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** 聚合层挂到 auth.methods 末尾的两个导入入口（见 src/aggregate.mjs）。 */
+export const lobsteraiImport = createImporter({
+  displayName: DISPLAY_NAME,
+  verify: verifyImportedCredential,
+})
 // ── 渠道对象 ────────────────────────────────────────────────────────────
 
 export const lobsteraiChannel = {
@@ -670,4 +705,6 @@ export const lobsteraiChannel = {
   chat,
   usage,
   checkin,
+  // 导入已有账号：magpie 供应商编辑器的登录方式区会多出「手动导入 / 文件导入」
+  importCredential: lobsteraiImport,
 }

@@ -33,9 +33,11 @@
 // 不同凭据各走各的。
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { notSignedIn, untilText, readMagpieAuthSlots, readOwnAuthEntries, debugLog } from './shared.mjs'
+import { startImportWindow } from './import-window.mjs'
 import { astudioChannel } from './astudio.mjs'
 import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
@@ -878,6 +880,133 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   /** 本渠道的用量窗口。 */
   const windowsOf = (credential) => usageWindowsOf(channel, credential, {})
 
+  // ── 账号导入（手动粘贴 token / 文件导入）─────────────────────────────────
+  //
+  // 两件事：① 起一个本地一次性页面（magpie 的 auth.methods.prompts 存不下来，
+  // 见 src/import-window.mjs 头注）；② 把拿到的凭据写进**账号槽**。
+  //
+  // ⚠️ 写槽用的是 authorize 里拿到的 authSet 句柄 —— 宿主用 AsyncLocalStorage 记
+  //    会话作用域，"在 authorize 内注册"的完成链（settled.then）仍然写在**本次会话
+  //    的账号槽**上（和扫码登录同一条路）。
+  // ⚠️ 文件里可能有多个账号：第一条写会话槽位，其余写 `<provider>#<rand6>`。
+  //    magpie 的账号列表按 provider / provider#* 前缀收，所以这些槽都会显示出来。
+  const importAccountId = (credential) => {
+    try {
+      const id = channel.importCredential?.accountIdOf?.(credential)
+      return typeof id === 'string' && id !== '' ? id : channel.displayName
+    } catch {
+      return channel.displayName
+    }
+  }
+
+  const importAuthOf = (credential) => {
+    const expires = expiresMsOf(credential)
+    return {
+      type: 'success',
+      channel: channel.id,
+      ...credential,
+      ...(expires !== undefined ? { expires } : {}),
+      accountId: importAccountId(credential),
+    }
+  }
+
+  /** 每个待导入账号挑一个槽 key：同账号 → 覆盖原槽；否则本体槽位空闲就用本体。 */
+  const slotKeysForImport = (accountIds) => {
+    const slots = readMagpieAuthSlots(PROVIDER).filter((s) => s.channel === channel.id)
+    const taken = new Set()
+    return accountIds.map((accountId) => {
+      const existing = slots.find((s) => s.accountId === accountId)
+      if (existing !== undefined) return existing.key
+      if (!taken.has(PROVIDER) && !slots.some((s) => s.key === PROVIDER)) {
+        taken.add(PROVIDER)
+        return PROVIDER
+      }
+      let key = ''
+      do {
+        key = PROVIDER + '#' + randomBytes(4).toString('hex').slice(0, 6)
+      } while (taken.has(key) || slots.some((s) => s.key === key))
+      taken.add(key)
+      return key
+    })
+  }
+
+  /** 凭据落槽 + 进内存缓存（本进程内的目录/额度刷新立刻能用）。返回写入的账号名。 */
+  const commitImportedAccounts = async (accounts) => {
+    const keys = slotKeysForImport(accounts.map(importAccountId))
+    const written = []
+    for (let i = 0; i < accounts.length; i += 1) {
+      const credential = accounts[i]
+      const auth = importAuthOf(credential)
+      try {
+        rememberCredential(channel, credential)
+        await authSet?.({ path: { id: keys[i] }, body: auth })
+        written.push(auth.accountId)
+        debugLog('import: wrote slot ' + keys[i] + ' (' + channel.id + ')')
+      } catch (error) {
+        debugLog('import: write failed ' + keys[i] + ': ' + (error instanceof Error ? error.message : String(error)))
+      }
+    }
+    writeSnapshot()
+    return written
+  }
+
+  /** 两个导入入口（渠道声明了 importCredential 才有）。 */
+  const buildImportMethods = () => {
+    const spec = channel.importCredential
+    if (spec === undefined || spec === null) return []
+    const buildImportMethod = (mode) => ({
+      type: 'oauth',
+      label: mode === 'file'
+        ? (spec.fileLabel ?? '文件导入')
+        : (spec.manualLabel ?? '手动导入'),
+      async authorize() {
+        const win = await startImportWindow({
+          title: '导入 ' + channel.displayName + ' 账号',
+          subtitle: mode === 'file' ? (spec.fileHint ?? '') : (spec.manualHint ?? ''),
+          onSubmit: (payload) => spec.submit({ ...payload, mode }),
+          opener: openBrowser,
+        })
+        debugLog('import window: ' + channel.id + ' ' + mode + ' ' + win.url)
+        const settled = win.result
+        // ⚠️ 反馈/落槽挂**自己的完成链**，不挂 callback —— magpie 对 auto 流程
+        //    未必回调（扫码登录真机实证过），这条链由页面提交/超时自己 settle。
+        void settled.then(async (outcome) => {
+          if (outcome?.ok !== true) {
+            if (outcome?.reason !== 'cancelled') {
+              toast(channel.displayName + '：' + (outcome?.message ?? '导入未完成'), 'warning')
+            }
+            return
+          }
+          const written = await commitImportedAccounts(outcome.accounts)
+          const warnings = Array.isArray(outcome.warnings) ? outcome.warnings : []
+          toast(channel.displayName + '：已导入 ' + written.length + ' 个账号（' + written.join('、') + '）')
+          if (warnings.length > 0) {
+            toast(channel.displayName + ' 导入提示：' + warnings.slice(0, 3).join('；'), 'warning')
+          }
+        }).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error)
+          debugLog('import chain failed: ' + message)
+          toast(channel.displayName + ' 导入失败：' + message, 'error')
+        })
+        return {
+          url: win.url,
+          method: 'auto',
+          instructions: mode === 'file'
+            ? '在打开的页面里选择账号 JSON，点「导入」。'
+            : '在打开的页面里粘贴 access_token，点「导入」。',
+          async callback() {
+            const outcome = await settled
+            if (outcome?.ok !== true) throw new Error(outcome?.message ?? '导入已取消')
+            // callback 只能回一个账号；多账号已由完成链全部写进槽
+            const first = outcome.accounts[0]
+            rememberCredential(channel, first)
+            return importAuthOf(first)
+          },
+        }
+      },
+    })
+    return [buildImportMethod('manual'), buildImportMethod('file')]
+  }
   // 旧版账号槽 → 本供应商槽（一次性、幂等；见函数注释）。失败不影响启动。
   if (options.migrateLegacySlots !== false) {
     await migrateLegacySlots(authSet, channel, PROVIDER)
@@ -1005,9 +1134,11 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
           }
         },
       })
-      return (Array.isArray(channel.loginMethods) && channel.loginMethods.length > 0
+      const loginMethods = Array.isArray(channel.loginMethods) && channel.loginMethods.length > 0
         ? channel.loginMethods.map((m) => buildOne(m.label, m.arg))
-        : [buildOne(`登录 ${channel.displayName}`, undefined)])
+        : [buildOne(`登录 ${channel.displayName}`, undefined)]
+      // 导入已有账号排在登录之后（用户默认先看见「登录」）
+      return [...loginMethods, ...buildImportMethods()]
       })(channel),
 
       /**
