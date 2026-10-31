@@ -176,8 +176,11 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 导入已有账号**不进浏览器、不起本地 http**，用 magpie 的 api 型登录方式：
 
 ```js
-{ type: 'api', keyless: true, label: '手动导入（粘贴 token）',
-  prompts: [{ key: 'token', type: 'password', message, placeholder, validate }],
+{ type: 'api', keyless: true, label: '手动导入（粘贴凭据）',
+  prompts: [                         // 第一栏「什么都收」，其余用 condition 跳过
+    { key: 'token', type: 'password', message, placeholder, validate },
+    { key: 'refreshToken', type: 'password', condition: (inputs) => !inlineHas(inputs, 'refreshToken') },
+  ],
   async authorize(inputs) { ... } }
 ```
 
@@ -198,6 +201,44 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
   只剥 `type/channel/expires/accountId`，loader 与渠道仍读得到。
 - 读用户给的 JSON 文件时**只读那一个文件**（不遍历目录），失败文案要把路径和
   `error.code` 说明白，并提示「也可以直接把 JSON 粘进这一栏」。
+  唯一例外见下一条「拖拽兜底」：**没有任何目录分隔符的裸文件名**会在几个固定目录里
+  各找一次（WebView2 把拖进来的文件只填成 basename）。
+
+### 一栏贴全：宿主一次只渲染一个问题（2026-11-01，m01367）
+
+用户要「四栏并列」，但宿主做不到 —— 别为这个再折腾 UI：
+
+- 宿主 `nextPrompt(provider, index, inputs)` 遍历 `prompts`，`if (p.key in inputs) continue`
+  后**立刻 return 一个** prompt 对象；前端 `renderPluginAsk(sub)` 只画一个 `<input>`
+  （`key || type === 'password' ? 'password' : 'text'`）+ Next，答完重新走一遍登录流程。
+  ⇒ 一次一题，**没有多栏表单**。
+- 但 `applies(prompt, inputs)` 认两种跳过条件：`prompt.when {key,value,op}` 与
+  `prompt.condition(inputs)`。这就是「一屏填完」的唯一杠杆：第一栏把所有字段都吃下，
+  后三栏按「第一栏里有没有」自动跳过。
+- 因此**第一栏必须排在 `prompts[0]`**，且它得能识别：裸 token / 整段账号 JSON /
+  `access=… refresh_token=… uid=… note=…` 键值对 / 文件路径（解析在
+  `src/lobsterai-import.mjs` 的 `inlineFieldsOf`，纯函数、不碰文件系统）。
+- `condition` 里还要判「这一栏贴的是文件」（`looksLikeImportFile`，渠道导出在
+  `importSpec.looksLikeFile`）→ 三栏全跳过。真机踩过：贴路径时宿主仍追问
+  user_id / refresh_token，用户得空按三次回车。
+- ⚠️ **手填覆盖里不能包含 `access_token`**：第一栏本身就是 accessToken/JSON/路径，
+  拿它当 override 会把整段文本写进 token（真机前测试就红在这）。
+- 页面/面板**没有写凭据的通道**（`_magpie/bridge.js` 只导出 theme/context/service/
+  onTheme/onAction/options.get/options.set/read；窗口端 `answer()` 的 switch 只有
+  hello/theme/options.get/options.set/read，其余抛 `No such call`）⇒ 想自建四栏表单
+  提交凭据是不可能的，别往这条路上走。
+
+### 拖拽兜底：宿主没有文件选择器
+
+登录表单只认 `text/password/select`，没有 `file` 类型、没有 drop 回调。所以「拖文件
+进来」只能靠 WebView2 的默认行为把**文件名**填进那个 `<input>`（Chromium 给的是
+basename，可能是 `file:///…`）。为此 `src/aggregate.mjs` 的 `readImportSource` 认三样：
+
+1. `file:///C:/…`、`file://localhost/C:/…`（`fromFileUrl`，UNC 给 `\\server\share`）；
+2. 带引号 / 反引号包住的路径（Windows「复制为路径」）、`~` 展开；
+3. **裸文件名**（无 `/ \`）→ 依次在 `cwd` / `home` / `Desktop` / `OneDrive\Desktop` /
+   `Downloads` / `Documents` / `OneDrive\Documents` 里 `existsSync` 命中即读。
+   固定清单、命中即止，**不是遍历目录**。
 
 ### 栏位声明归渠道，不问聚合层
 

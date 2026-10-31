@@ -1028,15 +1028,68 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   }
 
   /**
+   * 裸文件名（没有任何目录分隔符）只在几个**固定**的常见目录里按名字找一次。
+   *
+   * 为什么需要：magpie 的登录表单是单行 <input>，没有文件选择器、也没有 drop
+   * 回调（宿主只认 text/password/select，见 renderPluginAsk），所以「拖文件进
+   * 来」只能靠 WebView2 的默认行为把文件名填进框里 —— Chromium 只给 basename
+   * （Windows 资源管理器拖进来是 `lobsterai-1.json`，也可能是 `file:///…`）。
+   * 有这条兜底，拖进来的文件名才真的能用。不是遍历目录：就这几处，命中即止。
+   */
+  const looseDirs = () => {
+    const home = homedir()
+    return [
+      process.cwd(),
+      home,
+      join(home, 'Desktop'),
+      join(home, 'OneDrive', 'Desktop'),
+      join(home, 'Downloads'),
+      join(home, 'Documents'),
+      join(home, 'OneDrive', 'Documents'),
+    ]
+  }
+
+  /** `file:///C:/x.json` / `file://localhost/C:/x.json` / `file://server/share/x` → 本地路径。 */
+  const fromFileUrl = (text) => {
+    const match = /^file:(\/\/[^/]*)?(.*)$/i.exec(text)
+    if (match === null) return text
+    const host = String(match[1] ?? '').replace(/^\/\//, '')
+    let rest = String(match[2] ?? '')
+    try {
+      rest = decodeURIComponent(rest)
+    } catch {
+      /* 百分号编码坏了就按原样 */
+    }
+    if (host !== '' && host.toLowerCase() !== 'localhost') {
+      // UNC：file://server/share/a.json → \\server\share\a.json
+      return '\\\\' + host + rest.replace(/\//g, '\\')
+    }
+    if (/^\/[a-zA-Z]:/.test(rest)) rest = rest.slice(1) // /C:/… → C:/…
+    return rest
+  }
+
+  /**
    * 「账号 JSON」一栏既可以是文件路径，也可以直接粘 JSON。
-   * 只读用户给的那一个文件（不遍历目录、不猜路径）。
+   * 只读用户给的那一个文件（不遍历目录、不猜路径 —— 裸文件名那条例外，见上）。
    */
   const readImportSource = (raw) => {
     const text = typeof raw === 'string' ? raw.trim() : ''
     if (text === '') throw new Error('请填写账号 JSON 文件路径，或直接把 JSON 粘进这一栏')
-    const unquoted = text.replace(/^["']+/, '').replace(/["']+$/, '').trim()
+    const unquoted = text.replace(/^["'`]+/, '').replace(/["'`]+$/, '').trim()
     if (unquoted.startsWith('{') || unquoted.startsWith('[')) return unquoted
-    const file = unquoted.startsWith('~') ? join(homedir(), unquoted.slice(1)) : unquoted
+    const named = fromFileUrl(unquoted)
+    if (!/[/\\]/.test(named)) {
+      for (const dir of looseDirs()) {
+        const candidate = join(dir, named)
+        if (!existsSync(candidate)) continue
+        try {
+          return readFileSync(candidate, 'utf8')
+        } catch {
+          /* 这个目录里的同名文件读不了，试下一个 */
+        }
+      }
+    }
+    const file = named.startsWith('~') ? join(homedir(), named.slice(1)) : named
     try {
       return readFileSync(file, 'utf8')
     } catch (error) {
@@ -1044,6 +1097,19 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       throw new Error('读不到文件 ' + file + '（' + code + '）；也可以直接把 JSON 粘进这一栏')
     }
   }
+
+  /**
+   * 一栏里的文本看着像**文件**吗（而不是 token）。
+   * 判定归渠道（`importSpec.looksLikeFile`，与 prompts 的 condition 同源）；
+   * 没声明的渠道退回一个保守的通用判断。
+   */
+  const looksLikeFile = typeof importSpec?.looksLikeFile === 'function'
+    ? importSpec.looksLikeFile
+    : (text) => (
+      typeof text === 'string' && text.trim() !== '' && !text.trim().startsWith('{') && (
+        /^file:/i.test(text.trim()) || /[/\\]/.test(text) || /\.(json|jsonl|txt)$/i.test(text)
+      )
+    )
 
   /** 两个导入入口（magpie 原生表单；渠道声明了 importCredential 才有）。 */
   const buildImportMethods = () => {
@@ -1097,9 +1163,12 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       }
     }
 
-    // ① 手动导入：user_id / access_token / refresh_token / 备注 四栏
+    // ① 手动导入：一栏贴全（token / 整段 JSON / 文件路径）+ 缺什么才补问
     //    ⚠️ 栏位声明来自渠道（importSpec.manualPrompts）：文案是渠道自己的字段名，
     //       聚合层只负责「按声明问、把答案原样交给 submit」。
+    //    为什么不是四栏并列：magpie 的登录表单一次只渲染一个 input（宿主
+    //    renderPluginAsk 的硬限制），所以「一屏填完」靠第一栏全吃下 + 后三栏
+    //    挂 condition 自动跳过。
     const manual = {
       type: 'api',
       // keyless：宿主不渲染「API key」输入框，直接按 prompts 提问后调 authorize
@@ -1117,12 +1186,17 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
         }],
       async authorize(inputs = {}) {
         const text = (value) => (typeof value === 'string' ? value.trim() : '')
-        return guard(() => runImport('manual', {
-          accessToken: text(inputs.token),
-          refreshToken: text(inputs.refreshToken),
-          userId: text(inputs.userId),
-          note: text(inputs.note),
-        }))
+        return guard(() => {
+          const typed = text(inputs.token)
+          const fields = {
+            refreshToken: text(inputs.refreshToken),
+            userId: text(inputs.userId),
+            note: text(inputs.note),
+          }
+          // 一栏里贴的其实是文件（路径 / file:/// / 拖进来的裸文件名）→ 读成 JSON 走文件导入
+          if (looksLikeFile(typed)) return runImport('file', { ...fields, text: readImportSource(typed) })
+          return runImport('manual', { ...fields, accessToken: typed })
+        })
       },
     }
 
@@ -1135,7 +1209,7 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
         {
           key: 'source',
           type: 'text',
-          message: '账号 JSON 的文件路径，或直接粘贴 JSON',
+          message: '账号 JSON 的文件路径（file:/// 也行，也可以把文件拖进这一栏），或直接粘贴 JSON',
           placeholder: 'C:\\Users\\you\\lobsterai-1.json',
           validate: (value) => (
             typeof value === 'string' && value.trim() !== ''
