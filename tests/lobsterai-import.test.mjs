@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { parseImportPayload, createImporter, inlineFieldsOf } from '../src/lobsterai-import.mjs'
+import { parseImportPayload, createImporter } from '../src/lobsterai-import.mjs'
 import { lobsteraiChannel } from '../src/lobsterai.mjs'
 import { makeHubPlugin } from '../src/aggregate.mjs'
 
@@ -107,12 +107,14 @@ test('多种文件形态都能读：数组 / {accounts} / JSONL，重复 token �
   assert.match(dup.warnings.join('；'), /重复/)
 })
 
-test('手动栏直接粘整段 JSON 也走同一个解析器', () => {
-  const out = parseImportPayload({
-    mode: 'manual',
-    verify: false,
-    fields: { accessToken: JSON.stringify({ nickname: '小号 A', access_token: 'k'.repeat(32) }) },
-  })
+test('整段 JSON 不走手动栏：明确指到「文件导入」那一栏，文件栏照常解析', () => {
+  const raw = JSON.stringify({ nickname: '小号 A', access_token: 'k'.repeat(32) })
+  // 手动栏要的是 accessToken：JSON 粘进来会报错（不是静默当 token 收下）
+  assert.throws(
+    () => parseImportPayload({ mode: 'manual', fields: { accessToken: raw } }),
+    /文件导入/,
+  )
+  const out = parseImportPayload({ mode: 'file', verify: false, fields: { text: raw } })
   assert.equal(out.accounts.length, 1)
   assert.equal(out.accounts[0].nickname, '小号 A')
 })
@@ -179,48 +181,30 @@ test('导入入口是 magpie 原生表单：api + keyless + prompts', async () =
   assert.equal(manual.type, 'api')
   assert.equal(manual.keyless, true)
   assert.equal(typeof manual.authorize, 'function')
-  // ⚠️ 第一栏必须排最前：宿主一次只渲染一个问题（renderPluginAsk），
-  //    「一屏填完」只能靠这一栏全吃下，后三栏再按 condition 自动跳过
-  assert.deepEqual(manual.prompts.map((prompt) => prompt.key), ['token', 'userId', 'refreshToken', 'note'])
-  const [token, userId, refresh, note] = manual.prompts
-  assert.equal(token.type, 'password')
-  assert.match(token.message, /accessToken/)
-  assert.match(token.message, /整段账号 JSON/)
-  assert.match(token.message, /文件路径/)
-  assert.match(token.message, /必填/)
-  assert.match(token.validate(''), /请粘贴/)
-  assert.match(token.validate('   '), /请粘贴/)
-  assert.equal(token.validate(TOKEN), null)
+  // 四栏按序：宿主按数组顺序一题一题问（一次只渲染一个 input），
+  // 所以数组顺序 = 用户看到的顺序，且**不挂 condition**（四栏都要问到）。
+  assert.deepEqual(manual.prompts.map((prompt) => prompt.key), ['userId', 'token', 'refreshToken', 'note'])
+  const [userId, token, refresh, note] = manual.prompts
+  for (const prompt of manual.prompts) {
+    assert.equal(prompt.condition, undefined, '四栏按序都要问，不挂 condition：' + prompt.key)
+  }
   assert.equal(userId.type, 'text')
   assert.match(userId.message, /USER ID/)
   assert.match(userId.message, /留空/)
   assert.equal(userId.validate, undefined, 'user_id 留空也能导入（自动从 token 识别）')
+  assert.equal(token.type, 'password')
+  assert.match(token.message, /ACCESS TOKEN/)
+  assert.match(token.message, /必填/)
+  assert.match(token.validate(''), /请粘贴/)
+  assert.match(token.validate('   '), /请粘贴/)
+  assert.equal(token.validate(TOKEN), null)
   assert.equal(refresh.type, 'password')
   assert.match(refresh.message, /REFRESH_TOKEN/)
+  assert.match(refresh.message, /可选/)
   assert.equal(refresh.validate, undefined, 'refresh_token 可选：只有 access 的账号也要能导进来')
   assert.equal(note.type, 'text')
+  assert.match(note.message, /备注/)
   assert.equal(note.validate, undefined, '备注是可选项，不校验')
-
-  // condition：第一栏贴全了后三栏全跳过；贴裸 token 则三栏都问
-  const full = JSON.stringify({ access_token: TOKEN, refresh_token: REFRESH, user_id: 151290, note: '小号 A' })
-  assert.deepEqual(manual.prompts.slice(1).map((prompt) => prompt.condition({ token: full })), [false, false, false],
-    '整段 JSON 里四样都有 → 一屏填完，不再追问')
-  assert.deepEqual(manual.prompts.slice(1).map((prompt) => prompt.condition({ token: TOKEN })), [true, true, true],
-    '只贴裸 token → user_id / refresh_token / 备注照旧问')
-  assert.deepEqual(
-    manual.prompts.slice(1).map((prompt) => prompt.condition({ token: 'access=' + TOKEN + ' refresh_token=' + REFRESH })),
-    [true, false, true],
-    '键值对里有的才跳过',
-  )
-  // 贴的是文件（路径 / file:/// / 拖进来的裸文件名）→ 文件里什么都有，三栏全不问。
-  // 真机踩过：不跳就会「贴了路径还被追着问 user_id / refresh_token」。
-  for (const box of ['C:\\Users\\me\\Desktop\\lobsterai-1.json', 'file:///C:/tmp/a.json', 'lobsterai-1.json']) {
-    assert.deepEqual(
-      manual.prompts.slice(1).map((prompt) => prompt.condition({ token: box })),
-      [false, false, false],
-      '文件路径不该再追问后面三栏：' + box,
-    )
-  }
 
   const file = plugin.auth.methods[2]
   assert.equal(file.type, 'api')
@@ -462,48 +446,30 @@ test('备注就是账号名：填了用备注，没填才用上游昵称', async
   assert.equal(lobsteraiChannel.importCredential.accountIdOf(both.accounts[0]), '小号 B')
 })
 
-// ── 一栏贴全（m01367）：第一栏什么都收，缺什么才问什么 ────────────────────
+// ── 手动导入：四栏按序，各归各的字段（m01595 改回） ──────────────────────
 
-test('一栏贴全：键值对里认 access / refresh / uid / 备注（& 与空格都行）', () => {
-  const pairs = inlineFieldsOf('access=' + TOKEN + '&refresh_token=' + REFRESH + '&uid=151290&备注=手机小号 A')
-  assert.equal(pairs.accessToken, TOKEN)
-  assert.equal(pairs.refreshToken, REFRESH)
-  assert.equal(pairs.userId, '151290')
-  assert.equal(pairs.note, '手机小号 A')
-  assert.equal(pairs.json, undefined, '键值对不是 JSON')
-
-  // 裸 token / 空串不能被认成字段（否则第一栏填什么都不追问了）
-  assert.deepEqual(inlineFieldsOf(TOKEN), {})
-  assert.deepEqual(inlineFieldsOf('   '), {})
-
+test('手动导入：四栏的答案各归各的字段（access / refresh / user_id / 备注）', () => {
   const out = parseImportPayload({
     mode: 'manual',
-    verify: false,
-    fields: { accessToken: 'access=' + TOKEN + ' refresh_token=' + REFRESH + ' user_id=151290 note=小号 B' },
+    fields: { accessToken: TOKEN, refreshToken: REFRESH, userId: '151290', note: '手机小号 A' },
   })
   assert.equal(out.accounts.length, 1)
   assert.equal(out.accounts[0].access_token, TOKEN)
   assert.equal(out.accounts[0].refresh_token, REFRESH)
   assert.equal(out.accounts[0].user_id, '151290')
-  assert.equal(lobsteraiChannel.importCredential.accountIdOf(out.accounts[0]), '小号 B')
+  assert.equal(lobsteraiChannel.importCredential.accountIdOf(out.accounts[0]), '手机小号 A',
+    '备注就是账号列表里显示的名字')
+
+  // 只填 ACCESS TOKEN（另外三栏留空）也要能导入 —— refresh 不是硬必填
+  const minimal = parseImportPayload({ mode: 'manual', fields: { accessToken: TOKEN, userId: '', refreshToken: '', note: '' } })
+  assert.equal(minimal.accounts.length, 1)
+  assert.equal(minimal.accounts[0].access_token, TOKEN)
+  assert.equal(minimal.accounts[0].refresh_token, undefined)
 })
 
-test('一栏贴全后再手填的栏位盖过 JSON（单账号才算得清）', () => {
-  const out = parseImportPayload({
-    mode: 'manual',
-    fields: {
-      accessToken: JSON.stringify({ access_token: TOKEN, note: 'JSON 里的备注' }),
-      note: '手填备注',
-      userId: '777',
-    },
-  })
-  assert.equal(out.accounts.length, 1)
-  assert.equal(out.accounts[0].note, '手填备注')
-  assert.equal(out.accounts[0].user_id, '777')
-  assert.equal(out.accounts[0].access_token, TOKEN, '没手填的字段保持 JSON 里的')
-})
+// ── 文件导入：路径 / file:/// / 拖进来的裸文件名都认 ──────────────────────
 
-test('一栏贴全：第一栏贴的是文件路径 → 当文件导入读盘（file:/// 与引号都认）', async () => {
+test('文件导入：路径 / 带引号 / file:/// / file://localhost / 裸文件名都能读盘', async () => {
   const raw = JSON.stringify(OFFICIAL)
   const seen = []
   await withImporter({
@@ -513,32 +479,32 @@ test('一栏贴全：第一栏贴的是文件路径 → 当文件导入读盘（
     },
   }, async () => {
     const { plugin } = await build()
-    const manual = plugin.auth.methods[1]
-    await withTempFile('lobsterai-1.json', raw, async (file) => {
-      const forward = file.replace(/\\/g, '/')
+    const file = plugin.auth.methods[2]
+    await withTempFile('lobsterai-1.json', raw, async (path) => {
+      const forward = path.replace(/\\/g, '/')
 
-      assert.equal((await manual.authorize({ token: file })).type, 'success')
-      assert.equal(seen[0].mode, 'file', '路径要走文件分支（不是把路径当 token）')
+      assert.equal((await file.authorize({ source: path })).type, 'success')
+      assert.equal(seen[0].mode, 'file')
       assert.equal(seen[0].fields.text, raw)
 
       seen.length = 0
-      await manual.authorize({ token: '"' + file + '"' })
+      await file.authorize({ source: '"' + path + '"' })
       assert.equal(seen[0].fields.text, raw, 'Windows「复制为路径」带引号')
 
       seen.length = 0
-      await manual.authorize({ token: 'file:///' + forward })
+      await file.authorize({ source: 'file:///' + forward })
       assert.equal(seen[0].fields.text, raw, 'file:///C:/… → C:/…')
 
       seen.length = 0
-      await manual.authorize({ token: 'file://localhost/' + forward })
+      await file.authorize({ source: 'file://localhost/' + forward })
       assert.equal(seen[0].fields.text, raw, 'file://localhost/C:/… → C:/…')
 
-      // 拖进来的裸文件名（Chromium 只给 basename）→ 在当前目录里找得到
+      // 拖进来的裸文件名（Chromium 只给 basename）→ 在常见目录里找到
       seen.length = 0
       const cwd = process.cwd()
-      process.chdir(join(file, '..'))
+      process.chdir(join(path, '..'))
       try {
-        await manual.authorize({ token: 'lobsterai-1.json' })
+        await file.authorize({ source: 'lobsterai-1.json' })
       } finally {
         process.chdir(cwd)
       }
@@ -548,7 +514,7 @@ test('一栏贴全：第一栏贴的是文件路径 → 当文件导入读盘（
   })
 })
 
-test('拖进来的裸文件名找不到 → 明确报「读不到文件」而不是当 token 导入', async () => {
+test('文件导入：裸文件名找不到 → 明确报「读不到文件」而不是拿去当账号', async () => {
   const seen = []
   await withImporter({
     submit: async ({ fields }) => {
@@ -557,10 +523,10 @@ test('拖进来的裸文件名找不到 → 明确报「读不到文件」而不
     },
   }, async () => {
     const { plugin } = await build()
-    const out = await plugin.auth.methods[1].authorize({ token: 'lobsterai-不存在-' + Date.now() + '.json' })
+    const out = await plugin.auth.methods[2].authorize({ source: 'lobsterai-不存在-' + Date.now() + '.json' })
     assert.equal(out.type, 'failed')
     assert.match(out.error, /读不到文件/)
-    assert.equal(seen.length, 0, '读不到就不该拿去当 token 提交')
+    assert.equal(seen.length, 0, '读不到就不该拿去提交')
   })
 })
 

@@ -1098,19 +1098,6 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
     }
   }
 
-  /**
-   * 一栏里的文本看着像**文件**吗（而不是 token）。
-   * 判定归渠道（`importSpec.looksLikeFile`，与 prompts 的 condition 同源）；
-   * 没声明的渠道退回一个保守的通用判断。
-   */
-  const looksLikeFile = typeof importSpec?.looksLikeFile === 'function'
-    ? importSpec.looksLikeFile
-    : (text) => (
-      typeof text === 'string' && text.trim() !== '' && !text.trim().startsWith('{') && (
-        /^file:/i.test(text.trim()) || /[/\\]/.test(text) || /\.(json|jsonl|txt)$/i.test(text)
-      )
-    )
-
   /** 两个导入入口（magpie 原生表单；渠道声明了 importCredential 才有）。 */
   const buildImportMethods = () => {
     if (importSpec === undefined || importSpec === null) return []
@@ -1163,12 +1150,10 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       }
     }
 
-    // ① 手动导入：一栏贴全（token / 整段 JSON / 文件路径）+ 缺什么才补问
+    // ① 手动导入：USER ID → ACCESS TOKEN → REFRESH_TOKEN → 备注，宿主逐题问
+    //    （登录表单一次只渲染一个 input，见 docs/magpie-plugin-page-contract.md）。
     //    ⚠️ 栏位声明来自渠道（importSpec.manualPrompts）：文案是渠道自己的字段名，
-    //       聚合层只负责「按声明问、把答案原样交给 submit」。
-    //    为什么不是四栏并列：magpie 的登录表单一次只渲染一个 input（宿主
-    //    renderPluginAsk 的硬限制），所以「一屏填完」靠第一栏全吃下 + 后三栏
-    //    挂 condition 自动跳过。
+    //       聚合层只负责「按声明问、把答案原样交给 submit」，不解析、不猜。
     const manual = {
       type: 'api',
       // keyless：宿主不渲染「API key」输入框，直接按 prompts 提问后调 authorize
@@ -1186,17 +1171,12 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
         }],
       async authorize(inputs = {}) {
         const text = (value) => (typeof value === 'string' ? value.trim() : '')
-        return guard(() => {
-          const typed = text(inputs.token)
-          const fields = {
-            refreshToken: text(inputs.refreshToken),
-            userId: text(inputs.userId),
-            note: text(inputs.note),
-          }
-          // 一栏里贴的其实是文件（路径 / file:/// / 拖进来的裸文件名）→ 读成 JSON 走文件导入
-          if (looksLikeFile(typed)) return runImport('file', { ...fields, text: readImportSource(typed) })
-          return runImport('manual', { ...fields, accessToken: typed })
-        })
+        return guard(() => runImport('manual', {
+          accessToken: text(inputs.token),
+          refreshToken: text(inputs.refreshToken),
+          userId: text(inputs.userId),
+          note: text(inputs.note),
+        }))
       },
     }
 

@@ -177,9 +177,11 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
 
 ```js
 { type: 'api', keyless: true, label: '手动导入（粘贴凭据）',
-  prompts: [                         // 第一栏「什么都收」，其余用 condition 跳过
+  prompts: [                         // 数组顺序 = 提问顺序，一栏一题
+    { key: 'userId', type: 'text', message, placeholder },
     { key: 'token', type: 'password', message, placeholder, validate },
-    { key: 'refreshToken', type: 'password', condition: (inputs) => !inlineHas(inputs, 'refreshToken') },
+    { key: 'refreshToken', type: 'password', message, placeholder },
+    { key: 'note', type: 'text', message, placeholder },
   ],
   async authorize(inputs) { ... } }
 ```
@@ -204,29 +206,23 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
   唯一例外见下一条「拖拽兜底」：**没有任何目录分隔符的裸文件名**会在几个固定目录里
   各找一次（WebView2 把拖进来的文件只填成 basename）。
 
-### 一栏贴全：宿主一次只渲染一个问题（2026-11-01，m01367）
+### 四栏按序：宿主一次只渲染一个问题（2026-11-01，m01595 定案）
 
-用户要「四栏并列」，但宿主做不到 —— 别为这个再折腾 UI：
+magpie 的登录表单**没有多栏表单**，别为这个再折腾 UI：
 
 - 宿主 `nextPrompt(provider, index, inputs)` 遍历 `prompts`，`if (p.key in inputs) continue`
   后**立刻 return 一个** prompt 对象；前端 `renderPluginAsk(sub)` 只画一个 `<input>`
   （`key || type === 'password' ? 'password' : 'text'`）+ Next，答完重新走一遍登录流程。
-  ⇒ 一次一题，**没有多栏表单**。
-- 但 `applies(prompt, inputs)` 认两种跳过条件：`prompt.when {key,value,op}` 与
-  `prompt.condition(inputs)`。这就是「一屏填完」的唯一杠杆：第一栏把所有字段都吃下，
-  后三栏按「第一栏里有没有」自动跳过。
-- 因此**第一栏必须排在 `prompts[0]`**，且它得能识别：裸 token / 整段账号 JSON /
-  `access=… refresh_token=… uid=… note=…` 键值对 / 文件路径（解析在
-  `src/lobsterai-import.mjs` 的 `inlineFieldsOf`，纯函数、不碰文件系统）。
-- `condition` 里还要判「这一栏贴的是文件」（`looksLikeImportFile`，渠道导出在
-  `importSpec.looksLikeFile`）→ 三栏全跳过。真机踩过：贴路径时宿主仍追问
-  user_id / refresh_token，用户得空按三次回车。
-- ⚠️ **手填覆盖里不能包含 `access_token`**：第一栏本身就是 accessToken/JSON/路径，
-  拿它当 override 会把整段文本写进 token（真机前测试就红在这）。
+  ⇒ 一次一题；`prompts` 数组顺序 = 用户看到的提问顺序。
+- **定案是四栏逐题问**（USER ID → ACCESS TOKEN → REFRESH_TOKEN → 备注），不挂
+  `condition`/`when`。中间试过「第一栏什么都收（裸 token / 整段 JSON / `access=…` 键值对 /
+  文件路径）+ 后三栏按 `condition` 跳过」，用户否掉，改回按序（m01595）—— 别再往回改。
+- 手动栏的 `token` **只收 accessToken**；整段 JSON 粘进这一栏会明确抛错并指到
+  「文件导入（账号 JSON）」那一栏（`parseImportPayload` 的 manual 分支）。
 - 页面/面板**没有写凭据的通道**（`_magpie/bridge.js` 只导出 theme/context/service/
   onTheme/onAction/options.get/options.set/read；窗口端 `answer()` 的 switch 只有
-  hello/theme/options.get/options.set/read，其余抛 `No such call`）⇒ 想自建四栏表单
-  提交凭据是不可能的，别往这条路上走。
+  hello/theme/options.get/options.set/read，其余抛 `No such call`）⇒ 自建表单提交凭据
+  不可能，别往这条路上走。
 
 ### 拖拽兜底：宿主没有文件选择器
 
@@ -244,7 +240,7 @@ basename，可能是 `file:///…`）。为此 `src/aggregate.mjs` 的 `readImpo
 
 手动导入的 `prompts` 来自 `channel.importCredential.manualPrompts`（文案是渠道自己的
 字段名），aggregate 只做「按声明问 + 把答案原样交给 `submit`」。现有四栏：
-`userId`（可选，留空从 JWT 取 uid）/ `token`（必填，整段 JSON 也认）/
+`userId`（可选，留空从 JWT 取 uid）/ `token`（必填，只收 accessToken）/
 `refreshToken`（可选）/ `note`（可选，= 账号显示名）。
 
 - ⚠️ **refresh_token 不做硬必填**：真机上「只有 access_token」的账号正是最该导进来的

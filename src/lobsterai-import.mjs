@@ -102,131 +102,6 @@ function credentialFromRow(row) {
   return { credential }
 }
 
-/**
- * 单栏「一次贴全」认的键名 → 内部字段名。
- *
- * 真机上「四栏并列」做不到（magpie 的登录表单一次只渲染一个 input，见
- * docs/AGENTS：宿主 nextPrompt/renderPluginAsk 的硬限制），退而求其次：
- * **第一栏贴什么都收**（裸 token / 整段 JSON / `access=… refresh_token=…`
- * 这种键值对 / 文件路径），贴全了后面几栏就自动跳过 —— 一屏填完。
- *
- * 键名照官方客户端导出 + OAuth 通用命名 + 中文备注，长键在前（access_token
- * 不能被 access 抢走）。
- */
-const INLINE_FIELDS = {
-  access_token: 'accessToken',
-  accesstoken: 'accessToken',
-  access: 'accessToken',
-  token: 'accessToken',
-  refresh_token: 'refreshToken',
-  refreshtoken: 'refreshToken',
-  refresh: 'refreshToken',
-  user_id: 'userId',
-  userid: 'userId',
-  uid: 'userId',
-  note: 'note',
-  remark: 'note',
-  label: 'note',
-  备注: 'note',
-}
-
-/** 键值对里的分隔符：空格 / 换行 / & ; , |（粘进单行 input 后换行可能被吃掉，故不强求）。 */
-function inlinePattern() {
-  const keys = Object.keys(INLINE_FIELDS).sort((a, b) => b.length - a.length).join('|')
-  return new RegExp('(' + keys + ')\\s*[=:]\\s*', 'gi')
-}
-
-/**
- * `access=… refresh_token=… uid=… note=…`（`:` 也行、`&`/逗号/分号/换行都行）→ 字段。
- * 值的终点 = 下一处键名的起点。看着不像键值对 → undefined（调用方当裸 token 处理）。
- */
-function pairsFromText(text) {
-  const re = inlinePattern()
-  const marks = []
-  let match
-  while ((match = re.exec(text)) !== null) {
-    const field = INLINE_FIELDS[String(match[1]).toLowerCase()]
-    if (field === undefined) continue
-    marks.push({ field, from: re.lastIndex, at: match.index })
-    if (re.lastIndex === match.index) re.lastIndex += 1
-  }
-  if (marks.length === 0) return undefined
-  const fields = {}
-  marks.forEach((mark, index) => {
-    const to = index + 1 < marks.length ? marks[index + 1].at : text.length
-    const value = text.slice(mark.from, to)
-      .replace(/^[\s;&,|]+/, '')
-      .replace(/[\s;&,|]+$/, '')
-      .replace(/^["'`]+/, '')
-      .replace(/["'`]+$/, '')
-      .trim()
-    if (value !== '' && fields[mark.field] === undefined) fields[mark.field] = value
-  })
-  return Object.keys(fields).length > 0 ? fields : undefined
-}
-
-/** 一行账号对象 → 只挑「导入栏里问的那四样」（JSON 里别的字段不管）。 */
-function fieldsOfRow(row) {
-  const pick = (...keys) => {
-    for (const key of keys) {
-      const value = textOf(row?.[key])
-      if (value !== undefined) return value
-    }
-    return undefined
-  }
-  const accessToken = pick('access_token', 'accessToken', 'access', 'token', 'accessKey')
-  const fields = {}
-  if (accessToken !== undefined) fields.accessToken = accessToken
-  const refreshToken = pick('refresh_token', 'refreshToken', 'refresh')
-  if (refreshToken !== undefined) fields.refreshToken = refreshToken
-  const userId = pick('user_id', 'userId', 'uid')
-    ?? textOf(jwtClaims(accessToken)?.uid) ?? textOf(jwtClaims(accessToken)?.user_id)
-  if (userId !== undefined) fields.userId = userId
-  const note = pick('note', 'remark', 'label', '备注')
-  if (note !== undefined) fields.note = note
-  return fields
-}
-
-/**
- * 一栏里贴进来的东西 → 能认出哪些字段（纯解析，不碰文件系统：路径由聚合层读）。
- *
- * @param {string} text
- * @returns {{accessToken?: string, refreshToken?: string, userId?: string, note?: string, json?: string, rows?: number}}
- *   `json` 有值 = 这段文本本身就是账号 JSON（`rows` 是里面认出的账号数）。
- */
-export function inlineFieldsOf(text) {
-  const raw = typeof text === 'string' ? text.trim() : ''
-  if (raw === '') return {}
-  if (raw.startsWith('{') || raw.startsWith('[')) {
-    let rows
-    try {
-      rows = rowsFromJson(raw)
-    } catch {
-      rows = []
-    }
-    if (rows.length === 0) return {}
-    return { ...fieldsOfRow(rows[0]), json: raw, rows: rows.length }
-  }
-  return pairsFromText(raw) ?? {}
-}
-
-/**
- * 一栏里的文本看着像**账号文件**吗（而不是 token）。
- *
- * `file:///…` / 带目录分隔符 / `.json` `.jsonl` `.txt` 结尾 → 当文件；
- * JSON 本身不算（先认 `{` `[`）。JWT 里没有 `/` `\\`，也不会以 .json 结尾，
- * 不会误判成路径。
- *
- * 两处共用：聚合层决定「要不要读盘」，prompts 的 `condition` 决定「后面几栏还问不问」
- * —— 贴的是文件时文件里什么都有，不必再一栏栏补问（否则真机上贴路径还要被问三题）。
- */
-export function looksLikeImportFile(text) {
-  const raw = typeof text === 'string' ? text.trim() : ''
-  if (raw === '') return false
-  if (raw.startsWith('{') || raw.startsWith('[')) return false
-  return /^file:/i.test(raw) || /[/\\]/.test(raw) || /\.(json|jsonl|txt)$/i.test(raw)
-}
-
 /** JSON 文本 → 账号对象数组（单对象 / 数组 / {accounts:[…]} / JSONL 全认）。 */
 function rowsFromJson(text) {
   const rows = []
@@ -283,9 +158,8 @@ export function parseImportPayload(payload = {}) {
   const fields = typeof payload?.fields === 'object' && payload?.fields !== null ? payload.fields : {}
   const warnings = []
   const box = textOf(fields.accessToken) ?? textOf(fields.access_token) ?? ''
-  // 另外几栏（手动导入的第二~四栏）；一栏贴全时它们通常是空的
+  // 另外三栏（手动导入的 USER ID / REFRESH_TOKEN / 备注）
   const explicit = {
-    accessToken: textOf(fields.accessToken) ?? textOf(fields.access_token),
     refreshToken: textOf(fields.refreshToken) ?? textOf(fields.refresh_token),
     userId: textOf(fields.userId) ?? textOf(fields.user_id),
     note: textOf(fields.note) ?? textOf(fields.remark),
@@ -297,21 +171,21 @@ export function parseImportPayload(payload = {}) {
     if (pastedJson === undefined) throw new Error('没有收到账号 JSON')
     rows.push(...rowsFromJson(pastedJson))
   } else {
-    // 手动导入：第一栏可能是 裸 token / 整段 JSON / `access=… refresh=…` 键值对
-    const inline = inlineFieldsOf(box)
-    if (typeof inline.json === 'string') rows.push(...rowsFromJson(inline.json))
-    else rows.push({
-      access_token: inline.accessToken ?? box,
-      refresh_token: inline.refreshToken ?? '',
-      user_id: inline.userId ?? '',
-      note: inline.note ?? '',
+    // 手动导入：四栏按顺序问，答案各归各的字段（不解析、不猜）
+    // 整段 JSON 走「文件导入」那一栏 —— 这里明确报错，别把它当 token 收下。
+    if (box.startsWith('{') || box.startsWith('[')) {
+      throw new Error('这一栏要的是 accessToken；整段账号 JSON 请用「文件导入（账号 JSON）」那一栏')
+    }
+    rows.push({
+      access_token: box,
+      refresh_token: '',
+      user_id: '',
+      note: '',
     })
   }
   // 手填的那几栏盖过 JSON：单账号时才算得清（一个文件里多个账号时不猜给谁）
   if (rows.length === 1) {
     const row = rows[0]
-    // ⚠️ access_token 不在这里：手动页的第一栏就是 accessToken/JSON/路径本身，
-    //    拿它当「手填覆盖」会把整段文本写进 token（真机踩过）。
     const override = {
       refresh_token: explicit.refreshToken,
       user_id: explicit.userId,
@@ -415,73 +289,50 @@ export function createImporter({ displayName, verify } = {}) {
   }
 
   /**
-   * 手动导入的四个栏位（magpie 原生表单逐题问的就是这些）。
+   * 手动导入的四个栏位：magpie 原生表单按数组顺序**逐题**问 —— 宿主一次只渲染
+   * 一个 input（nextPrompt/renderPluginAsk，见 docs/magpie-plugin-page-contract.md），
+   * 所以数组顺序就是用户看到的顺序：USER ID → ACCESS TOKEN → REFRESH_TOKEN → 备注。
    *
-   * 只放**声明**（文案/占位/校验），不放问的顺序 —— 宿主按数组顺序问。
-   * 顺序：凭据（什么都收）→ user_id → refresh → 备注，后三栏各带 condition。
-   *
-   * ⚠️ refresh_token 故意**不做硬必填**：
-   *    真机上「只有 access_token」的账号正是最需要导进来的那批（客户端登录态还在、
-   *    refresh 已被别的地方消费）；要求必填等于把能用的账号挡在门外。缺它时
-   *    导入照常进行，只提示「到期要重新导入」（见 aggregate 的 warning）。
+   * 只放**声明**（文案/占位/校验），怎么用这些答案是 submit 的事。
+   * ⚠️ refresh_token 故意**不做硬必填**：真机上「只有 access_token」的账号正是最需要
+   *    导进来的那批（客户端登录态还在、refresh 已被别处消费）；要求必填等于把能用的
+   *    账号挡在门外。缺它时导入照常进行，只提示「到期要重新导入」。
    */
-  // ⚠️ 一栏贴全：第一栏就是「全都能贴」，并且它**必须排在最前** ——
-  //    magpie 的登录表单一次只渲染一个问题（宿主 renderPluginAsk 的硬限制，
-  //    四栏并列做不到），所以「一屏填完」只能靠第一栏把四样都吃下；
-  //    后面三栏用 condition 按「第一栏里有没有」决定问不问。
-  //    贴的 JSON 里带了 user_id/refresh/备注 → 那几栏自动跳过；
-  //    贴的是**文件路径**（或拖进来的文件名）→ 文件里什么都有，三栏全跳过。
-  const hasInline = (inputs, field) => inlineFieldsOf(inputs?.token)?.[field] !== undefined
-  const skipWhenInline = (field) => (inputs) => {
-    const box = inputs?.token
-    if (looksLikeImportFile(box)) return false
-    return !hasInline(inputs, field)
-  }
-
   const manualPrompts = [
-    {
-      key: 'token',
-      type: 'password',
-      message: '凭据（必填）：accessToken / 整段账号 JSON / 账号文件路径，一次贴全就不再问后面几栏',
-      placeholder: '粘贴 accessToken，或整段 {"access_token":…}，或 C:\\…\\lobsterai-1.json',
-      validate: (value) => (
-        typeof value === 'string' && value.trim() !== ''
-          ? null
-          : '请粘贴 accessToken（也可以整段账号 JSON、或账号文件路径）'
-      ),
-    },
     {
       key: 'userId',
       type: 'text',
       message: 'USER ID（可选，留空自动从 token 里识别）',
-      placeholder: '数字 user_id',
-      // 上面那一栏已经贴了 user_id（JSON / uid=…）→ 不再问
-      condition: skipWhenInline('userId'),
+      placeholder: '数字 userId',
+    },
+    {
+      key: 'token',
+      type: 'password',
+      message: 'ACCESS TOKEN（必填）',
+      placeholder: '粘贴 accessToken',
+      validate: (value) => (
+        typeof value === 'string' && value.trim() !== '' ? null : '请粘贴 accessToken'
+      ),
     },
     {
       key: 'refreshToken',
       type: 'password',
       message: 'REFRESH_TOKEN（可选，建议填写：用来续期；只有 access 也能导入，到期要重新导入）',
       placeholder: '粘贴 refreshToken',
-      condition: skipWhenInline('refreshToken'),
     },
     {
       key: 'note',
       type: 'text',
       message: '备注（可选，留空 = 用上游昵称；填了就是账号列表里显示的名字）',
       placeholder: '例如：手机小号 A',
-      condition: skipWhenInline('note'),
     },
   ]
 
   return {
     manualLabel: '手动导入（粘贴凭据）',
     fileLabel: '文件导入（账号 JSON）',
-    manualHint: '一栏贴全：第一栏贴 accessToken，或整段账号 JSON，或账号文件路径（拖文件进那一栏也行）；贴全了就不再问 user_id / refresh_token / 备注，缺哪样才问哪样。',
+    manualHint: '四栏按顺序填：USER ID（可留空，自动从 token 识别）、ACCESS TOKEN（必填）、REFRESH_TOKEN（可选，用来续期）、备注（可选）。',
     fileHint: '账号 JSON 的文件路径（支持 file:///、带引号、~、裸文件名）或直接粘贴 JSON（单对象 / 数组 / {accounts:[…]} / JSONL 都可）。',
-    // 一栏里的文本像不像文件 —— 聚合层用它决定「读盘还是当 token」。
-    // 声明归渠道（聚合层不猜别的渠道的导入长什么样），与 prompts 的 condition 同源。
-    looksLikeFile: looksLikeImportFile,
     manualPrompts,
     submit,
     parse: parseImportPayload,
