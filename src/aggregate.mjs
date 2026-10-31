@@ -562,15 +562,21 @@ export function tierSummarize(rows) {
     /**
      * 合并窗口的分母：**每批分母之和**（只有当每一批都给出了 limit 才算，
      * 缺一批就不给 —— 半真半假的比例比没有更误导）。
+     *
+     * ⚠️⚠️ 算不出整组分母时，必须把 `...earliest` 带进来的单批
+     *    limit/amount/used **一起剥掉**：否则 26 批合计 2558.49 会顶着
+     *    单批的 `limit: 100` 上卡，显示成「2558.49 / 100」这种荒谬数字
+     *    （2026-10-31 真机复现）。
      */
     const limits = longTerm.map((r) => r.limit)
     const amounts = longTerm.map((r) => r.amount)
-    const limitSum = limits.every((v) => typeof v === 'number' && Number.isFinite(v))
-      ? tidyNumber(limits.reduce((s, v) => s + v, 0)) : undefined
-    const usedSum = amounts.every((v) => typeof v === 'number' && Number.isFinite(v))
-      ? tidyNumber(amounts.reduce((s, v) => s + v, 0)) : undefined
+    const wholeGroup = limits.every((v) => typeof v === 'number' && Number.isFinite(v))
+      && amounts.every((v) => typeof v === 'number' && Number.isFinite(v))
+    const limitSum = wholeGroup ? tidyNumber(limits.reduce((s, v) => s + v, 0)) : undefined
+    const usedSum = wholeGroup ? tidyNumber(amounts.reduce((s, v) => s + v, 0)) : undefined
+    const { limit: _dropLimit, amount: _dropAmount, used: _dropUsed, ...mergedBase } = earliest
     out.push({
-      ...earliest,
+      ...mergedBase,
       name: `长期（${longTerm.length} 批）· 剩 ${amount}`,
       amount: Number(amount),
       display: untilEarliest !== undefined ? `最早 ${untilEarliest}` : `剩 ${amount} · ${longTerm.length} 批`,
@@ -580,7 +586,10 @@ export function tierSummarize(rows) {
             amount: Number(usedSum),
             used: limitSum > 0 ? Math.round((usedSum / limitSum) * 100) : 0,
           }
-        : {}),
+        // ⚠️ 分母凑不齐时**仍给 used: 0**：magpie 的 quotaNoShare 判 `used == null`
+        //    ⇒ 缺了它整行退化成纯文本（没有百分比、没有进度条），比"条恒满"更糟
+        //    （用户 2026-10-31 的诉求就是要看到条）。只剥 limit/amount。
+        : { used: 0 }),
     })
     // 同上：runsOutAt/runsOut 去掉（重复行），resetsAt 留着（走势虚线要它）
     delete out[out.length - 1].runsOutAt
