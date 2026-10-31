@@ -19,9 +19,11 @@
 //    端点：它返回**裸 SSE，不套信封**，故不能用 parseEnvelope 解它。
 // 2. **refresh 不带 Authorization**（带着会被拒）：匿名头 = Accept +
 //    Content-Type + User-Agent，仅此三。
-// 3. **模型列表要带客户端能力头**：不带 `X-LobsterAI-Client-Capabilities` 与
-//    `X-LobsterAI-Client-Version` 时 `/api/models/available` 只回 25 个模型且
-//    缺 `kimi-k3`（实测）；带上才是完整 26 个。
+// 3. **目录的字段是 `modelId` / `modelName`，不是 `id` / `name`**
+//    （2026-10-31 真机实测：按 `id` 读 → 每一行都被跳过 → 目录整体为空 →
+//    回落成兜底表，用户只看到 6 个过期模型，而远端其实有 19 个）。
+//    客户端头 `X-LobsterAI-Client-Capabilities` / `X-LobsterAI-Client-Version`
+//    仍然照发（对齐客户端形态）；实测它们**不再**改变返回条数（无头也是 19 条）。
 //
 // ## 与 DSH 的有意差异
 //
@@ -333,6 +335,14 @@ function readNum(value) {
   return n
 }
 
+/** 第一次出现的非空字符串（上游不同时期用过多个同义键名）。 */
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+  }
+  return undefined
+}
+
 async function fetchCatalog(credential) {
   const version = await clientVersion()
   const response = await fetch(`${API_BASE}${MODELS_PATH}`, {
@@ -348,19 +358,31 @@ async function fetchCatalog(credential) {
   const models = {}
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue
-    const id = typeof row.id === 'string' ? row.id.trim()
-      : (typeof row.model === 'string' ? row.model.trim() : '')
-    if (id.length === 0) continue
-    const name = typeof row.name === 'string' && row.name.length > 0 ? row.name : id
-    const context = readNum(row.contextWindow ?? row.context_length) ?? 131_072
-    const output = readNum(row.maxTokens ?? row.max_tokens) ?? 8192
-    const inputs = Array.isArray(row.inputModalities) ? row.inputModalities : []
-    const attachment = inputs.includes('image') || row.supportsVision === true || row.vision === true
+    // ⚠️⚠️ 上游真正的主键是 `modelId`（真机：`{modelId:'deepseek-flash',
+    // modelName:'DeepSeek-V4.1-Flash', …}`）—— 只读 `id` 会让**每一行**都被跳过，
+    // 目录变空后 discoverModels 回落兜底表（用户报障「只有几个旧模型」的根因）。
+    // 兼容顺序：modelId → id → model（旧版/镜像接口）。
+    const id = firstString(row.modelId, row.id, row.model)
+    if (id === undefined) continue
+    // 账号无权的条目（其余计划专属/下线）不能选，选了 chat 也是 403
+    if (row.accessible === false) continue
+    const name = firstString(row.modelName, row.name, row.displayName) ?? id
+    const context = readNum(row.contextWindow ?? row.context_length ?? row.context) ?? 131_072
+    const output = readNum(row.maxOutputTokens ?? row.maxTokens ?? row.max_tokens) ?? 8192
+    const inputs = Array.isArray(row.inputModalities) ? row.inputModalities.map(String) : []
+    // 图片能力三种写法都认：`supportsImage`（当前）/ `supportsVision`（旧）/ `inputModalities`
+    const attachment = inputs.includes('image')
+      || row.supportsImage === true
+      || row.supportsVision === true
+      || row.vision === true
+    // 只有明确的 false 才关（上游对不少模型给 null = 未知，别当成不支持）
+    const tool_call = row.supportsToolCalling !== false
+    const reasoning = row.supportsThinking !== false
     models[id] = {
       name,
       limit: { context, output },
-      tool_call: true,
-      capabilities: { temperature: true, reasoning: true, attachment },
+      tool_call,
+      capabilities: { temperature: true, reasoning, attachment },
       options: {},
       headers: {},
       variants: {},
@@ -372,16 +394,31 @@ async function fetchCatalog(credential) {
 }
 
 /**
- * 兜底目录（DSH 实测 `GET /api/models/available` 拉到的常用条目）。
- * ⚠️ 上游若有变化以远端为准；这里只在远端整体失败时顶替。
+ * 兜底目录：**镜像 2026-10-31 真机 `GET /api/models/available` 的 19 条**
+ * （键 = 上游 `modelId` 原样，含大写 `MiniMax-M3`；名 = `modelName`）。
+ * ⚠️ 以远端为准：这里只在远端整体失败（401/网络）时顶替，否则用远端结果。
+ * 只保留条目，不镜像 costMultiplier（展示名里那套倍率是 accio 的约定，别照搬）。
  */
 const FALLBACK_MODELS = {
-  'deepseek-v4': { name: 'DeepSeek V4', limit: { context: 131_072, output: 8192 } },
-  'deepseek-v4-flash': { name: 'DeepSeek V4 Flash', limit: { context: 1_000_000, output: 8192 } },
+  'deepseek-flash': { name: 'DeepSeek-V4.1-Flash', limit: { context: 1_000_000, output: 8192 } },
+  'deepseek-v4-pro': { name: 'DeepSeek-V4-Pro', limit: { context: 1_000_000, output: 8192 } },
+  'deepseek-v4-flash': { name: 'DeepSeek-V4-Flash', limit: { context: 1_000_000, output: 8192 } },
+  'deepseek-v4-flash-vision-exp': { name: 'DeepSeek-V4-Flash-Vision-Exp', limit: { context: 1_000_000, output: 8192 } },
   'glm-5.3': { name: 'GLM-5.3', limit: { context: 1_000_000, output: 8192 } },
-  'kimi-k2.6': { name: 'Kimi K2.6', limit: { context: 262_144, output: 8192 } },
-  'qwen3.8-max': { name: 'Qwen 3.8 Max', limit: { context: 1_000_000, output: 8192 } },
-  'minimax-m3': { name: 'MiniMax M3', limit: { context: 1_000_000, output: 8192 } },
+  'glm-5.3-flash': { name: 'GLM-5.3-Flash', limit: { context: 1_000_000, output: 8192 } },
+  'glm-5.3-flashx': { name: 'GLM-5.3-FlashX', limit: { context: 1_000_000, output: 8192 } },
+  'glm-5.2': { name: 'GLM-5.2', limit: { context: 1_000_000, output: 8192 } },
+  'kimi-k3.1-pro': { name: 'Kimi-K3.1-Pro', limit: { context: 1_048_576, output: 8192 } },
+  'kimi-k3.1-pro-highspeed': { name: 'Kimi-K3.1-Pro-Highspeed', limit: { context: 1_048_576, output: 8192 } },
+  'kimi-k2.8-preview': { name: 'Kimi-K2.8-Preview', limit: { context: 262_144, output: 8192 } },
+  'MiniMax-M3': { name: 'MiniMax-M3', limit: { context: 1_000_000, output: 8192 } },
+  'MiniMax-M3.1-Flash': { name: 'MiniMax-M3.1-Flash', limit: { context: 1_000_000, output: 8192 } },
+  'qwen3.8-max': { name: 'Qwen3.8-Max', limit: { context: 1_000_000, output: 8192 } },
+  'qwen3.8-flash': { name: 'Qwen3.8-Flash', limit: { context: 1_000_000, output: 8192 } },
+  'qwen3.8-omni-flash': { name: 'Qwen3.8-Omni-Flash', limit: { context: 1_000_000, output: 8192 } },
+  'qwen3.7-max': { name: 'Qwen3.7-Max', limit: { context: 1_000_000, output: 8192 } },
+  'qwen3.7-plus': { name: 'Qwen3.7-Plus', limit: { context: 1_000_000, output: 8192 } },
+  'doubao-seed-2-1-pro-260915': { name: 'Doubao-Seed-2.1-Pro', limit: { context: 256_000, output: 8192 } },
 }
 
 // ── chat（OpenAI 兼容，**仅 SSE、裸流不套信封**）────────────────────────

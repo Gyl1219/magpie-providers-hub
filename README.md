@@ -101,8 +101,18 @@ PKCE + **本地 loopback 回调**（Accio 对 `return_url` 无白名单校验，
 **本机 loopback 回调**换 token。三个坑：**信封统一 `{code,msg,data}`**，`code !== 0`
 即失败 —— 唯一例外是 chat，它返回**裸 SSE 不套信封**；**refresh 不带
 Authorization**（带着会被拒，匿名头只有 Accept/Content-Type/User-Agent 三个）；
-**模型列表必须带 `X-LobsterAI-Client-Capabilities` + `X-LobsterAI-Client-Version`**，
-否则只回 25 个模型且缺 `kimi-k3`。
+**目录行的主键叫 `modelId`（名字叫 `modelName`），不是 `id`/`name`** ——
+按 `id` 读会把每一行都跳过、目录变空后回落兜底表，于是选择器只剩几个过期模型
+（0.5.9 及以前的表现，实测远端 19 条却只显示 6 条）。
+
+⚠️ 目录里 `accessible: false` 的条目（如 `kimi-k3.1-pro-highspeed`，
+`restrictionHint`「该模型仅限有效订阅用户使用」）**故意不列**：订不到的模型选中也是
+403，别放进选择器。订阅账号登录后上游把它置为 `accessible: true`，目录会自动多出来。
+
+客户端头 `X-LobsterAI-Client-Capabilities` / `X-LobsterAI-Client-Version` 仍照发
+（对齐官方客户端形态），但**实测已不再影响返回条数**（无头也是 19 条）。
+图片能力读 `supportsImage`，推理能力读 `supportsThinking`，工具调用只在
+`supportsToolCalling === false` 时才关（上游给 `null` = 未知，不是不支持）。
 
 ### magicrew / magicrew-intl（超级麦吉）
 
