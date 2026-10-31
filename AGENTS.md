@@ -171,7 +171,86 @@ magicrew 的 granted:false → claimed+site.dailyGrant）。done 只留给
   消费后救不回，只能重登。
 - 提交信息用 `-F <file>`（PowerShell 内联多行会乱）；临时草稿文件进 .gitignore
 
-## 7. 形态：一个插件，五条供应商（v0.5.0）
+## 7. 账号导入入口：magpie 原生表单（v0.5.x，lobsterai）
+
+导入已有账号**不进浏览器、不起本地 http**，用 magpie 的 api 型登录方式：
+
+```js
+{ type: 'api', keyless: true, label: '手动导入（粘贴凭据）',
+  prompts: [                         // 数组顺序 = 提问顺序，一栏一题
+    { key: 'userId', type: 'text', message, placeholder },
+    { key: 'token', type: 'password', message, placeholder, validate },
+    { key: 'refreshToken', type: 'password', message, placeholder },
+    { key: 'note', type: 'text', message, placeholder },
+  ],
+  async authorize(inputs) { ... } }
+```
+
+- 宿主流程：先按 `prompts` 逐题问（`/api/plugin-signin/prompt` → 宿主的
+  `nextPrompt`，**实时从插件读**，不读 `plugin-providers.json` 里那份缓存），
+  `keyless` 时不渲染 API key 框，答完以 `key:''` 调 `authorize(inputs)`。
+  `validate` 返回字符串 = 原表单显示红字，表单不关。
+- 返回 `{type:'failed', error}` 是**唯一**的失败形状（宿主把 error 显示在表单里）；
+  不要把错误抛出去。
+- ⚠️ **结果必须带 `refresh` 键**：宿主 `save()` 只看 `'refresh' in result`。
+  有它 → 按 oauth 存（`refresh/access/expires` + 其余字段进 extra）并 settle 账号名；
+  没有它且 `key` 为空（keyless）→ **宿主一个字段都不写、连 auth 事件都不发**。
+- 多账号：**第一个**账号的凭据作为 `authorize` 的返回值交宿主写；第 2..N 个在
+  `authorize` 里自己 `client.auth.set`（key 用 `PROVIDER#rand`，先查同 `accountId`
+  的旧槽以免重复账号）。
+- 槽里同时留两套字段名：宿主的 `access/refresh` 与本插件的
+  `access_token/refresh_token/expires_at`（后者走 `...extra`）；`credentialOfAuth`
+  只剥 `type/channel/expires/accountId`，loader 与渠道仍读得到。
+- 读用户给的 JSON 文件时**只读那一个文件**（不遍历目录），失败文案要把路径和
+  `error.code` 说明白，并提示「也可以直接把 JSON 粘进这一栏」。
+  唯一例外见下一条「拖拽兜底」：**没有任何目录分隔符的裸文件名**会在几个固定目录里
+  各找一次（WebView2 把拖进来的文件只填成 basename）。
+
+### 四栏按序：宿主一次只渲染一个问题（2026-11-01，m01595 定案）
+
+magpie 的登录表单**没有多栏表单**，别为这个再折腾 UI：
+
+- 宿主 `nextPrompt(provider, index, inputs)` 遍历 `prompts`，`if (p.key in inputs) continue`
+  后**立刻 return 一个** prompt 对象；前端 `renderPluginAsk(sub)` 只画一个 `<input>`
+  （`key || type === 'password' ? 'password' : 'text'`）+ Next，答完重新走一遍登录流程。
+  ⇒ 一次一题；`prompts` 数组顺序 = 用户看到的提问顺序。
+- **定案是四栏逐题问**（USER ID → ACCESS TOKEN → REFRESH_TOKEN → 备注），不挂
+  `condition`/`when`。中间试过「第一栏什么都收（裸 token / 整段 JSON / `access=…` 键值对 /
+  文件路径）+ 后三栏按 `condition` 跳过」，用户否掉，改回按序（m01595）—— 别再往回改。
+- 手动栏的 `token` **只收 accessToken**；整段 JSON 粘进这一栏会明确抛错并指到
+  「文件导入（账号 JSON）」那一栏（`parseImportPayload` 的 manual 分支）。
+- 页面/面板**没有写凭据的通道**（`_magpie/bridge.js` 只导出 theme/context/service/
+  onTheme/onAction/options.get/options.set/read；窗口端 `answer()` 的 switch 只有
+  hello/theme/options.get/options.set/read，其余抛 `No such call`）⇒ 自建表单提交凭据
+  不可能，别往这条路上走。
+
+### 拖拽兜底：宿主没有文件选择器
+
+登录表单只认 `text/password/select`，没有 `file` 类型、没有 drop 回调。所以「拖文件
+进来」只能靠 WebView2 的默认行为把**文件名**填进那个 `<input>`（Chromium 给的是
+basename，可能是 `file:///…`）。为此 `src/aggregate.mjs` 的 `readImportSource` 认三样：
+
+1. `file:///C:/…`、`file://localhost/C:/…`（`fromFileUrl`，UNC 给 `\\server\share`）；
+2. 带引号 / 反引号包住的路径（Windows「复制为路径」）、`~` 展开；
+3. **裸文件名**（无 `/ \`）→ 依次在 `cwd` / `home` / `Desktop` / `OneDrive\Desktop` /
+   `Downloads` / `Documents` / `OneDrive\Documents` 里 `existsSync` 命中即读。
+   固定清单、命中即止，**不是遍历目录**。
+
+### 栏位声明归渠道，不问聚合层
+
+手动导入的 `prompts` 来自 `channel.importCredential.manualPrompts`（文案是渠道自己的
+字段名），aggregate 只做「按声明问 + 把答案原样交给 `submit`」。现有四栏：
+`userId`（可选，留空从 JWT 取 uid）/ `token`（必填，只收 accessToken）/
+`refreshToken`（可选）/ `note`（可选，= 账号显示名）。
+
+- ⚠️ **refresh_token 不做硬必填**：真机上「只有 access_token」的账号正是最该导进来的
+  那批；缺它照常导入，只 warning「到期要重新导入」。别为了「提醒续期」把能用的账号挡掉。
+- **备注优先于昵称**（`accountIdOf`）：官方昵称打码成 `170****7196`，两个小号分不清。
+  重复导入不会因此改名 —— `importAccountId` 让按 token 命中的旧槽 `accountId` 优先。
+- **降级保护**（抄自 magpie-wpt）：旧槽的到期时间比这次导入的更晚 → 提示「覆盖反而是
+  降级」，只提示不拦。算在 `withPreviousSlot` 补字段**之前**，否则补过就不算降级。
+
+## 8. 形态：一个插件，五条供应商（v0.5.0）
 
 0.3.x 是「一个 provider id `providers-hub` 内部聚合十渠道」。v0.4.0 拆成
 **每个渠道一条供应商**：magpie 的 failover 与开关都是 provider 粒度，聚合形态下

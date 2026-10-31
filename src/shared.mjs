@@ -96,14 +96,23 @@ export function readOwnAuthEntries({ providerId, withValue = false } = {}) {
  */
 export function readMagpieAuthSlots(providerId) {
   // ⚠️ 这里需要 expires（判「重复登录是否已过期」），所以对本插件自己的槽取 value。
+  // ⚠️ accessToken / refreshToken 只给「同一个 token 重复导入」认账号用（导入入口）：
+  //    不打日志、不进快照、不写任何地方。
   return readOwnAuthEntries({ providerId, withValue: true }).map(({ key, value: val, channel }) => {
     const expires = Number(val.expires)
+    const access = typeof val.access_token === 'string' ? val.access_token : val.access
+    const refresh = typeof val.refresh_token === 'string' ? val.refresh_token : val.refresh
     return {
       key,
       type: typeof val.type === 'string' ? val.type : '',
       accountId: typeof val.accountId === 'string' ? val.accountId : '',
       channel,
       expires: Number.isFinite(expires) && expires > 0 ? expires : undefined,
+      accessToken: typeof access === 'string' ? access : '',
+      refreshToken: typeof refresh === 'string' ? refresh : '',
+      expiresAt: typeof val.expires_at === 'string' ? val.expires_at : '',
+      uid: typeof val.uid === 'string' ? val.uid : '',
+      userId: typeof val.user_id === 'string' ? val.user_id : '',
     }
   })
 }

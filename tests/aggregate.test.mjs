@@ -42,12 +42,24 @@ test('一个插件，五条供应商：每个实例只注册自己那一条', as
   }
 })
 
-test('每个供应商一个登录入口', async () => {
+test('每个供应商一个登录入口（导入入口只能挂在首个登录之后）', async () => {
+  // lobsterai 多出「手动导入 / 文件导入」两个入口（magpie 的登录方式区里
+  // 渲染成按钮）。它们排在校验/浏览器登录之后，不抢第一个位置 —— 用户默认先看见「登录」。
   for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
     const plugin = await makePlugin({}, {})
-    assert.equal(plugin.auth.methods.length, 1, `${exportName} 应只有一个登录入口`)
-    assert.equal(plugin.auth.methods[0].type, 'oauth', `${exportName} 的登录入口应是 oauth`)
-    assert.match(plugin.auth.methods[0].label, /^登录 .+$/)
+    const methods = plugin.auth.methods
+    const channel = REGISTERED_CHANNELS.find((c) => providerIdOf(c) === plugin.provider.id)
+    const expectedExtra = channel?.importCredential === undefined ? 0 : 2
+    assert.equal(methods.length, 1 + expectedExtra, `${exportName} 的登录入口数`)
+    assert.equal(methods[0].type, 'oauth', `${exportName} 的登录入口应是 oauth`)
+    assert.match(methods[0].label, /^登录 .+$/)
+    for (const extra of methods.slice(1)) {
+      // 导入入口是 magpie 原生表单：api + keyless（不渲染 API key 框）+ prompts
+      assert.equal(extra.type, 'api', `${exportName}: 导入入口应是 api 形状（原生表单）`)
+      assert.equal(extra.keyless, true, `${exportName}: 导入入口应 keyless`)
+      assert.ok(Array.isArray(extra.prompts) && extra.prompts.length > 0, `${exportName}: 导入入口缺 prompts`)
+      assert.match(extra.label, /导入/, `${exportName}: 登录之后只允许挂导入入口`)
+    }
   }
 })
 

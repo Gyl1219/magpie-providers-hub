@@ -60,28 +60,88 @@ test('信封：code !== 0 即失败（含 code 为字符串的形态）', () => 
 
 // ── 目录 ────────────────────────────────────────────────────────────────
 
-test('目录：必须带客户端能力头与版本头（否则少 kimi-k3）', async () => {
+// ⚠️ 门禁用例：上游行是 `{ modelId, modelName, … }`，不是 `{ id, name }`。
+// 回归现场：只读 `id` → 每行都 `continue` → 目录为空 → 回落兜底表 6 条
+// （用户报障「图1 只有几个旧模型，图2/图3 的模型都拿不到」）。
+test('目录：认上游真实字段 modelId/modelName，且多行全部保留', async () => {
   const stub = stubFetch([{
     match: '/api/models/available',
     respond: ({ calls }) => {
       const h = calls.at(-1).headers
       assert.ok(h.Authorization?.startsWith('Bearer '), '目录要 Bearer')
-      assert.ok(h['X-LobsterAI-Client-Capabilities'], '缺能力头会少模型（DSH 实测 25 vs 26）')
-      assert.ok(h['X-LobsterAI-Client-Version'], '缺版本头')
+      assert.ok(h['X-LobsterAI-Client-Capabilities'], '能力头照发（对齐客户端形态）')
+      assert.ok(h['X-LobsterAI-Client-Version'], '缺失版本头')
       return json({
         code: 0,
         data: [
-          { id: 'deepseek-v4', name: 'DeepSeek V4', contextWindow: 131072, maxTokens: 8192 },
-          { id: 'kimi-k3', name: 'Kimi K3', contextWindow: 262144, inputModalities: ['text', 'image'] },
+          {
+            modelId: 'deepseek-flash',
+            modelName: 'DeepSeek-V4.1-Flash',
+            provider: 'deepseek',
+            contextWindow: 1000000,
+            costMultiplier: 0.05,
+            supportsImage: true,
+            supportsThinking: true,
+            supportsToolCalling: null,
+            accessible: true,
+          },
+          {
+            modelId: 'glm-5.3',
+            modelName: 'GLM-5.3',
+            contextWindow: 1000000,
+            supportsImage: false,
+            supportsThinking: true,
+            accessible: true,
+          },
+          // 大写主键必须原样保真：上游就是这个 modelId，改小写会 404
+          {
+            modelId: 'MiniMax-M3',
+            modelName: 'MiniMax-M3',
+            contextWindow: 1000000,
+            supportsImage: true,
+            accessible: true,
+          },
         ],
       })
     },
   }])
   try {
     const models = await lobsteraiChannel.catalog(CRED)
-    assert.deepEqual(Object.keys(models).sort(), ['deepseek-v4', 'kimi-k3'])
-    assert.equal(models['kimi-k3'].capabilities.attachment, true, 'inputModalities 含 image → 支持图片')
-    assert.equal(models['deepseek-v4'].limit.context, 131_072)
+    assert.deepEqual(
+      Object.keys(models).sort(),
+      ['MiniMax-M3', 'deepseek-flash', 'glm-5.3'],
+      '三行都要进目录（旧实现读 id 会一条不剩，回落兜底表）',
+    )
+    assert.equal(models['deepseek-flash'].name, 'DeepSeek-V4.1-Flash', '名取 modelName，不是模型 id')
+    assert.equal(models['MiniMax-M3'].name, 'MiniMax-M3')
+    assert.equal(models['MiniMax-M3'].limit.context, 1_000_000)
+    assert.equal(models['deepseek-flash'].capabilities.attachment, true, 'supportsImage → 图片能力')
+    assert.equal(models['glm-5.3'].capabilities.attachment, false)
+    assert.equal(models['deepseek-flash'].capabilities.reasoning, true, 'supportsThinking → 推理能力')
+    assert.equal(models['deepseek-flash'].tool_call, true, 'supportsToolCalling:null 是未知，不是不支持')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('目录：accessible:false 跳过；旧 id/name 形态仍兼容', async () => {
+  const stub = stubFetch([{
+    match: '/api/models/available',
+    respond: () => json({
+      code: 0,
+      data: [
+        { modelId: 'locked', modelName: 'Locked', accessible: false, contextWindow: 1000000 },
+        { id: 'legacy-id', name: 'Legacy Name', contextWindow: 262144, maxTokens: 4096 },
+        { model: 'legacy-model', contextWindow: 131072 },
+      ],
+    }),
+  }])
+  try {
+    const models = await lobsteraiChannel.catalog(CRED)
+    assert.deepEqual(Object.keys(models).sort(), ['legacy-id', 'legacy-model'], '拿不到的条目别塞进目录')
+    assert.equal(models['legacy-id'].name, 'Legacy Name')
+    assert.equal(models['legacy-id'].limit.output, 4096)
+    assert.equal(models['legacy-model'].name, 'legacy-model', '无名条目用 id 兜底')
   } finally {
     stub.restore()
   }
@@ -92,7 +152,7 @@ test('目录：离谱数值被拒（308 位数字串不得进 context）', async
     match: '/api/models/available',
     respond: () => json({
       code: 0,
-      data: [{ id: 'weird', name: 'Weird', contextWindow: Number('9'.repeat(300)) || 1e308 }],
+      data: [{ modelId: 'weird', modelName: 'Weird', contextWindow: Number('9'.repeat(300)) || 1e308 }],
     }),
   }])
   try {
@@ -101,6 +161,18 @@ test('目录：离谱数值被拒（308 位数字串不得进 context）', async
   } finally {
     stub.restore()
   }
+})
+
+// 兜底表是 catalog 抛错时 discoverModels 的唯一退路（aggregate.mjs:258），
+// 它必须与远端同形：键 = modelId、名字 = modelName，条数不能比远端少一截。
+test('兜底表与远端同形：19 条，键就是 modelId（含大写 MiniMax-M3）', () => {
+  const models = lobsteraiChannel.fallbackModels
+  assert.equal(Object.keys(models).length, 19, '远端整体失败时兜底表要够用，且与远端条数一致')
+  assert.equal(models['deepseek-flash'].name, 'DeepSeek-V4.1-Flash')
+  assert.ok(models['MiniMax-M3'], '大写主键原样保真')
+  assert.ok(models['kimi-k3.1-pro'], 'Kimi K3.1 Pro 在表内')
+  assert.equal(models['kimi-k2.8-preview'].limit.context, 262_144)
+  assert.ok(!models['deepseek-v4'], '旧 id 已下线，别留在兜底表里')
 })
 
 // ── 余额 ────────────────────────────────────────────────────────────────
