@@ -299,6 +299,84 @@ test('重复登录一个仍未过期的账号 → toast「账号重复」且不�
   })
 })
 
+// ── 登录：昵称缺失时的账号身份（同渠道多账号不再撞渠道名）────────────────
+//
+// 真机（2026-11-01，MagiCrew 国际版）：登录成功但拿不到昵称 ⇒ accountId 退化成
+// 渠道显示名。第一个账号占了「MagiCrew (国际版)」，第二个账号登录后还是同一个
+// id ⇒ 被判「账号重复」拒绝写入，用户看到的是「登录了但没反应」。
+
+/** magicrew-intl 登录打桩：凭据里只有组织码、没有昵称（国际站实测形态）。 */
+const magicrewLoginHarness = async ({ mod, client, organizationCode }) => {
+  const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === 'magicrew-intl')
+  const original = channel.beginLogin
+  channel.beginLogin = async () => ({
+    url: 'https://auth.example/authorize',
+    instructions: '在浏览器里完成登录',
+    result: Promise.resolve({
+      token: 'JWT-NEW',
+      organizationCode,
+      apiKey: 'mgw-new',
+      refreshToken: 'rt-new',
+      apiKeyExpiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    }),
+  })
+  const plugin = await mod.makeHubPlugin(channel)({ client }, { notify: false })
+  await plugin.config({})
+  return { plugin, channel, restore: () => { channel.beginLogin = original } }
+}
+
+/** 预置一个「昵称缺失时代」的槽：accountId 被写成了渠道显示名。 */
+const seedLegacyMagicrewSlot = async (sandbox, { organizationCode, expired }) => {
+  const { writeFileSync, mkdirSync } = await import('node:fs')
+  mkdirSync(join(sandbox, '.config', 'magpie'), { recursive: true })
+  writeFileSync(process.env.DSH_HUB_AUTH_PATH, JSON.stringify({
+    'hub-magicrew-intl': {
+      type: 'success',
+      channel: 'magicrew-intl',
+      accountId: 'MagiCrew (国际版)',
+      organizationCode,
+      token: 'JWT-OLD',
+      expires: expired ? Date.now() - 60_000 : Date.now() + 3600_000,
+    },
+  }), 'utf8')
+}
+
+test('昵称缺失：同渠道第二个账号不再与第一个撞身份，能新增账号槽', async () => {
+  await isolated(async ({ mod, sandbox }) => {
+    const t = toastClient()
+    await seedLegacyMagicrewSlot(sandbox, { organizationCode: 'ORG-A', expired: false })
+    const h = await magicrewLoginHarness({ mod, client: t.client, organizationCode: 'ORG-B' })
+    try {
+      const handle = await h.plugin.auth.methods[0].authorize()
+      await handle.callback()
+      await new Promise((r) => setTimeout(r, 50))
+      assert.equal(t.saved.length, 1, '第二个账号必须落一个自己的槽（不能因撞名被拒）')
+      assert.match(t.saved[0].body.accountId, /ORG-B/, '账号身份要能区分两个账号')
+      assert.ok(t.toasts.some((m) => /新增账号/.test(m)), `应提示新增账号，实际：${t.toasts.join(' | ')}`)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+test('昵称缺失：重新登录旧账号沿用旧 id（原地更新，不制造删不掉的鬼影槽）', async () => {
+  await isolated(async ({ mod, sandbox }) => {
+    const t = toastClient()
+    await seedLegacyMagicrewSlot(sandbox, { organizationCode: 'ORG-A', expired: true })
+    const h = await magicrewLoginHarness({ mod, client: t.client, organizationCode: 'ORG-A' })
+    try {
+      const handle = await h.plugin.auth.methods[0].authorize()
+      await handle.callback()
+      await new Promise((r) => setTimeout(r, 50))
+      assert.equal(t.saved.length, 1)
+      assert.equal(t.saved[0].body.accountId, 'MagiCrew (国际版)', '同一账号重新登录要沿用旧 id')
+      assert.ok(t.toasts.some((m) => /已续期/.test(m)), `应提示已续期，实际：${t.toasts.join(' | ')}`)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 test('登录回调把 auth 交给 magpie 的 client.auth.set（账号槽为唯一落盘处）', async () => {
   await isolated(async ({ mod }) => {
     const t = toastClient()
