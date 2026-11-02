@@ -80,7 +80,11 @@ test('目录：必须带客户端能力头与版本头（否则少 kimi-k3）', 
   try {
     const models = await lobsteraiChannel.catalog(CRED)
     assert.deepEqual(Object.keys(models).sort(), ['deepseek-v4', 'kimi-k3'])
-    assert.equal(models['kimi-k3'].capabilities.attachment, true, 'inputModalities 含 image → 支持图片')
+    assert.equal(models['kimi-k3'].attachment, true, 'inputModalities 含 image → 支持图片')
+    // ⚠️ 真正决定 DSH 放不放图片的是**顶层** `modalities.input`（magpie 只读这里，
+    //    见 src/lingxi.mjs 的 modelRow 注释）。断言写在 capabilities 里曾经是假阳性。
+    assert.deepEqual(models['kimi-k3'].modalities.input, ['text', 'image'])
+    assert.deepEqual(models['deepseek-v4'].modalities.input, ['text'], '没有 image 的模型要如实声明')
     assert.equal(models['deepseek-v4'].limit.context, 131_072)
   } finally {
     stub.restore()

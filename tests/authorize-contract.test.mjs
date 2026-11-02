@@ -1,4 +1,4 @@
-// authorize() 契约：必须**立刻**返回 { url, method, callback }，不能 await 用户登录。
+﻿// authorize() 契约：必须**立刻**返回 { url, method, callback }，不能 await 用户登录。
 //
 // 这是真实踩到的 bug：在 authorize 里 await 用户完成登录 ⇒ magpie 在等 authorize
 // 返回、用户却在等浏览器打开，双向死锁（现象是 `magpie plugin login` 一直卡住）。
@@ -44,7 +44,10 @@ const build = async (channel) => {
 }
 
 test('每个注册渠道都实现了 beginLogin', async () => {
-  assert.equal(REGISTERED_CHANNELS.length, 5, `v0.5.0 起只有五条渠道，实际：${REGISTERED_CHANNELS.length}`)
+  assert.ok(REGISTERED_CHANNELS.length >= 7, `至少七条，实际：${REGISTERED_CHANNELS.length}`)
+  for (const id of ['astudio', 'accio', 'lobsterai', 'magicrew', 'magicrew-intl', 'autoclaw', 'autoclaw-cn']) {
+    assert.ok(REGISTERED_CHANNELS.some((c) => c.id === id), `必备渠道缺 ${id}`)
+  }
   for (const channel of REGISTERED_CHANNELS) {
     assert.equal(typeof channel.beginLogin, 'function', `${channel.id} 缺少 beginLogin`)
   }
@@ -53,13 +56,15 @@ test('每个注册渠道都实现了 beginLogin', async () => {
     assert.ok(REGISTERED_CHANNELS.includes(channel), `${channel.id} 未注册进聚合层`)
   }
   // 已删渠道不许再出现在聚合层（PR #502 审核：重叠 + 敏感能力，整个删掉）
-  for (const gone of ['officeace', 'autoclaw', 'autoclawintl', 'loomy', 'minimaxintl']) {
+  // ⚠️ autoclaw / autoclaw-cn 已于 v0.6.x 重新实现（粘贴 + 可选读桌面端），不在此列
+  for (const gone of ['officeace', 'autoclawintl', 'loomy', 'minimaxintl']) {
     assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
   }
 })
 
 test('authorize 立刻返回（不 await 用户登录）', async () => {
   for (const channel of REGISTERED_CHANNELS) {
+    if (channel.apiAuth !== undefined) continue // api 型没有 authorize，另有断言
     const plugin = await build(channel)
     assert.equal(plugin.auth.methods.length, channel.loginMethods?.length ?? 1,
       `${channel.id}: 登录入口数应与 loginMethods 声明一致`)
@@ -79,6 +84,7 @@ test('authorize 立刻返回（不 await 用户登录）', async () => {
 test('callback 兑现凭据：success + channel 归属 + 进内存缓存', async () => {
   const { _internal } = await import('../src/aggregate.mjs')
   for (const channel of REGISTERED_CHANNELS) {
+    if (channel.apiAuth !== undefined) continue // api 型没有 callback，凭据由 magpie 直接存
     const plugin = await build(channel)
     for (const method of plugin.auth.methods) {
       const handle = await method.authorize()

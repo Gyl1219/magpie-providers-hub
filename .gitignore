@@ -1,4 +1,4 @@
-node_modules/
+﻿node_modules/
 .env
 .env.*
 !.env.example
@@ -10,7 +10,18 @@ node_modules/
 
 .msg*.txt
 
-# ����ʱ���ɵĿ������ݣ�����ÿ��ˢ�¶�����д��
+# ����ʱ���ɵĿ������ݣ�����ÿ��ˢ�¶�����д��
 page/snapshot.local.json
 
 .probe*
+
+# ── 未获作者允许前禁止入库/上传的渠道实现（2026-11-02 定）──────────────
+# 这四个文件只在本机使用；一旦 git add -A 会被本段拦下。
+# 允许公开时：删除对应行，或在此注明解除日期。
+src/lingxi.mjs
+src/qiniu.mjs
+src/dola.mjs
+src/doubaowork.mjs
+tests/lingxi.test.mjs
+tests/qiniu.test.mjs
+tests/doubao-dola.test.mjs

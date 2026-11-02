@@ -1,4 +1,4 @@
-// 多供应商层的行为契约。
+﻿// 多供应商层的行为契约。
 //
 // 只测「错了会静默出错」的地方：供应商 id 映射、模型分派、未登录回落、登录入口。
 // 不测「能 import」这类没有诊断价值的断言。
@@ -25,8 +25,9 @@ const build = async (options = {}, exportName = 'HubAStudioPlugin') => {
   return { plugin, cfg, provider: cfg.provider[plugin.provider.id] }
 }
 
-test('一个插件，五条供应商：每个实例只注册自己那一条', async () => {
-  assert.equal(PROVIDER_IDS.length, 5, 'v0.5.0 起只有五条渠道')
+test('每个实例只注册自己那一条（七条必备 + 本机按需渠道）', async () => {
+  for (const id of ["hub-astudio","hub-accio","hub-lobsterai","hub-magicrew","hub-magicrew-intl","hub-autoclaw","hub-autoclaw-cn"]) assert.ok(PROVIDER_IDS.includes(id), `七条必备渠道缺 ${id}`)
+  // 数量随环境变（本机多出按需渠道），发布包恒为七条 —— 一致性比绝对数重要
   assert.equal(PROVIDER_IDS.length, REGISTERED_CHANNELS.length, '每个渠道一个供应商')
   assert.equal(new Set(PROVIDER_IDS).size, PROVIDER_IDS.length, '供应商 id 必须唯一')
   for (const id of PROVIDER_IDS) assert.match(id, /^hub-[a-z0-9-]+$/, `供应商 id 必须是 ASCII：${id}`)
@@ -42,12 +43,24 @@ test('一个插件，五条供应商：每个实例只注册自己那一条', as
   }
 })
 
-test('每个供应商一个登录入口', async () => {
+test('登录入口：oauth 在前、粘贴型在后（灵犀两条，其余一条）', async () => {
   for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
     const plugin = await makePlugin({}, {})
-    assert.equal(plugin.auth.methods.length, 1, `${exportName} 应只有一个登录入口`)
-    assert.equal(plugin.auth.methods[0].type, 'oauth', `${exportName} 的登录入口应是 oauth`)
-    assert.match(plugin.auth.methods[0].label, /^登录 .+$/)
+    const methods = plugin.auth.methods
+    assert.ok(methods.length >= 1 && methods.length <= 2, `${exportName} 入口数异常：${methods.length}`)
+    const apiIndexes = methods.map((m, i) => (m.type === 'api' ? i : -1)).filter((i) => i >= 0)
+    const oauthMethods = methods.filter((m) => m.type === 'oauth')
+    // oauth 入口必须在前（主路径），粘贴型入口在后（兜底）
+    for (const i of apiIndexes) assert.equal(i, methods.length - 1, `${exportName}: 粘贴型入口必须在最后`)
+    for (const m of oauthMethods) {
+      // 默认文案是「登录 <显示名>」；渠道可用 loginMethods 自定义（灵犀写成「浏览器登录…」）
+      assert.ok(typeof m.label === 'string' && m.label.length > 0, `${exportName}: oauth 入口要有标签`)
+      assert.equal(typeof m.authorize, 'function')
+    }
+    for (const m of methods.filter((x) => x.type === 'api')) {
+      assert.ok(typeof m.label === 'string' && m.label.length > 0, `${exportName}: api 入口要有标签`)
+      assert.equal(m.authorize, undefined, 'api 入口不该有 authorize（不是 oauth 流程）')
+    }
   }
 })
 
@@ -141,12 +154,34 @@ test('三种模型写法都认得：裸名 / hub-<渠道>/名 / 旧 渠道id/名
   assert.deepEqual(seen, ['spark-x', 'spark-x', 'spark-x'])
 })
 
-test('astudio 明确声明不支持自动续期（不假装能刷新）', async () => {
+test('astudio refresh：SSO 活着 → 重换 api_key + 端点表；会话死（80000）→ 终态「请重新登录」', async () => {
+  // 2026-11-01 真机：推理网关随 configs 行内 base_url 下发（会搬家），api_key 按次
+  // 下发短时有效 → refresh 必须带回端点表，chat 才能按行路由。
   const { astudioChannel } = await import('../src/astudio.mjs')
-  await assert.rejects(
-    () => astudioChannel.refresh({ accessToken: 'x' }),
-    /不支持自动续期|重新登录/,
-  )
+  const original = globalThis.fetch
+  const credential = { accessToken: 'OLD', ssoSessionId: 'sso', accountId: 'acc', token: 't' }
+  try {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({
+        code: 0,
+        data: [{ model: 'spark-x2.6', base_url: 'https://maas-api.test/v2/', api_key: 'NEW-KEY' }],
+      }), { status: 200 })
+    const next = await astudioChannel.refresh(credential)
+    assert.equal(next.accessToken, 'NEW-KEY', '应返回重取后的 api_key')
+    assert.deepEqual(next.endpoints, [{ model: 'spark-x2.6', baseUrl: 'https://maas-api.test/v2', apiKey: 'NEW-KEY' }],
+      '应带端点表（base_url 去尾斜杠）')
+    assert.equal(next.ssoSessionId, 'sso', 'SSO 会话字段原样保留')
+
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ code: 80000, desc: '登录异常，请重新登录' }), { status: 200 })
+    await assert.rejects(
+      () => astudioChannel.refresh(credential),
+      (error) => /重新登录/.test(error.message) && error.signIn === 'expired',
+      '会话死 = 终态 notSignedIn，magpie 据此提示重新登录',
+    )
+  } finally {
+    globalThis.fetch = original
+  }
 })
 
 test('页面只读快照，不调 magpie.read（magpie 的 read 只服务两个内建项，自造名被拒）', () => {
@@ -188,13 +223,54 @@ test('账号槽的 type=' + "'success'" + ' 也要认，且只出本渠道的桶
   }
 })
 
+
+test('usage：窗口的 amount/limit/unit 必须透传（托盘 2026-11-02 改版后靠它们渲染「x / y」）', async () => {
+  const { makeHubPlugin } = await import('../src/aggregate.mjs')
+  const channel = {
+    id: 'shape-probe',
+    displayName: '形状探针',
+    fallbackModels: {},
+    usage: async () => [{
+      name: '智点 · 永久',
+      used: 3,
+      display: '剩余 1100 / 1100 智点',
+      amount: 12,
+      limit: 1100,
+      unit: '智点',
+      resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
+    }],
+  }
+  const plugin = await makeHubPlugin(channel)({}, { notify: false, snapshotRefreshMinutes: 0 })
+  const out = await plugin.auth.usage(async () => ({ type: 'oauth', channel: 'shape-probe', key: 'x' }))
+  const w = out.windows[0]
+  assert.equal(w.amount, 12, 'amount（已用）必须透传 —— 托盘靠它渲染「x / y」')
+  assert.equal(w.limit, 1100, 'limit（总量）必须透传')
+  assert.equal(w.unit, '智点', 'unit 必须透传')
+  assert.equal(w.resetsAt !== undefined, true, 'resetsAt 也要在（走势投影线）')
+})
+
+test('usage：无数值的纯文本窗口不被强加数字字段', async () => {
+  const { makeHubPlugin } = await import('../src/aggregate.mjs')
+  const channel = {
+    id: 'shape-probe-plain',
+    displayName: '纯文本探针',
+    fallbackModels: {},
+    usage: async () => [{ name: '额度', display: '未配置 AK/SK，读不到额度' }],
+  }
+  const plugin = await makeHubPlugin(channel)({}, { notify: false, snapshotRefreshMinutes: 0 })
+  const out = await plugin.auth.usage(async () => ({ type: 'oauth', channel: 'shape-probe-plain', key: 'x' }))
+  const w = out.windows[0]
+  assert.equal(w.amount, undefined, '没有数值就不要编 amount')
+  assert.equal(w.limit, undefined)
+})
 test('供应商 id / 显示名映射：hub- 前缀 + 中文名', () => {
   const byId = Object.fromEntries(REGISTERED_CHANNELS.map((c) => [providerIdOf(c), providerNameOf(c)]))
   assert.equal(byId['hub-astudio'], 'AStudio（讯飞）')
   assert.equal(byId['hub-magicrew'], '超级麦吉 (MagiCrew 国内)')
   assert.ok(Object.values(byId).every((name) => typeof name === 'string' && name.length > 0))
   // 已删渠道的 provider id 不许再出现
-  for (const gone of ['hub-officeace', 'hub-autoclaw', 'hub-loomy', 'hub-minimaxintl']) {
+  // ⚠️ hub-autoclaw / hub-autoclaw-cn 已在 v0.6.x 重新实现（粘贴 + 读桌面端），不在此列
+  for (const gone of ['hub-officeace', 'hub-loomy', 'hub-minimaxintl']) {
     assert.equal(byId[gone], undefined, `${gone} 已从包里删除`)
   }
 })

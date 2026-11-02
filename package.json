@@ -1,7 +1,7 @@
 {
   "name": "magpie-providers-hub",
-  "version": "0.5.9",
-  "description": "dsh-providers-hub（作者 JetLi）的第三方 Magpie 适配：五条供应商（AStudio/Accio/LobsterAI/超级麦吉国内+国际），各渠道独立实现登录/额度/转发，不依赖 DSH 运行。v0.5.0 起删除了与社区 registry 重叠的五条渠道（OfficeAce、AutoClaw 国内/国际、Loomy、MiniMax 国际版）",
+  "version": "0.7.1",
+  "description": "magpie-providers-hub 的第三方 Magpie 适配：七条供应商（AStudio / Accio / LobsterAI / MagiCrew×2 / AutoClaw×2），各自登录、额度与开关",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -9,14 +9,40 @@
   },
   "files": [
     "index.mjs",
-    "src",
     "page/app.js",
     "page/index.html",
     "page/snapshot.js",
     "README.md",
     "NOTICE.md",
     "UPSTREAM.md",
-    "LICENSE"
+    "LICENSE",
+    "src/accio.mjs",
+    "src/aggregate.mjs",
+    "src/astudio.mjs",
+    "src/autoclaw.mjs",
+    "src/lobsterai.mjs",
+    "src/magicrew-browser.mjs",
+    "src/magicrew.mjs",
+    "src/shared.mjs",
+    "tests/autoclaw.test.mjs",
+    "tests/aggregate.test.mjs",
+    "tests/authorize-contract.test.mjs",
+    "tests/astudio-catalog.test.mjs",
+    "tests/astudio-page.test.mjs",
+    "tests/astudio-renew.test.mjs",
+    "tests/checkin.test.mjs",
+    "tests/expiry-bands-required.test.mjs",
+    "tests/lobsterai.test.mjs",
+    "tests/magicrew-browser.test.mjs",
+    "tests/magicrew-nickname.test.mjs",
+    "tests/magicrew.test.mjs",
+    "tests/no-host-writes.test.mjs",
+    "tests/page.test.mjs",
+    "tests/pool.test.mjs",
+    "tests/self-register.test.mjs",
+    "tests/snapshot-isolation.test.mjs",
+    "tests/split.test.mjs",
+    "tests/usage.test.mjs"
   ],
   "keywords": [
     "magpie",
@@ -52,7 +78,8 @@
       "titles": {
         "zh": "Providers Hub"
       }
-    }
+    },
+    "maxConcurrency": 4
   },
   "scripts": {
     "test": "node --test --import ./tests/setup.mjs tests/*.test.mjs"

@@ -42,12 +42,42 @@ import { astudioChannel } from './src/astudio.mjs'
 import { accioChannel } from './src/accio.mjs'
 import { lobsteraiChannel } from './src/lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './src/magicrew.mjs'
+import { autoclawChannel, autoclawCnChannel } from './src/autoclaw.mjs'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+/**
+ * ⚠️ 按需加载的渠道（2026-11-03 定）：lingxi / doubaowork / dola / qiniu **不进 npm 包**。
+ *
+ * 本机源码里有对应文件就正常加载；发布包里没有（package.json 的 files 未列），
+ * 这里静默跳过 —— magpie 把每个函数导出都当供应商，未过审的渠道混进发布包
+ * 就是「装一次出现十条」（#652 评审第 1 条）。
+ */
+const here = dirname(fileURLToPath(import.meta.url))
+const lazy = {}
+for (const name of ['lingxi', 'doubaowork', 'dola', 'qiniu']) {
+  const file = join(here, 'src', `${name}.mjs`)
+  if (existsSync(file)) {
+    try {
+      lazy[name] = await import(`./src/${name}.mjs`)
+    } catch { /* 加载失败按不存在处理 */ }
+  }
+}
 
 export const HubAStudioPlugin = makeHubPlugin(astudioChannel)
 export const HubAccioPlugin = makeHubPlugin(accioChannel)
 export const HubLobsterAIPlugin = makeHubPlugin(lobsteraiChannel)
 export const HubMagicrewPlugin = makeHubPlugin(magicrewChannel)
 export const HubMagicrewIntlPlugin = makeHubPlugin(magicrewIntlChannel)
+// 按需渠道：有才导出
+export const HubLingxiPlugin = lazy.lingxi ? makeHubPlugin(lazy.lingxi.lingxiChannel) : undefined
+export const HubDoubaoWorkPlugin = lazy.doubaowork ? makeHubPlugin(lazy.doubaowork.doubaoworkChannel) : undefined
+export const HubDolaPlugin = lazy.dola ? makeHubPlugin(lazy.dola.dolaChannel) : undefined
+export const HubQiniuPlugin = lazy.qiniu ? makeHubPlugin(lazy.qiniu.qiniuChannel) : undefined
+// 同一渠道的两个站点（国际 / 国内），命名跟 registry 的 opencode-autoclaw-auth 对齐
+export const HubAutoclawPlugin = makeHubPlugin(autoclawChannel)
+export const HubAutoclawCnPlugin = makeHubPlugin(autoclawCnChannel)
 
 /** provider id → 插件函数（测试用；**对象**导出不会被 magpie 当插件）。 */
 export const HUB_PLUGINS = {
@@ -56,6 +86,12 @@ export const HUB_PLUGINS = {
   HubLobsterAIPlugin,
   HubMagicrewPlugin,
   HubMagicrewIntlPlugin,
+  ...(HubLingxiPlugin === undefined ? {} : { HubLingxiPlugin }),
+  ...(HubDoubaoWorkPlugin === undefined ? {} : { HubDoubaoWorkPlugin }),
+  ...(HubDolaPlugin === undefined ? {} : { HubDolaPlugin }),
+  ...(HubQiniuPlugin === undefined ? {} : { HubQiniuPlugin }),
+  HubAutoclawPlugin,
+  HubAutoclawCnPlugin,
 }
 
 // ⚠️ 只导出**数组/对象**这类非函数值（测试用）。函数导出 = 一个供应商，别乱加。

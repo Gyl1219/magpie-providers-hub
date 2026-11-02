@@ -1,4 +1,4 @@
-// LobsterAI（有道龙虾）渠道 —— 移植自 DSH `lobsterai.ts` / `lobsterai-oauth.ts` /
+﻿// LobsterAI（有道龙虾）渠道 —— 移植自 DSH `lobsterai.ts` / `lobsterai-oauth.ts` /
 // `lobsterai-product.ts` / `lobsterai-credits.ts`。
 //
 // ## 协议速览（DSH 实证，见 lobsterai2api + docs/lobsterai-integration-plan.md §4）
@@ -360,7 +360,18 @@ async function fetchCatalog(credential) {
       name,
       limit: { context, output },
       tool_call: true,
-      capabilities: { temperature: true, reasoning: true, attachment },
+      // ⚠️ 两处都要写（见 lingxi.mjs modelRow 注释）：magpie 读 capabilities.input.image，
+      //    models.dev 那条路径读顶层 modalities/attachment。只写一处会误判能力。
+      attachment,
+      modalities: { input: attachment ? ['text', 'image'] : ['text'] },
+      capabilities: {
+        temperature: true,
+        reasoning: true,
+        attachment,
+        toolcall: true,
+        input: { text: true, image: attachment, audio: false, video: false, pdf: false },
+        output: { text: true, image: false, audio: false, video: false, pdf: false },
+      },
       options: {},
       headers: {},
       variants: {},

@@ -33,13 +33,31 @@
 // 不同凭据各走各的。
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
 import { notSignedIn, untilText, readMagpieAuthSlots, readOwnAuthEntries, debugLog } from './shared.mjs'
+
 import { astudioChannel } from './astudio.mjs'
 import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
+import { autoclawChannel, autoclawCnChannel } from './autoclaw.mjs'
+
+// ── 按需加载的渠道（发布包里没有对应文件，本机有才加载）────────────────
+// ⚠️ v0.7.1 起只随包发布 registry 已登记（或已过审差别）的渠道：
+//   lingxi（作者要求私有）、doubaowork / dola / qiniu（尚未各自过审，等独立 PR）。
+//   加载模式：existsSync + 动态 import，文件不在就静默跳过，不拖垮插件。
+const lazyChannels = { lingxi: './lingxi.mjs', doubaowork: './doubaowork.mjs', dola: './dola.mjs', qiniu: './qiniu.mjs' }
+const lazyLoaded = {}
+for (const [name, rel] of Object.entries(lazyChannels)) {
+  const p = fileURLToPath(new URL(rel, import.meta.url))
+  if (existsSync(p)) {
+    try {
+      const mod = await import(pathToFileURL(p).href)
+      lazyLoaded[name] = mod[`${name}Channel`] ?? Object.values(mod).find((v) => v !== null && typeof v === 'object' && v.id === name)
+    } catch { /* 加载失败按不存在处理 */ }
+  }
+}
 
 /** 旧版（聚合形态）的供应商 id —— 账号槽迁移的读来源，别再拿去注册。 */
 const LEGACY_PROVIDER = 'providers-hub'
@@ -51,15 +69,27 @@ const HUB_PREFIX = 'hub-'
 const PROVIDER_NAME_OVERRIDES = {}
 
 /**
- * 所有注册进来的渠道 —— **只有五条**。
+ * 所有注册进来的渠道。
  *
  * ⚠️ 与社区 registry 现有插件重叠的五条（OfficeAce / AutoClaw 国内+国际 /
  *    Loomy / MiniMax 国际版）已在 v0.5.0 **从包里删除**（PR #502 审核意见）。
  *    删代码而不只是「不注册」的两个理由：它们各自带着与本插件无关的敏感能力
  *    （AutoClaw 的 DPAPI 解密他人凭据、MiniMax 国际版的 XFF 伪造），留着就是
  *    给审核和使用者添加风险面。老用户改装对应的社区插件即可，README 有指引。
+ *
+ * `qiniu` 是唯一一条**来自他人 PR 的移植**：社区 PR #374（lakegan/opencode-qiniu-auth）
+ * 由作者于 2026-11-01 以「Superseded by magpie-providers-hub (hub-qiniu)」关闭并授权
+ * MIT 复用 + 署名 —— 所以七牛云只有本插件这一个入口，registry 里不再出现第二个。
+ * 细节见 src/qiniu.mjs 文件头与 NOTICE.md。
  */
-const CHANNELS = [astudioChannel, accioChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel]
+const CHANNELS = [
+  astudioChannel, accioChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel,
+  ...(lazyLoaded.lingxi ? [lazyLoaded.lingxi] : []),
+  ...(lazyLoaded.doubaowork ? [lazyLoaded.doubaowork] : []),
+  ...(lazyLoaded.dola ? [lazyLoaded.dola] : []),
+  ...(lazyLoaded.qiniu ? [lazyLoaded.qiniu] : []),
+  autoclawChannel, autoclawCnChannel,
+]
 
 /** 供应商 id / 显示名（一个渠道一个供应商）。 */
 export const providerIdOf = (channel) => `${HUB_PREFIX}${channel.id}`
@@ -95,8 +125,35 @@ const placeholderBaseOf = (providerId) => `https://${providerId}.invalid`
  *    （用户报障：登录一个渠道后所有账号卡的额度一模一样）。
  *    `'success'` 与 `'oauth'` 都接受，判据仍是 `channel` 字段。
  */
+/**
+ * auth 是否属于该渠道。
+ *
+ * - oauth 登录：`channel` 字段是判据（`'success'` 与 `'oauth'` 都认 —— 见下）。
+ * - **api 型登录**（粘贴 Key/Cookie，如灵犀）：magpie 存的形状是 `{type:'api', key}`，
+ *   **没有 channel 字段**，但每个供应商的 auth 存储本来就是我方独占的
+ *   （`hub-<渠道>` 各存各的），所以只要该渠道声明了 `apiAuth` 就认。
+ */
 const authOfChannel = (auth, channel) =>
-  (auth?.type === 'oauth' || auth?.type === 'success') && auth?.channel === channel.id
+  ((auth?.type === 'oauth' || auth?.type === 'success') && auth?.channel === channel.id)
+  || (auth?.type === 'api' && channel?.apiAuth !== undefined)
+
+/**
+ * api 型 auth → 渠道凭据。
+ *
+ * magpie 把粘贴的值放在 `auth.key`；渠道自己声明它落到凭据的哪个字段
+ * （灵犀是整条 Cookie：`{ cookie: 'wps_sid=…' }`）。
+
+
+ */
+function credentialOfApiAuth(auth, channel) {
+  const field = channel?.apiAuth?.keyField ?? 'key'
+  const value = typeof auth?.key === 'string' ? auth.key.trim() : ''
+  if (value === '') return undefined
+  return {
+    [field]: value,
+    ...(typeof auth?.accountId === 'string' && auth.accountId !== '' ? { accountId: auth.accountId } : {}),
+  }
+}
 
 /** 从 auth 剥出裸凭据（旁路文件存这个形状，与渠道函数的入参一致）。 */
 function credentialOfAuth(auth) {
@@ -127,9 +184,10 @@ export function expiresMsOf(credential) {
   return undefined
 }
 
-/** 续期去重闸的键：渠道 + 凭据身份（refresh_token 优先，退 access）。 */
+/** 续期去重闸的键：渠道 + 凭据身份（refresh_token 优先，退 access / accessToken）。 */
 const identityOf = (credential) =>
-  String(credential?.refreshToken ?? credential?.refresh_token ?? credential?.access ?? credential?.access_token ?? '')
+  String(credential?.refreshToken ?? credential?.refresh_token ?? credential?.access
+    ?? credential?.access_token ?? credential?.accessToken ?? '')
 
 // ── 凭据：**只在内存里**，绝不落盘 ──────────────────────────────────────
 //
@@ -141,6 +199,14 @@ const identityOf = (credential) =>
 //    ⇒ 现在：**账号只存 magpie 账号槽**（`client.auth.set` / `getAuth`），
 //      插件侧最多在内存里缓存本进程见过的那份，进程结束即消失。
 const memoryCredentials = new Map()
+
+/**
+ * 各渠道的插件 options（`plugins.json` 里该供应商那一条的 options）。
+ * 工厂启动时记一份 —— 渠道函数（usage 等）拿不到 options 参数，
+ * 而有些渠道的显示口径就是要用户自己声明（七牛云的每日额度上限）。
+ * 与 memoryCredentials 一样是**模块级共享**：工厂被加载多次也只有一个副本。
+ */
+const channelOptions = new Map()
 
 /** 记住/更新本进程见过的凭据（纯内存，不触盘）。 */
 function rememberCredential(channel, credential) {
@@ -215,6 +281,12 @@ async function ensure(channel) {
 
 /** 账号路径的取凭据 + 临期软续期（只更新内存，不写文件）。 */
 async function ensureAuth(channel, auth) {
+  // api 型（粘贴 Cookie/Key）：先翻译成渠道凭据形状，再进内存缓存
+  if (auth?.type === 'api') {
+    const credential = credentialOfApiAuth(auth, channel)
+    if (credential === undefined) throw notSignedIn(`未登录：${channel.displayName} 的凭据为空`)
+    return rememberCredential(channel, credential)
+  }
   let current = auth
   if (channel.expired?.(auth)) current = await renewSoft(channel, auth)
   return rememberCredential(channel, current)
@@ -360,6 +432,12 @@ function sanitizeWindows(windows) {
       used: Number.isFinite(w.used) ? w.used : undefined,
       // 长小数收口：上游算出来的 3994.5640045714285 直接怼到界面上很难看
       display: typeof w.display === 'string' ? tidyNumber(w.display) : undefined,
+      // ⚠️ 2026-11-02 托盘卡片改版后认这三个：amount=已用、limit=总量、unit=单位，
+      //    渲染成「{limit - amount} / {limit} {unit} · 剩余 X%」。快照同步带上，
+      //    否则侧边栏页显示不出「x / y」数字（托盘一直有，就页面缺）。
+      amount: Number.isFinite(w.amount) ? w.amount : undefined,
+      limit: Number.isFinite(w.limit) ? w.limit : undefined,
+      unit: typeof w.unit === 'string' ? w.unit : undefined,
       // 作废时刻优先（resetsAt 是重置语义，页面不拿它算倒计时）
       runsOutAt: (() => {
         const raw = w.expiresAtMs ?? w.runsOutAt
@@ -637,7 +715,14 @@ function checkinTallyOf() {
 async function usageWindowsOf(channel, credential, extras = {}) {
   if (typeof channel.usage === 'function') {
     try {
-      const rows = await channel.usage(credential, { xff: extras.xff, proxy: extras.proxy })
+      const rows = await channel.usage(credential, {
+        xff: extras.xff,
+        proxy: extras.proxy,
+        // 渠道自己的插件 options（`plugins.json` 里那一条的 options）。
+        // 七牛云用它读 `qiniuDailyQuota` / `qiniuActivityTier` —— 每日额度上限
+        // 只能由用户声明，上游没有任何「剩余额度」接口（见 src/qiniu.mjs）。
+        options: extras.options ?? channelOptions.get(channel.id) ?? {},
+      })
       if (Array.isArray(rows) && rows.length > 0) return tierSummarize(rows)
     } catch (error) {
       return [{
@@ -876,7 +961,9 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   }
 
   /** 本渠道的用量窗口。 */
-  const windowsOf = (credential) => usageWindowsOf(channel, credential, {})
+  const windowsOf = (credential) => usageWindowsOf(channel, credential, { options })
+  // 让 sweep 那条路（模块级、没有工厂闭包）也拿得到本渠道的 options
+  channelOptions.set(channel.id, options)
 
   // 旧版账号槽 → 本供应商槽（一次性、幂等；见函数注释）。失败不影响启动。
   if (options.migrateLegacySlots !== false) {
@@ -915,6 +1002,16 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       // 渠道可声明多登录入口（`loginMethods: [{label, arg}]`）；
       // 未声明时退化为单入口 `登录 <displayName>`。
       methods: ((channel) => {
+        // 粘贴型入口（可选，与 oauth 并存）：magpie 原生渲染一个输入框，
+        // 存成 `{type:'api', key}`。灵犀就是「浏览器登录（主）+ 粘贴 Cookie（兜底）」。
+        const apiMethods = channel.apiAuth === undefined
+          ? []
+          : [{
+              type: 'api',
+              label: channel.apiAuth.label ?? `粘贴 ${channel.displayName} 凭据`,
+              ...(channel.apiAuth.placeholder !== undefined ? { placeholder: channel.apiAuth.placeholder } : {}),
+
+            }]
         const buildOne = (label, arg) => ({
           type: 'oauth',
           label,
@@ -949,6 +1046,13 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
           //    · 登录失败                                  → 弹失败
           //    ⚠️ 全部走 toast（宿主原生渲染）—— 系统通知（spawn PowerShell）已删，
           //       外部文案拼脚本有命令注入面（PR #502 审核第 1 条）。
+          // ⚠️⚠️ **必须立刻挂一个 catch**（2026-11-01 真机：登录窗口「闪一下就没了」）：
+          //    `started.result` 只有 callback() 被调到时才有人 await。magpie 对 auto
+          //    流程**未必回调** callback（真机实证），此时 result 若 reject 就是
+          //    **unhandled rejection** —— 在 magpie-bun 宿主里会被当成致命错误把
+          //    整个登录载体链路带走，用户看到的就是窗口一闪而过。
+          //    这里先挂 catch 兜住，真正的错误仍由 callback() 里的 await 拿到。
+          started.result.catch((e) => { debugLog(`login result rejected (handled): ${e?.message ?? e}`) })
           void started.result.then((credential) => {
             try {
               debugLog(`chain fired: ${channel.id}`)
@@ -970,6 +1074,11 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
           return {
             url: started.url,
             method: 'auto',
+            // ⚠️ `opened: true` = 插件**自己已经打开了浏览器窗口**，请宿主不要再开一次。
+            //    没有它的话，magpie 会在用户的默认浏览器里再打开同一个地址 ——
+            //    真机 2026-10-31（灵犀）：两个窗口长得一样，用户在默认浏览器里登录，
+            //    插件盯着自己的临时窗口，5 分钟后超时「登录失败」。
+            ...(started.opened === true ? { opened: true } : {}),
             instructions: started.instructions
               ?? `在打开的页面里完成 ${channel.displayName} 登录，本窗口会自动继续。`,
             async callback() {
@@ -1005,9 +1114,13 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
           }
         },
       })
-      return (Array.isArray(channel.loginMethods) && channel.loginMethods.length > 0
-        ? channel.loginMethods.map((m) => buildOne(m.label, m.arg))
-        : [buildOne(`登录 ${channel.displayName}`, undefined)])
+      // oauth 入口（有 beginLogin 的渠道）在前，粘贴型入口在后（兜底）
+      const oauthMethods = typeof channel.beginLogin === 'function'
+        ? (Array.isArray(channel.loginMethods) && channel.loginMethods.length > 0
+            ? channel.loginMethods.map((m) => buildOne(m.label, m.arg))
+            : [buildOne(`登录 ${channel.displayName}`, undefined)])
+        : []
+      return [...oauthMethods, ...apiMethods]
       })(channel),
 
       /**

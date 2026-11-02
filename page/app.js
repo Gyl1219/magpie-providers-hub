@@ -144,8 +144,6 @@ async function main() {
   await magpie.ready;
 
   const opts = (await magpie.options.get()) || {};
-  const input = document.getElementById("xff");
-  if (input) input.value = typeof opts.minimaxXff === "string" ? opts.minimaxXff : "";
 
   // ── 刷新周期 ──
   // 自动刷新 = 重读本页快照文件（沙盒无网络，不碰上游；数据由宿主按 magpie
@@ -182,9 +180,8 @@ async function main() {
     try {
       const next = {};
       for (const k in opts) next[k] = opts[k];
-      const v = input ? input.value.trim() : "";
-      if (v !== "") next.minimaxXff = v;
-      else delete next.minimaxXff;
+      // MiniMax 国际版（含 XFF 输入框）已随渠道删除：不再写 minimaxXff
+      if (typeof opts.minimaxXff !== "undefined") next.minimaxXff = opts.minimaxXff;
       await magpie.options.set(next);
       show("status", "已保存 — 到「插件」把 Providers Hub 关掉再打开生效");
     } catch (e) {

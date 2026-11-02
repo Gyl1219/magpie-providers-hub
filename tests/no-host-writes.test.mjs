@@ -77,7 +77,15 @@ test('红线②：npm 发布清单不含 tools/ 与 tests/', () => {
   for (const forbidden of ['tools', 'tests', 'tools/', 'tests/']) {
     assert.equal(pkg.files.includes(forbidden), false, `发布清单不该含 ${forbidden}`)
   }
-  assert.ok(pkg.files.includes('src'), 'src 必须发布')
+  // src 必须发布：`src` 或 `src/*.mjs` 都算（后者更严，只发 .mjs）
+  assert.ok(
+    pkg.files.includes('src') || pkg.files.some((f) => f.startsWith('src/')),
+    'src 必须发布（`src` 或 `src/*.mjs`）',
+  )
+  // ⚠️ npm 的 files **不支持** `!` 否定写法 —— 写了也不生效，还会让人误以为某个文件没发。
+  //    要排除文件只能不用目录通配，逐个列出。
+  const negations = pkg.files.filter((f) => f.startsWith('!'))
+  assert.deepEqual(negations, [], 'files 里不许出现 ! 否定项（npm 不支持，只会误导人）')
 })
 
 test('红线③：加载插件后 magpie 市场缓存零变化（审核同款探针）', async () => {
@@ -170,7 +178,7 @@ test('自注册能力仍在仓库里（tools/），只是不随包发布', () =>
     assert.ok(runner.includes(`'${id}'`), `条目该带 ${id}`)
   }
   // 已删除的五条渠道不许再出现在条目里
-  for (const id of ['hub-officeace', 'hub-autoclaw', 'hub-loomy', 'hub-minimaxintl']) {
+  for (const id of ['hub-officeace', 'hub-loomy', 'hub-minimaxintl']) {
     assert.equal(runner.includes(`'${id}'`), false, `已删渠道 ${id} 不该进条目`)
   }
 })

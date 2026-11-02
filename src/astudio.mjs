@@ -15,8 +15,8 @@
 //
 // | 用途 | 方法 | 地址 | 认证 |
 // |---|---|---|---|
-// | 对话 | POST | `{maas}/model-gateway/v1/chat/completions` | `Bearer <modelBearerToken>` |
-// | 目录 | GET | `{maas}/api/v1/model-manager/models` | 同上 |
+// | 对话 | POST | **`{row.base_url}/chat/completions`**（configs 行内下发） | `Bearer <row.api_key>` |
+// | 目录 | GET | `{maas}/api/v1/model-manager/models` | `Bearer <accessToken>` |
 // | 活体凭据 | GET | `{auth}/bot/models/configs` | Cookie 四字段串 |
 //
 // 1. **两个基址不共用前缀**：推理 `/model-gateway/v1`，目录 `/api/v1/model-manager`。
@@ -25,12 +25,21 @@
 // 3. **失败两种信封**：控制面 `{code,message,data}`（HTTP 仍 200，code≠0 即失败）；
 //    推理面 OpenAI 裸体。
 //
-// ⚠️ **无程序化续期**：SSO 会话 `Max-Age=31536000`（一年，不滑动），
-//    失效时上游恒返回 HTTP 200 + `code=80000`。本渠道**不假装能刷新**。
+// ⚠️⚠️ **2026-11-01 真机定案（404 事故根因）**：
+//    ① **推理网关按 configs 行内 `base_url` 下发**（实测已迁到
+//      `maas-api.cn-huabei-1.xf-yun.com/v2`）。硬编码旧基址 `astronstudio-api-volces-prod`
+//      发推理**恒 404「API endpoint not found」**，而目录控制面仍在旧基址且正常 ——
+//      造成「模型能拉到、推理全失败」的假象。⇒ 推理地址必须按行取，不能硬编码。
+//    ② **`api_key` 是按次下发的短时凭据**（两次 configs 调 key 不同）。上游靠
+//      「启动首轮 + 30 分钟定时 refreshAll 滚动重取」保活；不重取，key 迟早失效。
+//      ⇒ refresh = 拿 SSO 会话重打 configs（幂等纯读），chat 401/404 时按需自愈。
+//    ③ **SSO 会话死**：上游恒 HTTP 200 + `code=80000`「登录异常，请重新登录」
+//      （死码族 {1002,1005,80000}）。**无程序化续期接口**（上游断言），终态 =
+//      人工在 AStudio 客户端重新登录，本渠道如实上抛 notSignedIn，不假装能刷新。
 
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { assignExpiryBands, debugLog } from './shared.mjs'
+import { assignExpiryBands, debugLog, notSignedIn } from './shared.mjs'
 
 const PROVIDER = 'astudio'
 const DISPLAY = 'AStudio（讯飞）'
@@ -79,6 +88,90 @@ function pickApiKey(body) {
   return undefined
 }
 
+// ── 会话死码与凭据重取（上游 astudio-product.ts / astudio-auth.ts 同款）─────
+
+/**
+ * `bot/models/configs` 的行 → 推理端点表。
+ * ⚠️ 推理地址与 key 都在**行内**（`base_url` + `api_key`，按次下发、短时有效）——
+ *    网关会搬家（2026-11-01 实测迁到 maas-api.cn-huabei-1），不能硬编码旧基址。
+ */
+function rowsToEndpoints(body) {
+  const rows = Array.isArray(body?.data) ? body.data : []
+  const out = []
+  for (const row of rows) {
+    const model = typeof row?.model === 'string' ? row.model.trim() : ''
+    const baseUrl = typeof row?.base_url === 'string' ? row.base_url.trim().replace(/\/$/, '') : ''
+    const apiKey = typeof row?.api_key === 'string' ? row.api_key.trim() : ''
+    if (model === '' || baseUrl === '' || apiKey === '') continue
+    out.push({ model, baseUrl, apiKey })
+  }
+  return out
+}
+
+/** 上游会话死码：HTTP 恒 200 + 业务码。只登记实测见过的三个，别照抄猜测值。 */
+const SESSION_DEAD_CODES = new Set([1002, 1005, 80000])
+const SESSION_DEAD_MESSAGE = 'AStudio 登录会话已失效，请重新登录（微信扫码）'
+
+/** 控制面响应是否判「会话已死」（死码或中文文案命中 —— 文案是服务端兜底形态）。 */
+function isSessionDeadPayload(body) {
+  const code = Number(body?.code)
+  if (Number.isFinite(code) && SESSION_DEAD_CODES.has(code)) return true
+  return /登录异常|请重新登录/.test(String(body?.desc ?? body?.message ?? ''))
+}
+
+/**
+ * 用 SSO 会话 Cookie 重换推理 api_key（上游 refreshOnce 同款：幂等纯读、零副作用）。
+ * ⚠️ 不是 refresh_token 换新 —— AStudio 没有 refresh_token；输入是凭据里的
+ *    ssoSessionId/token，输出是带新 accessToken 的凭据。会话本体已死（80000 族）
+ *    ⇒ notSignedIn 终态，调用方不得循环重试。
+ */
+async function remintApiKey(credential) {
+  const cookie = cookieHeader(credential)
+  if (cookie.length === 0) throw notSignedIn('未登录 AStudio（缺少登录会话 Cookie），请重新登录')
+  let response
+  try {
+    response = await fetch(`${AUTH_BASE}${BOT_CONFIGS_PATH}`, {
+      headers: { Accept: 'application/json', Cookie: cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+  } catch (error) {
+    // 传输层失败 ≠ 终态：网络抖动不该让用户重新登录（上游同款判据）
+    throw new Error(`AStudio 凭据重取失败（网络）：${error instanceof Error ? error.message : error}`)
+  }
+  const text = await response.text()
+  let body
+  try { body = JSON.parse(text) } catch {
+    throw notSignedIn(`AStudio 凭据重取返回非 JSON（HTTP ${response.status}），会话可能已失效，请重新登录`)
+  }
+  if (isSessionDeadPayload(body)) throw notSignedIn(SESSION_DEAD_MESSAGE)
+  const apiKey = pickApiKey(body)
+  if (apiKey === undefined) throw new Error(`AStudio 凭据重取未返回 api_key（code=${body?.code ?? '?'}）`)
+  return { ...credential, accessToken: apiKey, endpoints: rowsToEndpoints(body) }
+}
+
+/**
+ * 探一次积分接口判会话死活：true=死（80000 族）/ false=活 / undefined=探不到。
+ * 只在推理 404「API endpoint not found」时作甄别用 —— 404 有两种成因
+ * （key 老化解绑 vs 会话死），处理完全不同，不甄别就会把「请重新登录」装成 404。
+ */
+async function probeSessionDead(credential) {
+  const cookie = cookieHeader(credential)
+  if (cookie.length === 0) return true
+  let response
+  try {
+    response = await fetch(`${AUTH_BASE}/points/balance`, {
+      headers: { Accept: 'application/json', Cookie: cookie },
+      signal: AbortSignal.timeout(10_000),
+    })
+  } catch { return undefined }
+  if (!response.ok) return undefined
+  const body = await response.json().catch(() => undefined)
+  if (body === undefined || body === null) return undefined
+  if (Number(body?.code) === 0) return false
+  if (isSessionDeadPayload(body)) return true
+  return undefined
+}
+
 /** 登录拿到 identity 后：init-app（可失败）→ bot/models/configs 换推理凭据。 */
 async function completeLogin(identity) {
   const sso = String(identity.ssoSessionId ?? identity.uid ?? '').trim()
@@ -112,6 +205,7 @@ async function completeLogin(identity) {
 
   return {
     accessToken: apiKey,
+    endpoints: rowsToEndpoints(body),
     ssoSessionId: sso,
     accountId: acc,
     token,
@@ -689,9 +783,14 @@ async function fetchCatalog(credential) {
       tool_call: true,
       capabilities: {
         temperature: true,
-        reasoning: true,
         // 实测远端 input_modalities 全是 ['text'] ⇒ 明确不支持图片
+        reasoning: true,
         attachment: Array.isArray(row?.input_modalities) ? row.input_modalities.includes('image') : false,
+        toolcall: true,
+        // ⚠️ magpie 判定「模型说过能看图」读的是 capabilities.input.image
+        //    （见 lingxi.mjs modelRow 注释）；只写顶层 modalities 会被当成 unsaid。
+        input: { text: true, image: Array.isArray(row?.input_modalities) ? row.input_modalities.includes('image') : false, audio: false, video: false, pdf: false },
+        output: { text: true, image: false, audio: false, video: false, pdf: false },
       },
       options: {}, headers: {}, variants: {},
       status: 'active', release_date: '',
@@ -722,25 +821,81 @@ export const astudioChannel = {
     return { url: flow.loginUrl, result: flow.result }
   },
 
-  /** ⚠️ 无程序化续期：SSO 会话一年不滑动，失效即需人工重登。不假装能刷新。 */
-  async refresh() {
-    throw new Error('AStudio 不支持自动续期：会话失效后请重新登录（SSO 会话一年，不滑动）')
+  /**
+   * 凭据重取（上游 refreshOnce 同款）：拿凭据里的 SSO 会话重换一把 api_key。
+   * ⚠️ 无 TTL 可预判（expired 恒 false），按需重取发生在 chat 的 401/404 路径；
+   *    SSO 会话本体死了（80000 族）→ notSignedIn 终态，magpie 据此提示重新登录。
+   */
+  async refresh(credential) {
+    return remintApiKey(credential)
   },
   expired: () => false,
 
   catalog: fetchCatalog,
 
-  async chat(credential, { body, signal }) {
-    // ⚠️ /model-gateway/v1/chat/completions 是唯一能用；/model-gateway/v1/models 恒 404
-    return fetch(`${MAAS_BASE}${CHAT_PATH}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${credential.accessToken}`,
-      },
-      body: JSON.stringify(body),
-      signal,
-    })
+  async chat(credential, { body, signal, renew } = {}) {
+    // 推理地址与 key 按 configs 的**行**取（网关随行内 base_url 下发，会搬家；
+    // 行内 api_key 与 base_url 配对使用）。无端点表时退回旧硬编码路径兜底。
+    const send = (cred) => {
+      const model = String(body?.model ?? '')
+      const rows = Array.isArray(cred?.endpoints) ? cred.endpoints : []
+      const hit = rows.find((r) => r.model === model)
+        ?? rows.find((r) => r.model !== '' && r.baseUrl !== '' && r.apiKey !== '')
+      const url = hit !== undefined ? `${hit.baseUrl}/chat/completions` : `${MAAS_BASE}${CHAT_PATH}`
+      const key = hit !== undefined ? hit.apiKey : cred.accessToken
+      return fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify(body),
+        signal,
+      })
+    }
+    /** 重取一次凭据并用它重发（上游 refresh-and-retry 同款；无 renew 回调则跳过）。 */
+    const renewAndRetry = async () => {
+      if (typeof renew !== 'function') return undefined
+      const next = await renew(credential)
+      if (!next) return undefined
+      return send(next)
+    }
+    /** 重取链失败（终态）→ 401 + 明确文案，不让会话对着裸 401/404 猜。 */
+    const authError = (message) => Response.json(
+      { error: { type: 'authentication_error', message } },
+      { status: 401 },
+    )
+
+    let response = await send(credential)
+
+    // ① 401：key 被上游拒绝 → 重取一次再试；重取撞上会话死 → 终态 401。
+    if (response.status === 401) {
+      try {
+        const retried = await renewAndRetry()
+        if (retried !== undefined) response = retried
+      } catch (error) {
+        return authError(error instanceof Error ? error.message : String(error))
+      }
+      if (response.status === 401) {
+        return authError('AStudio 凭据被上游拒绝（重取后仍失败）⇒ 请在 AStudio 客户端重新登录（微信扫码）')
+      }
+    }
+
+    // ② 404「API endpoint not found」：key 过了鉴权但名下没有模型端点 ——
+    //    要么 key 老化被解绑（会话活着，可自愈），要么会话已死（只能重登）。
+    //    先探积分接口甄别，再决定「重取重试」还是「明确报请重新登录」。
+    if (response.status === 404) {
+      const dead = await probeSessionDead(credential).catch(() => undefined)
+      if (dead === true) return authError(SESSION_DEAD_MESSAGE)
+      try {
+        const retried = await renewAndRetry()
+        if (retried !== undefined) response = retried
+      } catch (error) {
+        return authError(error instanceof Error ? error.message : String(error))
+      }
+    }
+
+    return response
   },
 
   /**

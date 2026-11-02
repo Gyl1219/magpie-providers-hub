@@ -1,4 +1,4 @@
-// 额度分桶 → magpie usage windows 的移植语义回归（全部 stub fetch）。
+﻿// 额度分桶 → magpie usage windows 的移植语义回归（全部 stub fetch）。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -133,7 +133,10 @@ test('astudio：滚动指针分档 —— 临期指向最早到期的未耗尽�
           totalBalance: 7000, totalAmount: 7000,
           memberBalance: 0, memberTotal: 100,
           buyBalance: 0, buyTotal: 50,
-          activityBalance: 7000, activityTotal: 7000, activityNextExpireTime: '2026-11-01T04:45:48',
+          // ⚠️ 到期时间必须相对「现在」算，不能写死日期：
+      //    写死 2026-11-01 的用例在 11-02 之后必然红（桶已过期，不再是指针位）。
+      activityBalance: 7000, activityTotal: 7000,
+      activityNextExpireTime: new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 19),
           sparkTotalBalance: 60000, sparkTotalAmount: 60000, sparkNextExpireTime: '',
         },
       }),
@@ -148,7 +151,7 @@ test('astudio：滚动指针分档 —— 临期指向最早到期的未耗尽�
     assert.match(activity.name, /临期·\d+天/, '唯一有到期且有值的桶 = 指针位')
     assert.equal(activity.used, 0)
     assert.equal(activity.runsOutAt, undefined, '浅灰行撤掉（亮色层 band 名 + display 日期已带时间）')
-    assert.equal(activity.display, '剩余 7000 · 11-01 到期')
+    assert.match(activity.display, /^剩余 7000 · \d{2}-\d{2} 到期$/, 'display 带真实到期日（相对今天算）')
     const spark = windows.find((w) => w.name.includes('星火积分'))
     assert.match(spark.name, /永久/, '无到期 = 永久')
   } finally {

@@ -907,6 +907,8 @@ $('go-jwt').addEventListener('click', async () => {
           temperature: true,
           reasoning: true,
           attachment: m.vision,
+          // ⚠️ magpie 判定"模型说过能看图"读的是 capabilities.input.image（见 lingxi.mjs 注释）；
+          //    只写顶层 modalities 会被当成 unsaid，所有模型都被放行。
           input: { text: true, image: m.vision },
           output: { text: true },
         },

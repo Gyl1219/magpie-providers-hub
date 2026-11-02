@@ -36,7 +36,7 @@ function fakeHome(plugins) {
 const ENTRY = {
   package: 'magpie-providers-hub',
   name: 'Providers Hub',
-  // v0.5.0：只注册保留的五条（重叠渠道已从包里删除）
+  // v0.7.x：五条核心 + AutoClaw×2；按需渠道（灵犀/豆包工作/Dola/七牛）随环境出现
   providers: ['hub-astudio', 'hub-accio', 'hub-lobsterai', 'hub-magicrew', 'hub-magicrew-intl'],
   community: true,
   summary: { en: 'en', zh: 'zh' },

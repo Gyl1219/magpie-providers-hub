@@ -166,6 +166,17 @@ const READ_CREDS = `(() => {
 
 /**
  * 拉起浏览器打开登录页。
+ *
+ * ⚠️⚠️ **必须 `detached: true` + `unref()`**（2026-11-01 真机事故）：
+ *    magpie 调 `authorize()` 只取走 `url` 就返回，承载它的 node 进程随后可能
+ *    被回收/退出。`detached: false` 时子浏览器是父进程的从属，**父进程一死
+ *    窗口立刻消失** —— 用户「网页还没登录窗口就没了」。
+ *    detached 让浏览器脱离父进程组独立存活，登录结束后由我们再显式关闭
+ *    （`closeSession` 里有 taskkill 兜底，不会留僵尸）。
+ *
+ * ⚠️ Windows 上还需 `--no-startup-window` 之外的最小参数集：传 `url` 作为
+ *    首个参数即可；不用 `--app`（会隐藏地址栏，登录页跳转不方便）。
+ *
  * @returns {Promise<{port:number, dir:string, child:import('node:child_process').ChildProcess}>}
  */
 export async function launchLoginBrowser(url) {
@@ -188,10 +199,20 @@ export async function launchLoginBrowser(url) {
         '--no-default-browser-check',
         '--disable-features=Translate,MediaRouter',
         '--disable-background-networking',
+        // ⚠️ 新 profile 首次启动可能弹「登录以同步」向导，挡在登录页前面
+        '--disable-sync',
+        '--disable-extensions',
         url,
       ],
-      { stdio: 'ignore', detached: false, windowsHide: false },
+      {
+        // ⚠️⚠️ 关键：脱离父进程组，父进程退出不带走浏览器窗口
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      },
     )
+    // 让事件循环不再为该子进程保持引用（否则父进程退出时会被一起收）
+    child.unref?.()
   } catch (e) {
     throw new Error(`浏览器启动失败：${e?.message ?? e}`)
   }

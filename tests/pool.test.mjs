@@ -151,12 +151,20 @@ test('refresh：别的渠道的 auth → undefined（不动登录）', async () 
   })
 })
 
-test('refresh：astudio 无 refresh_token → undefined（不假装能续期）', async () => {
+test('refresh：astudio 认 accessToken → 走 SSO 重换 api_key（不再返回 undefined）', async () => {
   await isolated(async ({ build }) => {
-    const plugin = await build({}, { notify: false })
-    // astudio 的凭据字段是 accessToken（identityOf 只认 refreshToken/refresh_token/access/access_token）
-    const next = await plugin.auth.refresh(astudioAuth())
-    assert.equal(next, undefined, 'identityOf 为空 → 不碰 magpie 的登录')
+    const original = globalThis.fetch
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ code: 0, data: [{ api_key: 'AT-NEW' }] }), { status: 200 })
+    try {
+      const plugin = await build({}, { notify: false })
+      // 2026-11-01：identityOf 认 accessToken（key 老化自愈链的前提——
+      // 多账号各按各的凭据身份入闸，不串号）
+      const next = await plugin.auth.refresh(astudioAuth())
+      assert.equal(next?.accessToken, 'AT-NEW', '走渠道重取，结果回给 magpie 保存')
+    } finally {
+      globalThis.fetch = original
+    }
   })
 })
 

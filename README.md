@@ -8,19 +8,20 @@
 
 Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**做成**独立实现**。
 
-> **v0.5.0 起只提供 5 条渠道**：与社区 registry 里已有插件重叠的五条（OfficeAce、
+> **v0.5.0 只保留 5 条渠道**：与社区 registry 里已有插件重叠的五条（OfficeAce、
 > AutoClaw 国内/国际、Loomy、MiniMax 国际版）**已从包里删除**（PR #502 审核结论）。
-> 老用户改装对应社区插件即可，见下方「迁移」一节。
+> **v0.7.0 起 AutoClaw 国内/国际回归**：按 #614 新标准写明与 `opencode-autoclaw-auth`
+> 的差别后重新实现（见「AutoClaw」一节）。
 
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个插件，五条供应商（v0.5.0）
+## 形态：一个插件，七条供应商
 
-**装一次，Magpie 里出现五条供应商**，一个渠道一条：
+**装一次，Magpie 里出现七条供应商**，一个渠道一条：
 
 ```
-hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl
+hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn
 ```
 
 - 一个 git 仓库 / 一个 npm 包 / 一条安装命令 —— provider id 不是包，插件包可以注册任意多个
@@ -30,13 +31,14 @@ hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl
   `hub-accio` 的账号）；
 - 模型 id 由 magpie 拼成 `hub-astudio/spark-x`（目录里我们返回的是裸模型名 `spark-x`）。
 
-> **从 0.4.x 升级（重要）**：包里删掉了 OfficeAce / AutoClaw 国内+国际 / Loomy /
-> MiniMax 国际版 四条渠道的代码（原因见下节）。这五条供应商会从 Magpie 里消失，
+> **从 0.4.x 升级（重要）**：包里删掉了 OfficeAce / Loomy /
+> MiniMax 国际版 三条渠道的代码（原因见下节）。这些供应商会从 Magpie 里消失，
 > **改装对应的社区插件即可**：
 > - OfficeAce → `officeace-auth`
-> - AutoClaw（国内/国际）→ `opencode-autoclaw-auth`
 > - Loomy → `opencode-loomy-auth`
 > - MiniMax Code 国际版 → `opencode-minimax-auth`
+> - AutoClaw（国内/国际）→ **v0.7.0 起本插件重新提供**（新实现，见「AutoClaw」一节），
+>   也可继续用社区 `opencode-autoclaw-auth`，两者差别见下。
 >
 > 剩下的五条（astudio / accio / lobsterai / magicrew×2）**登录态不受影响**。
 > 另外：插件已不再往 `~/.config/magpie/` 写任何凭据文件，旧的
@@ -54,6 +56,12 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 
 删代码而不是「默认不注册」，是因为审核在意的是**包里有什么**，不是默认开没开。
 
+> **AutoClaw 为什么在 v0.7.0 回来**：#614 定了新标准——同一渠道说得出与现有入口的
+> 差别就能加。本插件的 AutoClaw 与 `opencode-autoclaw-auth` 的差别是实打实的：
+> **① 支持粘贴 accessToken + refreshToken 直接使用；② 能读取已登录 AutoClaw 桌面端
+> 的凭据免重新登录**——两者绿标包都没有。当年删掉的两样敏感能力这次也重新审视过：
+> DPAPI 读取只做**当前 Windows 用户**、默认不执行、有粘贴替代；XFF 伪造仍然没有。
+
 ## 当前渠道
 
 | 渠道 id | 供应商 id | 归属 | 登录方式 | 模型 | 续期 |
@@ -63,6 +71,35 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 | `lobsterai` | `hub-lobsterai` | 有道 LobsterAI（龙虾） | 官方门户 OAuth + 本机 loopback 回调 | `/api/models/available` | ✅ 标准 refresh_token 轮换 |
 | 超级麦吉（国内） | `hub-magicrew` | 超级麦吉（letsmagic.cn） | 载体页：CDP 浏览器登录 / 手机号密码 / 粘贴 JWT | `/api/v1/flows/models` | ✅ refresh_token（⚠️ PUT 一次轮换一次）+ `mgw_` api_key 2h 自续 |
 | MagiCrew（国际） | `hub-magicrew-intl` | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
+| `autoclaw` | `hub-autoclaw` | AutoClaw（智谱澳龙，国际版） | 读取桌面端登录态 / 粘贴 accessToken+refreshToken | `/agent-assetmgr` + 内置快照 | ✅ refresh_token（⚠️ 一次性轮换，续期落槽） |
+| `autoclaw-cn` | `hub-autoclaw-cn` | AutoClaw（智谱澳龙，国内版） | 同上（国内站同协议） | 同上 | ✅ 同左 |
+
+### autoclaw / autoclaw-cn（AutoClaw 国际版 / 国内版）
+
+智谱澳龙（OpenClaw 云端账号体系）的两个站点：国际 `autoglm-api.autoglm.ai`、国内
+`autoglm-acceleration-api.zhipuai.cn`。4 个模型（`zai_glm-5.3-flash` 免费、
+`zaicoding_glm-5.3`、`zai_auto`、`zai_auto-fast`），上下文 1M，思考档 low/high/max。
+
+**与社区 `opencode-autoclaw-auth` 的差别**（#614 要求写明的，两者读同一账号的积分余额，
+一边用掉另一边同步减少）：
+
+- **粘贴 accessToken + refreshToken 直接使用**（JSON 或两行 key=value 均可）——绿标包没有；
+- **读取桌面端登录态**：已登录 AutoClaw 桌面客户端的用户一键导入，免重新 OAuth/短信——
+  绿标包没有。原理：解密客户端本机凭据文件（DPAPI **仅当前 Windows 用户** +
+  AES-256-GCM），默认不执行，只有主动点击才读；读不到时明确报错并指向粘贴方式；
+- 网页 OAuth / 手机验证码：绿标包也有，本插件**没有**（国际 OAuth 上游至今未打通，
+  有需要请用绿标包）。
+
+两个必须知道的细节：
+
+- **导入会轮换登录态**。refresh_token 一次性，导入时立即换发新 pair 落槽——
+  这保证槽里的凭据始终新鲜（magpie 到期前还会自动轮换一次），代价是**桌面客户端
+  自己的会话被作废**，客户端之后会要求重新登录（重新登录后两边各自独立可用）；
+- **桌面端导入的旧 token 查不了余额**（资产服务返回 410000），插件会自动用
+  refresh_token 换发新 token 再查——这一步对用户透明，但首次查询会慢约一秒。
+
+协议参考：对话/续期/模型配置端点来自 [iJetLi/dsh-providers-hub](https://github.com/iJetLi/dsh-providers-hub)
+的实测实现；钱包与批次分档端点/头组合来自社区 `opencode-autoclaw-auth` 的公开实现。
 
 ### astudio
 
@@ -151,8 +188,8 @@ MagiCrew（国内/国际）有社区包但这里保留了各自修过的真机�
 
 **AutoClaw 国内/国际**是后来应需求加入的（虽与社区插件覆盖重叠）：上游 DSH 对该渠道
 做过四轮审计修复（X-Version 硬校验、406 白名单、档位本地门禁、JWT exp 权威过期、
-`display:false` 钱包过滤、流水净额批次），社区插件跟进慢，且一键导入桌面端凭据 +
-Z.ai OAuth 的完整登录、与其它渠道统一的三档用量汇总，只有这里有。
+`display:false` 钱包过滤、流水净额批次），社区插件跟进慢，且一键导入桌面端凭据（导入即轮换，
+细节见 AutoClaw 一节）、与其它渠道统一的三档用量汇总，只有这里有。国际 OAuth 本插件没有实现，需要请用社区插件。
 
 ⚠️ hub 的 `aggregate` / `jet-hub-auto` 是**池路由**（hub 内部把请求分派给其它渠道），不是真实
 渠道，独立实现等于重写整个调度层 ⇒ **不在范围内**，那部分仍需依赖 DSH Hub 网关的桥接插件。
@@ -223,7 +260,7 @@ src/minimaxintl.mjs        MiniMax 国际版渠道（设备码 + PKCE）
 src/minimax-transport.mjs  MiniMax 传输层（307 保凭据跟随、传输重试、地理路由）
 src/minimax-bridge.mjs     OpenAI↔Anthropic 翻译桥（含 SSE）
 src/accio.mjs              Accio（阿里）渠道（Gemini 风格信封 + 工具分片合并）
-src/autoclaw.mjs           AutoClaw 国内+国际渠道（MD5 签名 / 406 白名单 / Z.ai OAuth / 凭据导入）
+src/autoclaw.mjs           AutoClaw 国内+国际渠道（MD5 签名 / 406 白名单 / 桌面端凭据导入）
 src/loomy.mjs              Loomy（讯飞）渠道（双认证头 / 短信三步流 / 每日额度签到）
 src/lobsterai.mjs          LobsterAI（有道）渠道（信封 + 裸 SSE 对话 / 门户 OAuth 回调）
 src/magicrew.mjs           超级麦吉国内+国际渠道（三段式凭据 / 积分到期分档 / 签到与新手任务）

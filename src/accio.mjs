@@ -408,6 +408,11 @@ async function catalog(credential) {
         // ⚠️ Accio 关不掉思考（实测四类字段全部无效），档位仅作展示（DSH 同口径）
         reasoning: true,
         attachment: entry.supportsImage === true,
+        toolcall: true,
+        // ⚠️ magpie 判定「模型说过能看图」读的是 capabilities.input.image
+        //    （见 lingxi.mjs modelRow 注释）；只写顶层 modalities 会被当成 unsaid。
+        input: { text: true, image: entry.supportsImage === true, audio: false, video: false, pdf: false },
+        output: { text: true, image: false, audio: false, video: false, pdf: false },
       },
       options: {},
       headers: {},

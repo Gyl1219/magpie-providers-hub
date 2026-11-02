@@ -58,11 +58,21 @@ test('package.json 声明了侧边栏页面，文件存在', () => {
   }
   assert.equal(pkg.files.includes('page'), false, 'files 不能用整个 page 目录（会带上本地快照）')
   // 快照模板必须是空的：任何真实数据都不许进仓库/进包
+  //
+  // ⚠️⚠️ 这条断言是 2026-10-30 npm 泄漏事故的门禁（0.5.0 把带余额/AK ID 的本机快照发上了 npm）。
+  //    **构建机上 magpie 还开着时，它会每 5 分钟把真实快照写回 page/snapshot.js** ——
+  //    所以这条红不是测试坏了，是「现在这份文件里有你的真实数据，别打包」。
+  //    处理：先关掉 magpie（或 `git checkout -- page/snapshot.js`），再打包。
   const tpl = read('page/snapshot.js')
   const m = tpl.match(/^window\.__PROVIDERS_HUB_SNAPSHOT__\s*=\s*(\{[\s\S]*\});?\s*$/)
   assert.ok(m, 'snapshot.js 必须是 window.__PROVIDERS_HUB_SNAPSHOT__ = {...}; 形式')
   const snap = JSON.parse(m[1])
-  assert.equal(snap.at, 0, 'snapshot.js 必须是空模板（at: 0）')
+  assert.equal(
+    snap.at,
+    0,
+    `snapshot.js 里有真实快照（at=${snap.at}，${Array.isArray(snap.channels) ? snap.channels.length : '?'} 个渠道）`
+      + ' —— magpie 可能还开着，先关掉它再跑 `git checkout -- page/snapshot.js`',
+  )
   assert.deepEqual(snap.channels, [], 'snapshot.js 不许带任何渠道数据')
   assert.equal(snap.runId ?? null, null, 'snapshot.js 不许带 runId')
 })
@@ -151,7 +161,7 @@ test('快照模块：写入内容绝不含凭据（token/secret/ak/sk）', async
     const body = snap.replace(/^window\.__PROVIDERS_HUB_SNAPSHOT__\s*=\s*/, '').replace(/;\s*$/, '')
     const obj = JSON.parse(body)
     assert.ok(Array.isArray(obj.channels))
-    assert.equal(obj.channels.length, 5, 'v0.5.0 起只有五条渠道')
+    assert.ok(obj.channels.length >= 7, '至少七条，实际：' + obj.channels.length)
     // 每条渠道都标着自己的供应商 id（页面上「关掉哪个会关掉它」）
     assert.ok(obj.channels.every((c) => typeof c.provider === 'string' && c.provider.startsWith('hub-')),
       `渠道行缺 provider 字段：${JSON.stringify(obj.channels.map((c) => c.provider))}`)

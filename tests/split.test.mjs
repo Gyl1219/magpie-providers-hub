@@ -1,4 +1,4 @@
-// 多供应商拆分（v0.4.0）的行为契约。
+﻿// 多供应商拆分（v0.4.0）的行为契约。
 //
 // 覆盖三件「错了会静默出错」的事：
 //   1. 十个渠道 ↔ 十个供应商 id ↔ 十条 magpie 卡片，一一对应且 id 稳定唯一；
@@ -45,14 +45,19 @@ const readSnapshot = () => {
   }
 }
 
-test('五个渠道 ↔ 五个供应商 id ↔ 五个插件导出，一一对应', async () => {
+test('渠道 ↔ 供应商 id ↔ 插件导出，一一对应（七条必备 + 本机按需）', async () => {
   // ⚠️ v0.5.0 起只有五条：与社区 registry 现有插件重叠的五条已从包里删除
   //    （PR #502 审核意见：一个订阅两个入口 + 它们带着与本插件无关的敏感能力）。
-  assert.equal(REGISTERED_CHANNELS.length, 5, '渠道数应是 5（删渠道或漏注册都会静默改变供应商数量）')
+  //    v0.5.9 追加第六、第七条：灵犀、豆包工作。
+  assert.ok(REGISTERED_CHANNELS.length >= 7, '至少七条：' + REGISTERED_CHANNELS.length)
+  for (const id of ['astudio', 'accio', 'lobsterai', 'magicrew', 'magicrew-intl', 'autoclaw', 'autoclaw-cn']) {
+    assert.ok(REGISTERED_CHANNELS.some((c) => c.id === id), '必备渠道缺 ' + id)
+  }
   assert.deepEqual(PROVIDER_IDS, REGISTERED_CHANNELS.map(providerIdOf), 'PROVIDER_IDS 必须与渠道一一对应')
-  assert.equal(Object.keys(HUB_PLUGINS).length, 5, 'index.mjs 必须导出 5 个插件函数')
+  assert.equal(Object.keys(HUB_PLUGINS).length, REGISTERED_CHANNELS.length, '插件导出数必须等于渠道数（删渠道或漏注册都会静默改变供应商数量）')
   // 已删渠道的代码不许再打进包里
-  for (const gone of ['officeace', 'autoclaw', 'autoclawintl', 'loomy', 'minimaxintl']) {
+  // ⚠️ autoclaw / autoclaw-cn 已于 v0.6.x 重新实现；autoclawintl 仍是删除状态
+  for (const gone of ['officeace', 'autoclawintl', 'loomy', 'minimaxintl']) {
     assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
   }
   const seen = new Set()
@@ -66,7 +71,7 @@ test('五个渠道 ↔ 五个供应商 id ↔ 五个插件导出，一一对应'
     await plugin.config(cfg)
     assert.equal(cfg.provider[plugin.provider.id].name, providerNameOf(channel), '供应商显示名要跟渠道对上')
   }
-  assert.equal(seen.size, 5)
+  assert.equal(seen.size, REGISTERED_CHANNELS.length)
 })
 
 test('旧账号槽 providers-hub* → hub-<渠道>：搬迁一次、幂等、可关', async () => {

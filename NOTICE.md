@@ -56,3 +56,18 @@ Raccoon、MiniMax Code、ZCode、Gemini），故这些**不在**本插件内 —
   本插件**不破解、不模拟**滑块，只把官方回调给出的 `challenge` / `validate` / `seccode`
   原样提交给账号后端。
 - 华为云 APIG 签名（SDK-HMAC-SHA256）：按公开的签名规则本地实现。
+
+### 七牛云渠道（`hub-qiniu`）— 移植自 lakegan/opencode-qiniu-auth
+
+- **来源**：[lakegan/opencode-qiniu-auth](https://github.com/lakegan/opencode-qiniu-auth)（MIT），
+  即 magpie-community/plugins 的 PR #374「Add Qiniu MaaS (Conatus Free) provider plugin」。
+- **授权**：该 PR 于 2026-11-01 由作者 lakegan 本人以「Superseded by
+  magpie-providers-hub (hub-qiniu)」关闭，并明确授权按 MIT 复用、署名引用
+  `lakegan/opencode-qiniu-auth`、保留 LICENSE 原文（原文见
+  [LICENSES/opencode-qiniu-auth-MIT.txt](./LICENSES/opencode-qiniu-auth-MIT.txt)）。
+- **移植范围**：模型命名 / 能力位启发式 / 排序（上游 `lib/models.mjs`）、目录快照
+  （`lib/catalog.mjs`）、AK/SK 签名（`lib/sign.mjs`）、今日用量口径（`lib/usage.mjs`）。
+- **本仓库新增**：magpie「一渠道一供应商」形态下的粘贴型登录（`apiAuth` + 可选 AK/SK 问项）、
+  `chat` 代理（目录短名 → 完整模型 id）、用量窗口组装。
+- **商标**：七牛云 / Qiniu / Conatus 及其模型名归七牛云及其各自权利人所有。本插件只让用户
+  用**自己的账号**访问七牛云已开通的服务。

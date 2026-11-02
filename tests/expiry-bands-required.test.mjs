@@ -1,4 +1,4 @@
-// 门禁：滚动指针分档的契约（AGENTS.md 第 1、2 条）。
+﻿// 门禁：滚动指针分档的契约（AGENTS.md 第 1、2 条）。
 //
 // 新渠道只要走 shared.mjs 的 expiryBandedWindows()，就自动合规；
 // 这个测试锁死该工具的行为 —— 一旦有人改动分档语义，这里先红。
@@ -92,8 +92,9 @@ test('门禁：渠道源码里带到期窗口的必须走 banding 工具（不�
   const srcDir = join(import.meta.dirname, '..', 'src')
   // 存量豁免：这些渠道在本约定生效前就手拼了到期窗口，改造需单独回归验证，
   // 暂列入白名单。**新增渠道不得加入此名单** —— 必须直接走 expiryBandedWindows。
-  // TODO(migration)：autoclaw / lobsterai / loomy 逐個改成 expiryBandedWindows 后从白名单移除。
-  const GRANDFATHERED = new Set(['autoclaw.mjs', 'lobsterai.mjs', 'loomy.mjs'])
+  // TODO(migration)：lobsterai / loomy 逐个改成 expiryBandedWindows 后从白名单移除。
+  // ⚠️ autoclaw.mjs（v0.6.x 新增）不在名单里：它只有纯余额、没有到期窗口，本就不需要 banding。
+  const GRANDFATHERED = new Set(['lobsterai.mjs', 'loomy.mjs'])
   const files = readdirSync(srcDir).filter((f) => f.endsWith('.mjs')
     && !/^(shared|aggregate|self-register|minimax-bridge|minimax-transport|magicrew-browser)\.mjs$/.test(f)
     && !GRANDFATHERED.has(f))
