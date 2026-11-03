@@ -650,7 +650,7 @@ async function exchangeKeyViaBrowser(session) {
     target = (Array.isArray(fresh) ? fresh : []).find((t) => t.type === 'page' && String(t.url ?? '').includes('ai-models.app.baizhi.cloud') && t.webSocketDebuggerUrl)
     if (!target) return { ok: false, error: '商店页未能打开（浏览器窗口可能被关闭）' }
   }
-  const expr = `fetch('/api/console/api-keys', { headers: { accept: 'application/json' }, credentials: 'include' }).then(r => r.text())`
+  const expr = `fetch('/api/console/api-keys?page=1&page_size=20', { headers: { accept: 'application/json' }, credentials: 'include' }).then(r => r.text())`
   const raw = await cdpSend(target, 'Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true })
   const text = typeof raw?.result?.value === 'string' ? raw.result.value : ''
   let parsed
