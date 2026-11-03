@@ -26,3 +26,18 @@ process.env.DSH_HUB_AUTH_PATH = join(sandbox, '.config', 'magpie', 'plugin-auth.
 // 开关文件也重定向到沙箱（不存在 = 默认态），真机的 providers-hub.json 不参与。
 process.env.MAGPIE_HUB_EXTRA_CHANNELS = ''
 process.env.DSH_HUB_SWITCH_PATH = join(sandbox, '.config', 'magpie', 'providers-hub.json')
+
+// ── 网络哨兵：测试里出现未打桩的**外网**请求 → 立刻失败 ──────────────────
+// （#652 评审：沙箱屏蔽网络时用例靠「连接失败也算过」蒙混，在联网机器上
+//   会真的请求 astronstudio / lobsterai 等上游 —— 测试不许碰真实网络。）
+// 放行 127.0.0.1 / localhost：magicrew 登录测试会起本地服务器自测，那是环内。
+// 各测试文件用 stubFetch 替换 globalThis.fetch 时哨兵自然被绕开；restore 后
+// 哨兵回归。谁漏打桩，谁的用户例就带着这句明确报错红掉。
+const __realFetchForLoopback = globalThis.fetch
+globalThis.fetch = (...args) => {
+  const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? String(args[0]))
+  if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])[:/]/.test(url)) {
+    return __realFetchForLoopback(...args)
+  }
+  throw new Error(`测试发起了未打桩的真实网络请求：${url} —— 请在该用例里 stub 这个地址`)
+}

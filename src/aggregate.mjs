@@ -1,4 +1,4 @@
-﻿// 多供应商层：**一个插件，五条供应商**（每个供应商 = 一个渠道）。
+// 多供应商层：**一个插件，五条供应商**（每个供应商 = 一个渠道）。
 //
 // ## 形态：一个渠道一个供应商（v0.4.0 起）
 //
@@ -42,23 +42,34 @@ import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './autoclaw.mjs'
-import { loomyChannel } from './loomy.mjs'
-import { monkeycodeChannel, monkeycodeIntlChannel } from './monkeycode.mjs'
 
 // ── 按需加载的渠道（发布包里没有对应文件，本机有才加载）────────────────
-// ⚠️ v0.7.1 起只随包发布 registry 已登记（或已过审差别）的渠道：
-//   lingxi（作者要求私有）、doubaowork / dola / qiniu（尚未各自过审，等独立 PR）。
+// ⚠️ v0.9.1 起只随包发布 registry 已登记（或已过审差别）的渠道：
+//   lingxi（作者要求私有）、doubaowork / dola / qiniu / loomy / monkeycode
+//   （尚未各自过审，等独立 PR —— #652 评审：未过审渠道不得混进发布版本）。
 //   加载模式：existsSync + 动态 import，文件不在就静默跳过，不拖垮插件。
-const lazyChannels = { lingxi: './lingxi.mjs', doubaowork: './doubaowork.mjs', dola: './dola.mjs', qiniu: './qiniu.mjs' }
-// loomy 已过审（#652 差异成立），随包发布：静态导入
-// （占位注释，loomy 在下面静态导入区）
+const lazyChannels = {
+  lingxi: './lingxi.mjs',
+  doubaowork: './doubaowork.mjs',
+  dola: './dola.mjs',
+  qiniu: './qiniu.mjs',
+  loomy: './loomy.mjs',
+  monkeycode: './monkeycode.mjs',
+  'monkeycode-intl': './monkeycode.mjs',
+}
 const lazyLoaded = {}
 for (const [name, rel] of Object.entries(lazyChannels)) {
   const p = fileURLToPath(new URL(rel, import.meta.url))
-  if (existsSync(p)) {
+  if (existsSync(p) && lazyLoaded[rel] === undefined) {
     try {
       const mod = await import(pathToFileURL(p).href)
-      lazyLoaded[name] = mod[`${name}Channel`] ?? Object.values(mod).find((v) => v !== null && typeof v === 'object' && v.id === name)
+      // monkeycode.mjs 一个文件导出两个站点渠道
+      if (name === 'monkeycode') {
+        lazyLoaded[name] = mod.monkeycodeChannel
+        lazyLoaded['monkeycode-intl'] = mod.monkeycodeIntlChannel
+      } else {
+        lazyLoaded[name] = mod[`${name}Channel`] ?? Object.values(mod).find((v) => v !== null && typeof v === 'object' && v.id === name)
+      }
     } catch { /* 加载失败按不存在处理 */ }
   }
 }
@@ -92,7 +103,10 @@ const CHANNELS = [
   ...(lazyLoaded.doubaowork ? [lazyLoaded.doubaowork] : []),
   ...(lazyLoaded.dola ? [lazyLoaded.dola] : []),
   ...(lazyLoaded.qiniu ? [lazyLoaded.qiniu] : []),
-  autoclawChannel, autoclawCnChannel, loomyChannel, monkeycodeChannel, monkeycodeIntlChannel,
+  ...(lazyLoaded.loomy ? [lazyLoaded.loomy] : []),
+  ...(lazyLoaded.monkeycode ? [lazyLoaded.monkeycode] : []),
+  ...(lazyLoaded['monkeycode-intl'] ? [lazyLoaded['monkeycode-intl']] : []),
+  autoclawChannel, autoclawCnChannel,
 ]
 
 /** 供应商 id / 显示名（一个渠道一个供应商）。 */
