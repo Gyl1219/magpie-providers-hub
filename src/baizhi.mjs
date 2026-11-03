@@ -140,7 +140,7 @@ async function fetchCatalog(credential) {
     const r = await fetch(`${API_BASE}${MODELS_PATH}`, {
       headers: {
         Accept: 'application/json',
-        'x-api-key': credential.access_token,
+        'x-api-key': partsOf(credential).key,
         'anthropic-version': ANTHROPIC_VERSION,
       },
       signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
@@ -247,7 +247,7 @@ async function chat(credential, { body, signal }) {
     headers: {
       'content-type': 'application/json',
       accept: payload.stream === true ? 'text/event-stream' : 'application/json',
-      'x-api-key': credential.access_token,
+      'x-api-key': partsOf(credential).key,
       'anthropic-version': ANTHROPIC_VERSION,
     },
     body: JSON.stringify(payload),
@@ -329,8 +329,7 @@ async function platformRequest(path, cookie, init = {}) {
   return { ok: true, data: parsed.data, status: response.status }
 }
 
-const hasConsoleSession = (credential) =>
-  typeof credential?.session_cookie === 'string' && credential.session_cookie.length > 0
+const hasConsoleSession = (credential) => partsOf(credential).cookie !== ''
 
 const readNumber = (record, key) => {
   const n = Number(record?.[key])
@@ -342,7 +341,7 @@ const readNumber = (record, key) => {
  * 上游实测 9821 → 98.21、23505 → 235.05 逐位吻合。
  */
 async function fetchWallet(credential) {
-  const result = await platformRequest(WALLET_BALANCE_PATH, credential.session_cookie)
+  const result = await platformRequest(WALLET_BALANCE_PATH, partsOf(credential).cookie)
   if (!result.ok) return { ok: false, error: result.error }
   const data = result.data
   const availableCents = readNumber(data, 'available_credit_cents')
@@ -561,25 +560,33 @@ async function checkin(credential) {
 
 // ── 渠道对象 ────────────────────────────────────────────────────────────
 
+/**
+ * 粘贴串归一：`sk-…` 或 `sk-…|控制台cookie串` → { key, cookie }。
+ * keyField: 'access_token' ⇒ magpie 把整段粘贴原文放进 credential.access_token，
+ * 渠道侧在此拆分（避免登录表单变成四格——qiniu 的真机教训）。
+ */
+function partsOf(credential) {
+  const raw = String(credential?.access_token ?? '').trim()
+  const pipe = raw.indexOf('|')
+  const key = (pipe >= 0 ? raw.slice(0, pipe) : raw).trim()
+  const cookie = (pipe >= 0 ? raw.slice(pipe + 1) : credential?.session_cookie ?? '').trim()
+  return { key, cookie }
+}
+
 export const baizhiChannel = {
   id: CHANNEL_ID,
   displayName: DISPLAY_NAME,
   fallbackModels: FALLBACK_MODELS,
-  // 粘贴 sk- Key（可附控制台 cookie：`sk-…|cookie串`——高级用法，见 README）
-  async apiAuth(raw) {
-    const text = String(raw ?? '').trim()
-    const pipe = text.indexOf('|')
-    const key = (pipe >= 0 ? text.slice(0, pipe) : text).trim()
-    const cookie = pipe >= 0 ? text.slice(pipe + 1).trim() : ''
-    if (!/^sk-[A-Za-z0-9]{16,}$/.test(key)) {
-      throw new Error('百智云凭据应以 sk- 开头（大模型商店生成的 API Key）；可选在末尾用「|」接控制台 cookie 以显示积分')
-    }
-    return {
-      access_token: key,
-      ...(cookie !== '' ? { session_cookie: cookie } : {}),
-    }
+  /**
+   * 粘贴型登录：只有 API Key 一格（与 qiniu 同款轻形态）。
+   * 高级用法：粘贴原文末尾用「|」接控制台 cookie（`sk-…|sl-session=…; baizhi_session=…`）
+   * 直通积分面板与每日签到。
+   */
+  apiAuth: {
+    label: '粘贴百智云 API Key',
+    placeholder: 'sk-…（模型商店生成；可选「|控制台cookie」直通积分）',
+    keyField: 'access_token',
   },
-  loginMethods: [{ label: '粘贴 API Key（sk-…；控制台 cookie 可选）' }],
   // 静态 Key：无 refresh 端点（诚实标记，与上游同口径）
   async refresh() {
     throw new Error('百智云无自动续期：API Key 长期有效，401 时请重新粘贴')

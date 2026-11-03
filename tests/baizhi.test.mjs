@@ -244,11 +244,17 @@ test('签到 claimed:false 且钱包未确认 → failed（不静默谎报已领
 
 // ── apiAuth / 过期判据 ──────────────────────────────────────────────────
 
-test('apiAuth：sk- 校验；「|」后接控制台 cookie', async () => {
-  const cred = await baizhiChannel.apiAuth('sk-abcdefghijklmnopqrst|sl-session=S1; baizhi_session=B1')
-  assert.equal(cred.access_token, 'sk-abcdefghijklmnopqrst')
-  assert.equal(cred.session_cookie, 'sl-session=S1; baizhi_session=B1')
-  await assert.rejects(() => baizhiChannel.apiAuth('not-a-key'), /sk-/)
+test('粘贴串归一：`sk-…|cookie` 直通积分面板（keyField: access_token 原文进槽）', async () => {
+  const stub = stubFetch([{
+    match: '/api/v1/user/wallet/balance',
+    respond: () => json({ code: 0, data: { available_credit_cents: 23505, temporary_credit_cents: 9821, permanent_credit_cents: 13684, frozen_credit_cents: 0, daily_temporary_credit_claimed: false } }),
+  }])
+  try {
+    // magpie 把整段粘贴原文放进 credential.access_token；渠道侧拆出 cookie
+    const rows = await baizhiChannel.usage({ access_token: 'sk-abcdefghijklmnopqrst|sl-session=S1; baizhi_session=B1' })
+    assert.equal(stub.calls[0].headers.cookie, 'sl-session=S1; baizhi_session=B1', '「|」后的 cookie 被拆出使用')
+    assert.equal(rows.length, 2)
+  } finally { stub.restore() }
 })
 
 test('expired：静态 Key 恒不过期（「未知」≠「已过期」，401 能识别）', () => {
