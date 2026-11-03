@@ -42,6 +42,7 @@ import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './autoclaw.mjs'
+import { CHANNEL_ICONS } from './icons.mjs'
 
 // ── 按需加载的渠道（发布包里没有对应文件，本机有才加载）────────────────
 // ⚠️ v0.9.1 起只随包发布 registry 已登记（或已过审差别）的渠道：
@@ -1039,6 +1040,11 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       provider: PROVIDER,
       // magpie 在到期前 LEAD 调 refresh（多账号时按各账号自己的 auth 调）
       refreshLead: REFRESH_LEAD_MS,
+
+      // 供应商专属图标（host.js iconOf 先读渠道的 icon，回落包 manifest 的
+      // magpie.icon）：各厂商 favicon → 64px PNG data URI（src/icons.mjs）。
+      // 没收录的渠道（dola）不设 → 回落 hub 图标。
+      ...(CHANNEL_ICONS[channel.id] ? { icon: CHANNEL_ICONS[channel.id] } : {}),
 
       // 本供应商唯一的登录入口（一个渠道一个供应商）。⚠️ 约定（对齐社区插件）：
       // authorize() 必须**立刻**返回 { url, method, callback } —— 在这里 await
