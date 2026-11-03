@@ -270,7 +270,8 @@ test('供应商 id / 显示名映射：hub- 前缀 + 中文名', () => {
   assert.ok(Object.values(byId).every((name) => typeof name === 'string' && name.length > 0))
   // 已删渠道的 provider id 不许再出现
   // ⚠️ hub-autoclaw / hub-autoclaw-cn 已在 v0.6.x 重新实现（粘贴 + 读桌面端），不在此列
-  for (const gone of ['hub-officeace', 'hub-loomy', 'hub-minimaxintl']) {
+  // ⚠️ hub-loomy 已于 v0.8.0 回归（微信扫码 = #614 差异），不在此列
+  for (const gone of ['hub-officeace', 'hub-minimaxintl']) {
     assert.equal(byId[gone], undefined, `${gone} 已从包里删除`)
   }
 })

@@ -57,7 +57,8 @@ test('每个注册渠道都实现了 beginLogin', async () => {
   }
   // 已删渠道不许再出现在聚合层（PR #502 审核：重叠 + 敏感能力，整个删掉）
   // ⚠️ autoclaw / autoclaw-cn 已于 v0.6.x 重新实现（粘贴 + 可选读桌面端），不在此列
-  for (const gone of ['officeace', 'autoclawintl', 'loomy', 'minimaxintl']) {
+  // ⚠️ loomy 已于 v0.8.0 回归（微信扫码差异），不在此列
+  for (const gone of ['officeace', 'autoclawintl', 'minimaxintl']) {
     assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
   }
 })

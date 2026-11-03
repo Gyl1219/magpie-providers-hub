@@ -16,12 +16,12 @@ Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**�
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个插件，七条供应商
+## 形态：一个插件，八条供应商
 
-**装一次，Magpie 里出现七条供应商**，一个渠道一条：
+**装一次，Magpie 里出现八条供应商**，一个渠道一条：
 
 ```
-hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn
+hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn   hub-loomy
 ```
 
 - 一个 git 仓库 / 一个 npm 包 / 一条安装命令 —— provider id 不是包，插件包可以注册任意多个
@@ -73,6 +73,7 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 | MagiCrew（国际） | `hub-magicrew-intl` | MagiCrew 国际版（magicrew.ai） | 同上（国际站同协议） | 同上 | ✅ 同左 |
 | `autoclaw` | `hub-autoclaw` | AutoClaw（智谱澳龙，国际版） | 读取桌面端登录态 / 粘贴 accessToken+refreshToken | `/agent-assetmgr` + 内置快照 | ✅ refresh_token（⚠️ 一次性轮换，续期落槽） |
 | `autoclaw-cn` | `hub-autoclaw-cn` | AutoClaw（智谱澳龙，国内版） | 同上（国内站同协议） | 同上 | ✅ 同左 |
+| `loomy` | `hub-loomy` | Loomy（讯飞） | **微信扫码**（独有）/ 短信验证码 / 粘贴 session | `/api/v1/models` + 内置快照 | ❌ 无 token 续期（会话 14 天） |
 
 ### autoclaw / autoclaw-cn（AutoClaw 国际版 / 国内版）
 
@@ -100,6 +101,22 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 
 协议参考：对话/续期/模型配置端点来自 [iJetLi/dsh-providers-hub](https://github.com/iJetLi/dsh-providers-hub)
 的实测实现；钱包与批次分档端点/头组合来自社区 `opencode-autoclaw-auth` 的公开实现。
+
+### loomy（讯飞）
+
+**v0.8.0 回归**（v0.5.0 因与社区插件重叠删除）。与社区 `opencode-loomy-auth` 的差别
+（#614 要求写明的，两者读同一账号的积分）：
+
+- **微信扫码登录**：讯飞官方微信 OAuth（长轮询拿 code → 绑定/换 session），
+  装了客户端与否都无所谓——绿标包**没有**这条路（只有短信验证码 + 粘贴 session）；
+- 短信验证码 / 粘贴 session：绿标包也有；
+- 会话 14 天、无 refresh 端点（诚实标记，过期重新登录）；双积分钱包
+  （永久 + 每日 5000）分开计算，每日池带北京午夜重置点；签到
+  alreadyProcessed 如实报 claimed（不是 done）。
+
+微信流程细节：二维码内联渲染（data URL）、长轮询状态机
+（405 确认 / 404 已扫 / 403 取消 / 402 过期）、redirect_uri 写死官方地址
+（微信校验域名白名单，它只用于取 uuid，回调页不参与）。
 
 ### astudio
 

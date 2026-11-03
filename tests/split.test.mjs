@@ -57,7 +57,8 @@ test('渠道 ↔ 供应商 id ↔ 插件导出，一一对应（七条必备 + �
   assert.equal(Object.keys(HUB_PLUGINS).length, REGISTERED_CHANNELS.length, '插件导出数必须等于渠道数（删渠道或漏注册都会静默改变供应商数量）')
   // 已删渠道的代码不许再打进包里
   // ⚠️ autoclaw / autoclaw-cn 已于 v0.6.x 重新实现；autoclawintl 仍是删除状态
-  for (const gone of ['officeace', 'autoclawintl', 'loomy', 'minimaxintl']) {
+  // ⚠️ loomy 已于 v0.8.0 回归（微信扫码差异），不在此列
+  for (const gone of ['officeace', 'autoclawintl', 'minimaxintl']) {
     assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
   }
   const seen = new Set()

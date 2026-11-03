@@ -63,7 +63,7 @@ test('渠道对象挂了 checkin；accio 没有签到端点（跳过不占失败
   assert.equal(typeof lobsteraiChannel.checkin, 'function')
   assert.equal(typeof magicrewChannel.checkin, 'function')
   // 已删渠道不许再出现
-  for (const gone of ['officeace', 'minimaxintl', 'loomy']) {
+  for (const gone of ['officeace', 'minimaxintl']) {
     assert.equal(REGISTERED_CHANNELS.some((c) => c.id === gone), false, `${gone} 已从包里删除`)
   }
 })

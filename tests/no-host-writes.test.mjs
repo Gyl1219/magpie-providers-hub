@@ -178,7 +178,7 @@ test('自注册能力仍在仓库里（tools/），只是不随包发布', { ski
     assert.ok(runner.includes(`'${id}'`), `条目该带 ${id}`)
   }
   // 已删除的五条渠道不许再出现在条目里
-  for (const id of ['hub-officeace', 'hub-loomy', 'hub-minimaxintl']) {
+  for (const id of ['hub-officeace', 'hub-minimaxintl']) {
     assert.equal(runner.includes(`'${id}'`), false, `已删渠道 ${id} 不该进条目`)
   }
 })

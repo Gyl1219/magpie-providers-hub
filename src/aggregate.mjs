@@ -1,4 +1,4 @@
-// 多供应商层：**一个插件，五条供应商**（每个供应商 = 一个渠道）。
+﻿// 多供应商层：**一个插件，五条供应商**（每个供应商 = 一个渠道）。
 //
 // ## 形态：一个渠道一个供应商（v0.4.0 起）
 //
@@ -42,12 +42,15 @@ import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './autoclaw.mjs'
+import { loomyChannel } from './loomy.mjs'
 
 // ── 按需加载的渠道（发布包里没有对应文件，本机有才加载）────────────────
 // ⚠️ v0.7.1 起只随包发布 registry 已登记（或已过审差别）的渠道：
 //   lingxi（作者要求私有）、doubaowork / dola / qiniu（尚未各自过审，等独立 PR）。
 //   加载模式：existsSync + 动态 import，文件不在就静默跳过，不拖垮插件。
 const lazyChannels = { lingxi: './lingxi.mjs', doubaowork: './doubaowork.mjs', dola: './dola.mjs', qiniu: './qiniu.mjs' }
+// loomy 已过审（#652 差异成立），随包发布：静态导入
+// （占位注释，loomy 在下面静态导入区）
 const lazyLoaded = {}
 for (const [name, rel] of Object.entries(lazyChannels)) {
   const p = fileURLToPath(new URL(rel, import.meta.url))
@@ -88,7 +91,7 @@ const CHANNELS = [
   ...(lazyLoaded.doubaowork ? [lazyLoaded.doubaowork] : []),
   ...(lazyLoaded.dola ? [lazyLoaded.dola] : []),
   ...(lazyLoaded.qiniu ? [lazyLoaded.qiniu] : []),
-  autoclawChannel, autoclawCnChannel,
+  autoclawChannel, autoclawCnChannel, loomyChannel,
 ]
 
 /** 供应商 id / 显示名（一个渠道一个供应商）。 */

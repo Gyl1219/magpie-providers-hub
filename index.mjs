@@ -1,4 +1,4 @@
-// magpie / OpenCode 插件 — DSH Providers Hub 渠道的独立实现。
+﻿// magpie / OpenCode 插件 — DSH Providers Hub 渠道的独立实现。
 //
 // 原项目：https://github.com/iJetLi/dsh-providers-hub ｜ 作者：JetLi（https://github.com/iJetLi）
 // 本仓库是它的**第三方 Magpie 适配版本**，不是原项目官方发布。
@@ -43,6 +43,7 @@ import { accioChannel } from './src/accio.mjs'
 import { lobsteraiChannel } from './src/lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './src/magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './src/autoclaw.mjs'
+import { loomyChannel } from './src/loomy.mjs'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -56,6 +57,7 @@ import { dirname, join } from 'node:path'
  */
 const here = dirname(fileURLToPath(import.meta.url))
 const lazy = {}
+// loomy 已随包发布（#652 差异成立）：静态导入，不再按需
 for (const name of ['lingxi', 'doubaowork', 'dola', 'qiniu']) {
   const file = join(here, 'src', `${name}.mjs`)
   if (existsSync(file)) {
@@ -78,6 +80,7 @@ export const HubQiniuPlugin = lazy.qiniu ? makeHubPlugin(lazy.qiniu.qiniuChannel
 // 同一渠道的两个站点（国际 / 国内），命名跟 registry 的 opencode-autoclaw-auth 对齐
 export const HubAutoclawPlugin = makeHubPlugin(autoclawChannel)
 export const HubAutoclawCnPlugin = makeHubPlugin(autoclawCnChannel)
+export const HubLoomyPlugin = makeHubPlugin(loomyChannel)
 
 /** provider id → 插件函数（测试用；**对象**导出不会被 magpie 当插件）。 */
 export const HUB_PLUGINS = {
@@ -92,6 +95,7 @@ export const HUB_PLUGINS = {
   ...(HubQiniuPlugin === undefined ? {} : { HubQiniuPlugin }),
   HubAutoclawPlugin,
   HubAutoclawCnPlugin,
+  HubLoomyPlugin,
 }
 
 // ⚠️ 只导出**数组/对象**这类非函数值（测试用）。函数导出 = 一个供应商，别乱加。
