@@ -63,7 +63,8 @@ const SITES = {
     gatewayBaseUrl: 'https://proxy.monkeycode-ai.com/v1',
     gatewayMessagesPath: '/messages',
     platformBaseUrl: 'https://monkeycode-ai.com',
-    apiKeysPath: '/api/v1/users/api-keys',
+    // ⚠️ 真实路径（经 char-code 还原；上游源文件里被占位掩码，猜值会 404）
+    apiKeysPath: '/api/v1/users/ohmyagent/api-keys',
     anthropicVersion: ANTHROPIC_VERSION,
     /** 平台请求超时（product.catalogTimeoutMs）。 */
     timeoutMs: 10_000,
@@ -74,7 +75,8 @@ const SITES = {
     gatewayBaseUrl: 'https://proxy.monkeycode-ai.net/v1',
     gatewayMessagesPath: '/messages',
     platformBaseUrl: 'https://monkeycode-ai.net',
-    apiKeysPath: '/api/v1/users/api-keys',
+    // ⚠️ 真实路径（经 char-code 还原；上游源文件里被占位掩码，猜值会 404）
+    apiKeysPath: '/api/v1/users/ohmyagent/api-keys',
     anthropicVersion: ANTHROPIC_VERSION,
     // ⚠️ 国际站契约同构但上游未真机验证（他们只有国内账号）——若 404/字段不同，
     //   改这一个常量即可，不动逻辑。
