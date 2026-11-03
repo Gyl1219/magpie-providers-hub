@@ -252,21 +252,20 @@ OpenAI↔Anthropic 翻译、目录口径、设备码认证、额度到期分档�
 ## 结构
 
 ```
-index.mjs                  十个具名插件导出（每个渠道一个供应商）+ HUB_PLUGINS
+index.mjs                  七个具名插件导出（每个渠道一个供应商）+ HUB_PLUGINS
 src/aggregate.mjs          供应商工厂：makeHubPlugin(channel)、模块级快照/sweep/迁移
-src/officeace.mjs          华为云渠道
 src/astudio.mjs            讯飞渠道
-src/minimaxintl.mjs        MiniMax 国际版渠道（设备码 + PKCE）
-src/minimax-transport.mjs  MiniMax 传输层（307 保凭据跟随、传输重试、地理路由）
-src/minimax-bridge.mjs     OpenAI↔Anthropic 翻译桥（含 SSE）
 src/accio.mjs              Accio（阿里）渠道（Gemini 风格信封 + 工具分片合并）
-src/autoclaw.mjs           AutoClaw 国内+国际渠道（MD5 签名 / 406 白名单 / 桌面端凭据导入）
-src/loomy.mjs              Loomy（讯飞）渠道（双认证头 / 短信三步流 / 每日额度签到）
+src/autoclaw.mjs           AutoClaw 国内+国际渠道（MD5 签名 / 406 白名单 / 桌面端凭据导入 / 钱包批次分档）
 src/lobsterai.mjs          LobsterAI（有道）渠道（信封 + 裸 SSE 对话 / 门户 OAuth 回调）
 src/magicrew.mjs           超级麦吉国内+国际渠道（三段式凭据 / 积分到期分档 / 签到与新手任务）
 src/magicrew-browser.mjs   超级麦吉 CDP 浏览器登录（复用本机 Edge/Chrome 登录态）
 src/shared.mjs             凭据存取、信封解析、到期分档
-tests/                     node --test
+src/dola.mjs               Dola 渠道（按需加载，不随包发布）
+src/doubaowork.mjs         豆包工作渠道（按需加载，不随包发布）
+src/qiniu.mjs              七牛云渠道（按需加载，不随包发布）
+src/lingxi.mjs             WPS 灵犀渠道（按需加载，私有，不随包发布）
+tests/                     node --test（setup.mjs 沙盒 + 按渠道用例）
 NOTICE.md                  协议来源与边界声明
 ```
 

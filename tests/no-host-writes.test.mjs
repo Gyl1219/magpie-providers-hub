@@ -169,7 +169,7 @@ test('红线⑤：读账号槽只读本插件自己的槽（别人的 token 不�
   assert.equal(snap.includes('OTHER_PLUGIN_SECRET_TOKEN'), false, '快照不得带上别人的凭据')
 })
 
-test('自注册能力仍在仓库里（tools/），只是不随包发布', () => {
+test('自注册能力仍在仓库里（tools/），只是不随包发布', { skip: !existsSync(join(ROOT, 'tools', 'self-register.mjs')) ? '发布包内无 tools/' : false }, () => {
   assert.equal(existsSync(join(ROOT, 'tools', 'self-register.mjs')), true)
   const runner = readFileSync(join(ROOT, 'tools', 'register-local.mjs'), 'utf8')
   assert.match(runner, /magpie-providers-hub/)

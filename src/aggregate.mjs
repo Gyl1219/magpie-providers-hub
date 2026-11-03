@@ -701,6 +701,33 @@ function checkinTallyOf() {
 }
 
 /**
+ * 补 `amount`（已用量）：上游只给 `limit` + `used` 时反推出来。
+ *
+ * ⚠️ 真机（2026-11-03，CodeArts 的「基础积分包」）：
+ *   上游那条窗口只有 `limit: 500` 和 `used: 0`，**没有 `amount`**。
+ *   magpie 的卡片算法是 `剩余 = limit - amount`，`amount` 缺失按 0 算 ——
+ *   于是永远显示「500 / 500 · 100% 剩余」，哪怕这 500 早就用光了。
+ *   （上游把 `package_credit_remain` 缺失转成了 NaN，JSON 序列化后成了 null。）
+ *
+ * 所以这里按 `used` 反推：`amount = limit * used / 100`。
+ * 只在 amount 确实缺失、而 limit 与 used 都可用时才补；已有 amount 一律不动
+ * （它是权威值，某些渠道语义是"剩余批大小"，不能被覆盖）。
+ */
+function normalizeWindowAmounts(rows) {
+  return rows.map((w) => {
+    if (w === null || typeof w !== 'object') return w
+    const hasAmount = typeof w.amount === 'number' && Number.isFinite(w.amount)
+    const limit = Number(w.limit)
+    const used = Number(w.used)
+    if (hasAmount) return w
+    if (!Number.isFinite(limit) || limit <= 0) return w
+    if (!Number.isFinite(used)) return w
+    const amount = Math.round(((limit * used) / 100) * 100) / 100
+    return { ...w, amount }
+  })
+}
+
+/**
  * 一个渠道的用量窗口（有 usage() 出分桶，没有出登录状态条；失败带原因）。
  *
  * ⚠️ 不加渠道名前缀：一个供应商卡片只有一个渠道，前缀是重复信息（旧聚合形态下
@@ -723,7 +750,7 @@ async function usageWindowsOf(channel, credential, extras = {}) {
         // 只能由用户声明，上游没有任何「剩余额度」接口（见 src/qiniu.mjs）。
         options: extras.options ?? channelOptions.get(channel.id) ?? {},
       })
-      if (Array.isArray(rows) && rows.length > 0) return tierSummarize(rows)
+      if (Array.isArray(rows) && rows.length > 0) return tierSummarize(normalizeWindowAmounts(rows))
     } catch (error) {
       return [{
         name: channel.displayName,

@@ -64,7 +64,7 @@ Raccoon、MiniMax Code、ZCode、Gemini），故这些**不在**本插件内 —
 - **授权**：该 PR 于 2026-11-01 由作者 lakegan 本人以「Superseded by
   magpie-providers-hub (hub-qiniu)」关闭，并明确授权按 MIT 复用、署名引用
   `lakegan/opencode-qiniu-auth`、保留 LICENSE 原文（原文见
-  [LICENSES/opencode-qiniu-auth-MIT.txt](./LICENSES/opencode-qiniu-auth-MIT.txt)）。
+  [LICENSES/opencode-qiniu-auth-MIT.txt（仓库内文件；qiniu 渠道自 0.7.2 起不随包发布，待独立 PR）](./LICENSES/opencode-qiniu-auth-MIT.txt（仓库内文件；qiniu 渠道自 0.7.2 起不随包发布，待独立 PR）)）。
 - **移植范围**：模型命名 / 能力位启发式 / 排序（上游 `lib/models.mjs`）、目录快照
   （`lib/catalog.mjs`）、AK/SK 签名（`lib/sign.mjs`）、今日用量口径（`lib/usage.mjs`）。
 - **本仓库新增**：magpie「一渠道一供应商」形态下的粘贴型登录（`apiAuth` + 可选 AK/SK 问项）、
