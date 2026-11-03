@@ -1044,7 +1044,11 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
       // 供应商专属图标（host.js iconOf 先读渠道的 icon，回落包 manifest 的
       // magpie.icon）：各厂商 favicon → 64px PNG data URI（src/icons.mjs）。
       // 没收录的渠道（dola）不设 → 回落 hub 图标。
-      ...(CHANNEL_ICONS[channel.id] ? { icon: CHANNEL_ICONS[channel.id] } : {}),
+      // 渠道对象可自带 icon（私有渠道如 lingxi 把图标放自己文件里，永不进发布包）；
+      // 否则用共享表（CHANNEL_ICONS），都没有就回落插件 magpie.icon。
+      ...(typeof channel.icon === 'string' && channel.icon
+        ? { icon: channel.icon }
+        : CHANNEL_ICONS[channel.id] ? { icon: CHANNEL_ICONS[channel.id] } : {}),
 
       // 本供应商唯一的登录入口（一个渠道一个供应商）。⚠️ 约定（对齐社区插件）：
       // authorize() 必须**立刻**返回 { url, method, callback } —— 在这里 await
