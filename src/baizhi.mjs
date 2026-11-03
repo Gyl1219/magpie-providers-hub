@@ -67,6 +67,8 @@ const WALLET_USAGE_PATH = '/api/v1/user/wallet/app-credit-usage'
 const CAPTCHA_CHALLENGE_PATH = '/api/v1/public/captcha/challenge'
 const CAPTCHA_REDEEM_PATH = '/api/v1/public/captcha/redeem'
 const DAILY_CREDIT_PATH = '/api/v1/user/wallet/daily-temporary-credit'
+/** 商店域的 Key 管理页（浏览器登录换 Key 时现开这个页面取同源 cookie）。 */
+const CONSOLE_KEYS_PAGE = 'https://ai-models.app.baizhi.cloud/console/keys'
 const ANTHROPIC_VERSION = '2023-06-01'
 const REQUEST_TIMEOUT_MS = 60_000
 const CATALOG_TIMEOUT_MS = 10_000
@@ -571,7 +573,6 @@ async function checkin(credential) {
 // 控制台（baizhi.cloud）用户页的「API KEY」只发 `bzy_` 前缀（15 位），拿它打
 // 模型网关**恒 401「API Key 无效」**（上游 2026-11-03 审计更正 + 真机 2026-11-04 复现）。
 
-const CONSOLE_KEYS_PATH = '/api/console/api-keys'
 const CONSOLE_BASE = 'https://ai-models.app.baizhi.cloud'
 const LOGIN_URL = 'https://baizhi.cloud/console/user'
 const LOGIN_WINDOW_MS = 4 * 60_000
@@ -580,9 +581,25 @@ const KEY_GRACE_MS = 6 * 60_000
 
 /** 经 CDP Storage.getCookies 读控制台两枚 HttpOnly cookie（页面 evaluate 读不到）。 */
 async function readConsoleCookies(session) {
-  const pages = await fetch(`http://127.0.0.1:${session.port}/json`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json()).catch(() => [])
-  const target = (Array.isArray(pages) ? pages : []).find((t) => t.type === 'page' && String(t.url ?? '').includes('baizhi.cloud') && t.webSocketDebuggerUrl)
-  if (!target) return undefined
+  const cookies = await cdpAllCookies(session)
+  if (cookies === undefined) return undefined
+  let slSession
+  let baizhiSession
+  for (const entry of cookies) {
+    if (typeof entry?.value !== 'string' || entry.value.length === 0) continue
+    // ⚠️ domain **精确** baizhi.cloud：同域下 ai-models.app / agent-toolkit.app 还有
+    //    别的 sl-session，后缀包含判据会随机拿到网关那枚（上游实测的坑）。
+    const domain = String(entry.domain ?? '').replace(/^\./, '').toLowerCase()
+    if (domain !== 'baizhi.cloud') continue
+    if (entry.name === 'sl-session') slSession = entry.value
+    else if (entry.name === 'baizhi_session') baizhiSession = entry.value
+  }
+  if (slSession === undefined || baizhiSession === undefined) return undefined
+  return `sl-session=${slSession}; baizhi_session=${baizhiSession}`
+}
+
+/** 单页 CDP 调用（连页面 target 的 WS，发一条方法收一条结果）。 */
+async function cdpSend(target, method, params) {
   const ws = new WebSocket(target.webSocketDebuggerUrl)
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('CDP 连接超时')), 8000)
@@ -590,8 +607,8 @@ async function readConsoleCookies(session) {
     ws.addEventListener('error', () => { clearTimeout(t); reject(new Error('CDP 连接失败')) })
   })
   try {
-    const reply = await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('CDP 求值超时')), 8000)
+    return await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('CDP 求值超时')), 15_000)
       ws.addEventListener('message', (ev) => {
         let msg
         try { msg = JSON.parse(ev.data) } catch { return }
@@ -599,33 +616,46 @@ async function readConsoleCookies(session) {
         clearTimeout(t)
         msg.error ? reject(new Error(msg.error.message || 'CDP 错误')) : resolve(msg.result)
       })
-      ws.send(JSON.stringify({ id: 1, method: 'Storage.getCookies', params: {} }))
+      ws.send(JSON.stringify({ id: 1, method, params }))
     })
-    const cookies = reply?.cookies
-    if (!Array.isArray(cookies)) return undefined
-    let slSession
-    let baizhiSession
-    for (const entry of cookies) {
-      if (typeof entry?.value !== 'string' || entry.value.length === 0) continue
-      // ⚠️ domain **精确** baizhi.cloud：同域下 ai-models.app / agent-toolkit.app 还有
-      //    别的 sl-session，后缀包含判据会随机拿到网关那枚（上游实测的坑）。
-      const domain = String(entry.domain ?? '').replace(/^\./, '').toLowerCase()
-      if (domain !== 'baizhi.cloud') continue
-      if (entry.name === 'sl-session') slSession = entry.value
-      else if (entry.name === 'baizhi_session') baizhiSession = entry.value
-    }
-    if (slSession === undefined || baizhiSession === undefined) return undefined
-    return `sl-session=${slSession}; baizhi_session=${baizhiSession}`
   } finally {
     try { ws.close() } catch { /* ignore */ }
   }
 }
 
-/** 控制台登录态换 sk- 推理 Key（大模型商店域，cookie 认证）。 */
-async function exchangeKey(cookie) {
-  const result = await platformRequest(CONSOLE_KEYS_PATH, cookie, { baseUrl: CONSOLE_BASE })
-  if (!result.ok) return { ok: false, error: result.error }
-  const items = Array.isArray(result.data?.items) ? result.data.items : []
+/** 浏览器全量 cookie（Storage.getCookies，跨域都在）。 */
+async function cdpAllCookies(session) {
+  const pages = await fetch(`http://127.0.0.1:${session.port}/json`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json()).catch(() => [])
+  const target = (Array.isArray(pages) ? pages : []).find((t) => t.type === 'page' && t.webSocketDebuggerUrl)
+  if (!target) return undefined
+  const reply = await cdpSend(target, 'Storage.getCookies', {}).catch(() => undefined)
+  return Array.isArray(reply?.cookies) ? reply.cookies : undefined
+}
+
+/**
+ * 在登录浏览器里**同源**调大模型商店的 Key 接口（浏览器自动带 ai-models.app 域
+ * 的 cookie——跨域手工拼会 404 Not Found，真机 2026-11-04）。
+ * 没有该域的页面 target 就现开一个再等它就绪。
+ */
+async function exchangeKeyViaBrowser(session) {
+  const pages = await fetch(`http://127.0.0.1:${session.port}/json`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json()).catch(() => [])
+  let target = (Array.isArray(pages) ? pages : []).find((t) => t.type === 'page' && String(t.url ?? '').includes('ai-models.app.baizhi.cloud') && t.webSocketDebuggerUrl)
+  if (!target) {
+    // 现开一个商店页（复用同一 profile —— 登录态 cookie 同享）
+    const browser = await fetch(`http://127.0.0.1:${session.port}/json/version`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json()).catch(() => undefined)
+    if (browser?.webSocketDebuggerUrl === undefined) return { ok: false, error: '浏览器会话不可用' }
+    await cdpSend(browser, 'Target.createTarget', { url: CONSOLE_KEYS_PAGE }).catch((e) => { throw new Error(`打开商店页失败：${e.message}`) })
+    await new Promise((r) => setTimeout(r, 3000))
+    const fresh = await fetch(`http://127.0.0.1:${session.port}/json`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json()).catch(() => [])
+    target = (Array.isArray(fresh) ? fresh : []).find((t) => t.type === 'page' && String(t.url ?? '').includes('ai-models.app.baizhi.cloud') && t.webSocketDebuggerUrl)
+    if (!target) return { ok: false, error: '商店页未能打开（浏览器窗口可能被关闭）' }
+  }
+  const expr = `fetch('/api/console/api-keys', { headers: { accept: 'application/json' }, credentials: 'include' }).then(r => r.text())`
+  const raw = await cdpSend(target, 'Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true })
+  const text = typeof raw?.result?.value === 'string' ? raw.result.value : ''
+  let parsed
+  try { parsed = JSON.parse(text) } catch { return { ok: false, error: `商店接口返回非 JSON：${text.slice(0, 120)}` } }
+  const items = Array.isArray(parsed?.items) ? parsed.items : []
   for (const item of items) {
     const key = typeof item?.api_key === 'string' ? item.api_key.trim() : ''
     const status = typeof item?.status === 'string' ? item.status : 'active'
@@ -781,7 +811,7 @@ async function beginLogin(openBrowser) {
       setPhase('exchanging', '已读到登录态，正在取推理 Key…')
       const keyDeadline = Date.now() + KEY_GRACE_MS
       for (;;) {
-        const exchange = await exchangeKey(cookie).catch((error) => ({ ok: false, error: error?.message ?? String(error) }))
+        const exchange = await exchangeKeyViaBrowser(session).catch((error) => ({ ok: false, error: error?.message ?? String(error) }))
         if (exchange.ok) {
           setPhase('done', '登录成功，可以关闭此页面')
           return settle(true, {
