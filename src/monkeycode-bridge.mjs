@@ -311,6 +311,13 @@ export function buildAnthropicPayload(body) {
     ? body.stop.filter((s) => typeof s === 'string' && s !== '')
     : (typeof body?.stop === 'string' && body.stop !== '' ? [body.stop] : [])
 
+  // ⚠️⚠️ system **必须非空**（2026-11-04 真机实测矩阵）：无 system / 显式空 system
+  //    的请求一律 403 `{"error":"invalid ohmyagent request"}` —— 服务端的签名校验
+  //    要求 prompt 非空（①②③⑦ 全 403，④ 非空 system + 正确签名 = 200）。
+  //    上游桌面端永远发 system 所以从没踩过；OpenAI 形状的请求没有 system 很常见，
+  //    注入一条中性系统行（签名同步覆盖它，保证一致）。
+  const finalSystem = systemText !== '' ? systemText : 'You are a helpful assistant.'
+
   const payload = {
     model,
     // ⚠️ 上游所有适配器只走流式（消费与错误处理都按 SSE 设计），恒 true；
@@ -319,7 +326,7 @@ export function buildAnthropicPayload(body) {
     messages: serializeMessages(Array.isArray(body?.messages) ? body.messages : []),
     max_tokens: maxTokens,
   }
-  if (systemText !== '') payload.system = systemText
+  payload.system = finalSystem
   if (typeof body?.temperature === 'number' && Number.isFinite(body.temperature)) payload.temperature = body.temperature
   if (stop.length > 0) payload.stop_sequences = stop
   if (tools.length > 0) payload.tools = tools

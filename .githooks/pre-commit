@@ -1,0 +1,16 @@
+#!/bin/sh
+# pre-commit 门禁：page/snapshot.js 必须是占位模板（防实时快照进仓库）。
+# 启用：git config core.hooksPath .githooks
+# 背景：#502（0.5.0）与 #652（0.7.1）两次真实泄露都走的这条路 —— magpie 开着时
+# 它每 5 分钟把真实快照写回 page/snapshot.js，git add -A 就会把余额/登录态提交进仓库。
+f="page/snapshot.js"
+if [ -f "$f" ]; then
+  if ! grep -q '"channels":\[\]' "$f"; then
+    echo ""
+    echo "✖ 拒绝提交：page/snapshot.js 含实时快照数据（不是空模板）。"
+    echo "  处理：git checkout -- page/snapshot.js 后重试。"
+    echo "  （构建机 magpie 还开着时它会每 5 分钟写回 —— 先 plugin off 再提交）"
+    exit 1
+  fi
+fi
+exit 0

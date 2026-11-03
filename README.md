@@ -16,12 +16,20 @@ Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**�
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个插件，十条供应商
+## 形态：一个插件，七条随包供应商（+ 本机按需渠道）
 
-**装一次，Magpie 里出现十条供应商**，一个渠道一条：
+**装一次，Magpie 里出现七条供应商**，一个渠道一条：
 
 ```
-hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn   hub-loomy   hub-monkeycode   hub-monkeycode-intl
+hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn
+```
+
+另有四条**本机按需渠道**（灵犀 / 豆包工作 / Dola / 七牛云）与两条**待审渠道**
+（Loomy / MonkeyCode，见下方各节）：源码在仓库里、本机存在就会加载，但**不随 npm 包
+发布、未登记进 registry** —— 各自的差异说明审过之后再随包/登记（#652 评审定）。
+```
+本机按需：hub-lingxi   hub-doubaowork   hub-dola   hub-qiniu
+待审：     hub-loomy   hub-monkeycode   hub-monkeycode-intl
 ```
 
 - 一个 git 仓库 / 一个 npm 包 / 一条安装命令 —— provider id 不是包，插件包可以注册任意多个
@@ -199,7 +207,7 @@ PUT 一次轮换一次（一次性，必须串行 + 立即落盘）**。登录�
 
 ```bash
 magpie plugin add <本仓库路径或 github:Gyl1219/magpie-providers-hub>
-magpie plugin login hub-astudio       # 登录某个渠道（五条供应商各登各的）
+magpie plugin login hub-astudio       # 登录某个渠道（各登各的）
 ```
 
 模型在选择器里长这样（magpie 自动补供应商名）：`hub-astudio/spark-x`、
