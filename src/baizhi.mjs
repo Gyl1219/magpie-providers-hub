@@ -821,7 +821,8 @@ async function beginLogin(openBrowser) {
           return settle(true, {
             access_token: exchange.key,
             session_cookie: cookie,
-            ...(exchange.name !== undefined ? { nickname: exchange.name } : {}),
+            // 纯数字昵称（商店接口偶发把 id 当 name）不进凭据，显示名宁缺毋滥
+            ...(exchange.name !== undefined && !/^\d+$/.test(exchange.name) ? { nickname: exchange.name } : {}),
           })
         }
         if (Date.now() >= keyDeadline) return settle(false, new Error(exchange.error))
