@@ -1017,16 +1017,42 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
           label,
           async authorize() {
             const started = await channel.beginLogin(openBrowser, {})
-            // 登录前的账号槽状态（accountId → 此前凭据是否已过期）—— 判据见下
-            const preSlots = new Map(
-              readMagpieAuthSlots(PROVIDER)
-                .filter((s) => s.channel === channel.id)
-                .map((s) => [s.accountId, { expired: s.expires !== undefined && s.expires <= Date.now() }]),
+            // 登录前的本渠道账号槽：既判「重复登录是否已过期」，也用于认领旧槽
+            // （昵称缺失时代被写成渠道显示名的那种，见 resolveAccountId）。
+            const ownSlots = readOwnAuthEntries({ providerId: PROVIDER, withValue: true })
+              .filter(({ value }) => value?.channel === channel.id)
+            const preSlots = new Map(ownSlots.map(({ value }) => {
+              const expires = Number(value?.expires)
+              return [
+                typeof value?.accountId === 'string' ? value.accountId : '',
+                { expired: Number.isFinite(expires) && expires > 0 && expires <= Date.now() },
+              ]
+            }))
+            // ⚠️ 昵称缺失时**不能**退化成渠道显示名（真机 2026-11-01，MagiCrew
+            //    国际版）：第一个账号占住「MagiCrew (国际版)」后，第二个账号登录
+            //    也拿不到昵称 ⇒ 撞同一个 accountId ⇒ 被判「账号重复」拒绝写入，
+            //    用户看到的是「登录了但没反应」。
+            //    改法：用组织码（每账号不同、登录后稳定）补后缀；旧槽里同组织码的
+            //    账号认领回旧 id —— 同一账号重新登录原地更新，不制造 magpie 只给
+            //    set 不给 remove、因而删不掉的鬼影槽。
+            const legacyIdsByOrg = new Map(
+              ownSlots
+                .map(({ value }) => [
+                  typeof value?.organizationCode === 'string' ? value.organizationCode.trim() : '',
+                  value?.accountId,
+                ])
+                .filter(([org, id]) => org !== '' && id === channel.displayName),
             )
-            const resolveAccountId = (credential) =>
-              (typeof credential?.nickname === 'string' && credential.nickname !== ''
-                ? credential.nickname
-                : channel.displayName)
+            const resolveAccountId = (credential) => {
+              if (typeof credential?.nickname === 'string' && credential.nickname !== '') {
+                return credential.nickname
+              }
+              const org = typeof credential?.organizationCode === 'string'
+                ? credential.organizationCode.trim()
+                : ''
+              if (org === '') return channel.displayName
+              return legacyIdsByOrg.get(org) ?? `${channel.displayName} #${org}`
+            }
           /** 是否「重复登录一个仍然有效的账号」= 该弹「账号重复」且**不覆盖原槽**。 */
           const isHealthyDuplicate = (credential) => {
             const pre = preSlots.get(resolveAccountId(credential))
