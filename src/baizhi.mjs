@@ -655,7 +655,11 @@ async function exchangeKeyViaBrowser(session) {
   const text = typeof raw?.result?.value === 'string' ? raw.result.value : ''
   let parsed
   try { parsed = JSON.parse(text) } catch { return { ok: false, error: `商店接口返回非 JSON：${text.slice(0, 120)}` } }
-  const items = Array.isArray(parsed?.items) ? parsed.items : []
+  // ⚠️ 信封解包：响应是 {code, data:{items:[…]}}——items 在 data 下（真机 2026-11-04：
+  //   直接读顶层 items 永远为空，误报「没有可用的 sk- 密钥」）
+  const items = Array.isArray(parsed?.data?.items) ? parsed.data.items
+    : Array.isArray(parsed?.items) ? parsed.items
+      : []
   for (const item of items) {
     const key = typeof item?.api_key === 'string' ? item.api_key.trim() : ''
     const status = typeof item?.status === 'string' ? item.status : 'active'
