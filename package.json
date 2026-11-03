@@ -1,6 +1,6 @@
 {
   "name": "magpie-providers-hub",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "description": "magpie-providers-hub 的第三方 Magpie 适配：七条供应商（AStudio / Accio / LobsterAI / MagiCrew×2 / AutoClaw×2），各自登录、额度与开关",
   "type": "module",
   "main": "./index.mjs",
@@ -43,7 +43,9 @@
     "tests/snapshot-isolation.test.mjs",
     "tests/split.test.mjs",
     "tests/usage.test.mjs",
-    "tests/setup.mjs"
+    "tests/setup.mjs",
+    "src/loomy.mjs",
+    "tests/loomy.test.mjs"
   ],
   "keywords": [
     "magpie",
