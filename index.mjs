@@ -43,6 +43,7 @@ import { accioChannel } from './src/accio.mjs'
 import { lobsteraiChannel } from './src/lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './src/magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './src/autoclaw.mjs'
+import { baizhiChannel } from './src/baizhi.mjs'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -82,6 +83,7 @@ export const HubMonkeycodeIntlPlugin = lazy.monkeycode ? makeHubPlugin(lazy.monk
 // 同一渠道的两个站点（国际 / 国内），命名跟 registry 的 opencode-autoclaw-auth 对齐
 export const HubAutoclawPlugin = makeHubPlugin(autoclawChannel)
 export const HubAutoclawCnPlugin = makeHubPlugin(autoclawCnChannel)
+export const HubBaizhiPlugin = makeHubPlugin(baizhiChannel)
 
 /** provider id → 插件函数（测试用；**对象**导出不会被 magpie 当插件）。 */
 export const HUB_PLUGINS = {
@@ -99,6 +101,7 @@ export const HUB_PLUGINS = {
   ...(HubMonkeycodeIntlPlugin === undefined ? {} : { HubMonkeycodeIntlPlugin }),
   HubAutoclawPlugin,
   HubAutoclawCnPlugin,
+  HubBaizhiPlugin,
 }
 
 // ⚠️ 只导出**数组/对象**这类非函数值（测试用）。函数导出 = 一个供应商，别乱加。

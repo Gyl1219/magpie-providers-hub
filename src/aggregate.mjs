@@ -42,6 +42,7 @@ import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './autoclaw.mjs'
+import { baizhiChannel } from './baizhi.mjs'
 import { CHANNEL_ICONS } from './icons.mjs'
 
 // ── 按需加载的渠道（发布包里没有对应文件，本机有才加载）────────────────
@@ -108,6 +109,7 @@ const CHANNELS = [
   ...(lazyLoaded.monkeycode ? [lazyLoaded.monkeycode] : []),
   ...(lazyLoaded['monkeycode-intl'] ? [lazyLoaded['monkeycode-intl']] : []),
   autoclawChannel, autoclawCnChannel,
+  baizhiChannel,
 ]
 
 /** 供应商 id / 显示名（一个渠道一个供应商）。 */

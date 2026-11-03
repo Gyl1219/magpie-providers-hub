@@ -16,9 +16,9 @@ Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**�
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个插件，七条随包供应商（+ 本机按需渠道）
+## 形态：一个插件，八条随包供应商（+ 本机按需渠道）
 
-**装一次，Magpie 里出现七条供应商**，一个渠道一条：
+**装一次，Magpie 里出现八条供应商**，一个渠道一条：
 
 ```
 hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn
@@ -82,6 +82,17 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 | `autoclaw` | `hub-autoclaw` | AutoClaw（智谱澳龙，国际版） | 读取桌面端登录态 / 粘贴 accessToken+refreshToken | `/agent-assetmgr` + 内置快照 | ✅ refresh_token（⚠️ 一次性轮换，续期落槽） |
 | `autoclaw-cn` | `hub-autoclaw-cn` | AutoClaw（智谱澳龙，国内版） | 同上（国内站同协议） | 同上 | ✅ 同左 |
 | `loomy` | `hub-loomy` | Loomy（讯飞） | **微信扫码**（独有）/ 短信验证码 | `/api/v1/models` + 内置快照 | ❌ 无 token 续期（会话 14 天） |
+| `baizhi` | `hub-baizhi` | 百智云（BaiZhiCloud） | 粘贴 API Key（sk-…）| `/api/anthropic/v1/models`（Anthropic 协议） | ❌ 静态 Key 无续期（长期有效） |
+
+### baizhi（百智云）
+
+**Anthropic Messages 协议**渠道（`ai-models.app.baizhi.cloud/api/anthropic`，
+`x-api-key` + `anthropic-version: 2023-06-01`），经共享翻译桥出 OpenAI 响应。
+两套凭据：`sk-` 静态 Key 发消息（长期有效、无 refresh 端点，401 = Key 错/吊销）；
+控制台 cookie（`sl-session` + `baizhi_session`，两枚都要、domain 精确 `baizhi.cloud`）
+读积分与领每日临时积分（Cap PoW 本地求解，`claimed:false` 靠钱包复核定语义）。
+粘贴格式 `sk-…`，高级用法 `sk-…|cookie串` 直通积分面板。已知 15 个模型
+（deepseek-v4 系全 1M 窗口；未知模型不编能力），服务级上下文硬上限 1,048,576。
 
 ### autoclaw / autoclaw-cn（AutoClaw 国际版 / 国内版）
 
