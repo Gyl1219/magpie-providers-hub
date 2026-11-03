@@ -757,7 +757,11 @@ document.getElementById('go').onclick = async () => {
       else if (j.phase === 'exchanging') el.textContent = '已读到会话，正在换取网关 Key…';
       else if (j.phase === 'done') { el.textContent = '登录成功，可以关闭此页面'; return }
       else if (j.phase === 'error') { el.textContent = '浏览器登录失败：' + (j.message || ''); return }
-    } catch (e) { /* 继续轮询 */ }
+    } catch (e) {
+      // 服务端已关闭（settle/超时）—— 页面如实提示，不再显示残留的「等待会话」
+      document.getElementById('status').textContent = '登录会话已结束：请回到 magpie 重新发起登录';
+      return;
+    }
     await new Promise((r) => setTimeout(r, 2000));
   }
 })();
@@ -773,7 +777,9 @@ document.getElementById('go').onclick = async () => {
  *   兑换 401 时必须继续等（isMonkeycodeSessionExpiredError 语义）。
  */
 async function beginLoginFor(site, openBrowser) {
-  const LOGIN_WINDOW_MS = 6 * 60 * 1000
+  // ⚠️ 15 分钟：浏览器登录要用户在官方页完成操作，6 分钟实测不够（真机 2026-11-04
+  //   用户登录到一半窗口到点 → settle(false) 关服务，页面残留「等待会话」）
+  const LOGIN_WINDOW_MS = 15 * 60 * 1000
   let settleOk, settleFail
   const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
   result.catch(() => {})
@@ -805,7 +811,7 @@ async function beginLoginFor(site, openBrowser) {
     if (s !== undefined) await closeSession(s).catch(() => {})
   }
 
-  timer = setTimeout(() => settle(false, new Error(`${site.displayName} 登录超时（6 分钟内未完成）`)), LOGIN_WINDOW_MS)
+  timer = setTimeout(() => settle(false, new Error(`${site.displayName} 登录超时（15 分钟内未完成）`)), LOGIN_WINDOW_MS)
   timer.unref?.()
 
   server = createServer(async (req, res) => {
