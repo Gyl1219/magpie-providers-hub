@@ -1,4 +1,4 @@
-﻿// AutoClaw（智谱澳龙 / OpenClaw 云账号）渠道 —— 两个站点：国际 `hub-autoclaw` / 国内 `hub-autoclaw-cn`。
+// AutoClaw（智谱澳龙 / OpenClaw 云账号）渠道 —— 两个站点：国际 `hub-autoclaw` / 国内 `hub-autoclaw-cn`。
 //
 // 与 registry 里 `@magpie-community/opencode-autoclaw-auth` 的关系（#614 标准）：
 //   **同一渠道的第二入口**，差别是——本渠道除了「粘贴 access/refresh token」，
@@ -23,7 +23,7 @@ import { execFileSync } from 'node:child_process'
 import { createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { expiryBandedWindows } from './shared.mjs'
+import { assignExpiryBands } from './shared.mjs'
 
 // ── 协议常量（照抄上游实测值）─────────────────────────────────────────
 
@@ -433,6 +433,12 @@ async function fetchWalletData(site, accessToken) {
   return { code: json?.code, msg: json?.msg, data: json?.data }
 }
 
+/** 到期日短格式（MM-DD），窗口 display 用。 */
+const fmtMD = (ms) => {
+  const d = new Date(ms)
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 /**
  * 余额 —— **上游 `fetchAutoclawBalanceDetailed` 的完整移植**，不是简化版：
  *
@@ -502,13 +508,61 @@ async function usage(site, credential) {
     packages = [{ name: '奖励积分', remaining: total, expireMs: undefined }]
   }
 
-  // ④ 分档窗口（hub 统一工具；桶名即 label，到期毫秒来自批次）
+  // ④ 分档 + 三段组装（临期指针 / 长期合并 / 永久单独 / 已耗尽折叠）
+  // ⚠️⚠️ 长期包**必须合并**（用户 2026-10-28 定案：「一条条列出来一屏全是黄胶囊」）。
+  //    AutoClaw 每日签到一天一发、各带到期时刻 ⇒ 流水里一天一个批次，逐批出窗口
+  //    就是 8 个「每日签到 · 长期」黄胶囊（真机 2026-11-04 报障「分这么多干嘛」）。
+  //    正确形态（magicrew 同款）：临期指针单列（服务端正在扣的），其余长期合并成
+  //    一个窗口（剩余求和 + 共 K 批 + 最早到期）。
   const buckets = packages.map((pkg) => ({
     label: pkg.name,
     remaining: Math.max(0, Math.round(pkg.remaining)),
     ...(Number.isFinite(pkg.expireMs) && pkg.expireMs > 0 ? { expireMs: pkg.expireMs } : {}),
   }))
-  return expiryBandedWindows(buckets)
+  assignExpiryBands(buckets)
+  const windows = []
+  // ① 临期指针：最早到期的未耗尽桶（服务端正在扣的就是它），resetsAt 画走势投影
+  const pointer = buckets.find((b) => typeof b.band === 'string' && b.band.startsWith('临期'))
+  if (pointer !== undefined) {
+    windows.push({
+      name: `${pointer.label} · ${pointer.band}`,
+      used: 0,
+      ...(Number.isFinite(pointer.expireMs) ? { resetsAt: new Date(pointer.expireMs).toISOString() } : {}),
+      display: `剩余 ${pointer.remaining} · ${fmtMD(pointer.expireMs)} 到期`,
+    })
+  }
+  // ② 长期包合并成一个窗口（剩余求和 + 共 K 批 + 最早到期；单批只带自己的到期日）
+  const longs = buckets.filter((b) => b.band === '长期')
+  if (longs.length > 0) {
+    const sum = longs.reduce((s, b) => s + b.remaining, 0)
+    const earliestMs = longs.map((b) => b.expireMs).filter(Number.isFinite).sort((a, b) => a - b)[0]
+    const tail = longs.length > 1
+      ? ` · 共 ${longs.length} 批 · 最早 ${fmtMD(earliestMs)} 到期`
+      : ` · ${fmtMD(earliestMs)} 到期`
+    windows.push({
+      name: '积分包 · 长期',
+      used: 0,
+      ...(Number.isFinite(earliestMs) ? { resetsAt: new Date(earliestMs).toISOString() } : {}),
+      display: `剩余 ${sum}${tail}`,
+    })
+  }
+  // ③ 永久余额单独（amount/limit 形态才有进度条与百分比；绝不发 balance）
+  for (const b of buckets.filter((x) => x.band === '永久')) {
+    windows.push({
+      name: `${b.label} · 永久`,
+      used: 0,
+      amount: 0,
+      limit: b.remaining,
+      unit: '积分',
+      display: `剩余 ${b.remaining}`,
+    })
+  }
+  // ④ 已耗尽 → aside 折叠（不占主位）
+  for (const b of buckets.filter((x) => x.band === '已耗尽')) {
+    windows.push({ name: `${b.label} · 已耗尽`, used: 100, aside: true, display: `剩余 ${b.remaining}` })
+  }
+  if (windows.length === 0) windows.push({ name: '积分余额', used: 0, display: `剩余 ${total}` })
+  return windows
 }
 
 /**
