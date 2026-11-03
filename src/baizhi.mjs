@@ -668,7 +668,7 @@ async function exchangeKeyViaBrowser(session) {
       return { ok: true, key, name: typeof item?.name === 'string' && item.name !== '' ? item.name : undefined }
     }
   }
-  return { ok: false, error: '这个大模型商店账号下还没有可用的 sk- 密钥——请在打开的浏览器里到 https://ai-models.app.baizhi.cloud/console/keys 新建一把' }
+  return { ok: false, error: `这个大模型商店账号下还没有可用的 sk- 密钥——请在打开的浏览器里到 https://ai-models.app.baizhi.cloud/console/keys 新建一把（响应片段：${text.slice(0, 240)}）` }
 }
 
 /** 登录进度页：浏览器状态区 + 粘贴兜底表单（单文件、无外部资源）。 */
