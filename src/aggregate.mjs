@@ -43,6 +43,7 @@ import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './autoclaw.mjs'
 import { loomyChannel } from './loomy.mjs'
+import { monkeycodeChannel, monkeycodeIntlChannel } from './monkeycode.mjs'
 
 // ── 按需加载的渠道（发布包里没有对应文件，本机有才加载）────────────────
 // ⚠️ v0.7.1 起只随包发布 registry 已登记（或已过审差别）的渠道：
@@ -91,7 +92,7 @@ const CHANNELS = [
   ...(lazyLoaded.doubaowork ? [lazyLoaded.doubaowork] : []),
   ...(lazyLoaded.dola ? [lazyLoaded.dola] : []),
   ...(lazyLoaded.qiniu ? [lazyLoaded.qiniu] : []),
-  autoclawChannel, autoclawCnChannel, loomyChannel,
+  autoclawChannel, autoclawCnChannel, loomyChannel, monkeycodeChannel, monkeycodeIntlChannel,
 ]
 
 /** 供应商 id / 显示名（一个渠道一个供应商）。 */

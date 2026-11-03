@@ -1,4 +1,4 @@
-﻿// 多供应商层的行为契约。
+// 多供应商层的行为契约。
 //
 // 只测「错了会静默出错」的地方：供应商 id 映射、模型分派、未登录回落、登录入口。
 // 不测「能 import」这类没有诊断价值的断言。
@@ -74,6 +74,9 @@ test('目录里的模型 id 不再带渠道前缀（一个供应商只有一个�
     // 未登录且渠道没有兜底目录时可以是空的（登录后由 catalog 填充）——
     // 但只要非空，key 就是裸模型名。
     for (const id of ids) {
+      // MonkeyCode 的 `monkeycode-{basic,pro,ultra}/…` 前缀是**上游平台的订阅档位
+      // 命名空间**（发到网关的模型 id 原样带它），不是渠道前缀 —— 白名单放行。
+      if (/^monkeycode-(basic|pro|ultra)\//.test(id)) continue
       assert.doesNotMatch(id, /\//, `${exportName} 的模型 id 不该带前缀：${id}`)
     }
   }

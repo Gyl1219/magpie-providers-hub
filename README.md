@@ -1,4 +1,4 @@
-# magpie-providers-hub
+﻿# magpie-providers-hub
 
 > **原项目：** [iJetLi/dsh-providers-hub](https://github.com/iJetLi/dsh-providers-hub) ｜ **作者：** [JetLi](https://github.com/iJetLi)
 >
@@ -16,12 +16,12 @@ Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**�
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个插件，八条供应商
+## 形态：一个插件，十条供应商
 
-**装一次，Magpie 里出现八条供应商**，一个渠道一条：
+**装一次，Magpie 里出现十条供应商**，一个渠道一条：
 
 ```
-hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn   hub-loomy
+hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn   hub-loomy   hub-monkeycode   hub-monkeycode-intl
 ```
 
 - 一个 git 仓库 / 一个 npm 包 / 一条安装命令 —— provider id 不是包，插件包可以注册任意多个
@@ -117,6 +117,27 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 微信流程细节：二维码内联渲染（data URL）、长轮询状态机
 （405 确认 / 404 已扫 / 403 取消 / 402 过期）、redirect_uri 写死官方地址
 （微信校验域名白名单，它只用于取 uuid，回调页不参与）。
+
+### monkeycode / monkeycode-intl（MonkeyCode 国内站 / 国际站）
+
+**v0.9.0 新增**，移植自 DSH `monkeycode*.ts`。community registry 没有 MonkeyCode
+包（#614 无重叠，无差异声明需求）。协议要点：
+
+- 推理走 **OhMyAgent 网关**（Anthropic Messages 协议）：`x-api-key`（oma_ Key）
+  + `X-OhMyAgent-Signature`（v1= hex HMAC-SHA256(signing_secret, **prompt 文本**)
+  —— 签名覆盖的是 system/instructions/messages 里的 prompt，不是整个请求体，
+  改了 payload 就必须重算）；`max_tokens` 必填；`GET /v1/models` 实测 405，
+  目录只有内置常量（`monkeycode-{basic,pro,ultra}/…` 前缀 = 订阅档位走每日额度，
+  不带前缀 = 直接扣积分）。
+- 登录两路：**浏览器登录**（拉起本机 Chromium 独立一次性 profile，用户在官方页
+  登录，插件经 CDP 读 HttpOnly 会话 cookie —— `document.cookie` 读不到 ——
+  换网关凭据 + 读稳定用户身份）或**手动粘贴**（API Key + 签名密钥 + 可选 cookie）。
+- 额度两池分开：每日额度（订阅档位 implicit 次日 0 点重置，amount/limit +
+  北京午夜 resetsAt）与积分（千分之一积分换算，amount/limit 形态）；余额/签到
+  接口只认网页 cookie，只有 Key 的账号推理可用但查不到余额（优雅降级）。
+- 签到走 **Cap PoW**（challenge → 本地求解 50 题 SHA-256 前缀碰撞 ≈ 0.2s →
+  redeem → checkin），奖励金额优先读响应、其次用签到前后余额差实测（真机 +100），
+  两条都拿不到如实报 0 + 说明。国际站契约同构但上游未真机验证（只有国内账号）。
 
 ### astudio
 

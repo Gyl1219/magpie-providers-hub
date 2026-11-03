@@ -44,6 +44,7 @@ import { lobsteraiChannel } from './src/lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './src/magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './src/autoclaw.mjs'
 import { loomyChannel } from './src/loomy.mjs'
+import { monkeycodeChannel, monkeycodeIntlChannel } from './src/monkeycode.mjs'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -81,6 +82,8 @@ export const HubQiniuPlugin = lazy.qiniu ? makeHubPlugin(lazy.qiniu.qiniuChannel
 export const HubAutoclawPlugin = makeHubPlugin(autoclawChannel)
 export const HubAutoclawCnPlugin = makeHubPlugin(autoclawCnChannel)
 export const HubLoomyPlugin = makeHubPlugin(loomyChannel)
+export const HubMonkeycodePlugin = makeHubPlugin(monkeycodeChannel)
+export const HubMonkeycodeIntlPlugin = makeHubPlugin(monkeycodeIntlChannel)
 
 /** provider id → 插件函数（测试用；**对象**导出不会被 magpie 当插件）。 */
 export const HUB_PLUGINS = {
@@ -96,6 +99,8 @@ export const HUB_PLUGINS = {
   HubAutoclawPlugin,
   HubAutoclawCnPlugin,
   HubLoomyPlugin,
+  HubMonkeycodePlugin,
+  HubMonkeycodeIntlPlugin,
 }
 
 // ⚠️ 只导出**数组/对象**这类非函数值（测试用）。函数导出 = 一个供应商，别乱加。
