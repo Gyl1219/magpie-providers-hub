@@ -43,6 +43,11 @@
 //   `solveCapChallenge` 段。纯计算、无规避：题目就是让你算的，网页版也在算。
 
 import { createHash } from 'node:crypto'
+import { createServer } from 'node:http'
+import {
+  launchLoginBrowser,
+  closeSession,
+} from './magicrew-browser.mjs'
 import {
   buildAnthropicPayload,
   anthropicSseToOpenAi,
@@ -558,6 +563,249 @@ async function checkin(credential) {
   return { outcome: 'claimed', credit: amount ?? 0, message: `每日临时积分 +${amount ?? '?'}` }
 }
 
+// ── 浏览器登录（上游主路径：CDP 读两枚 cookie → 大模型商店换 sk- Key）─────
+//
+// ⚠️ Key 来源必须走**大模型商店**的 console 接口：
+//   GET https://ai-models.app.baizhi.cloud/api/console/api-keys（cookie 认证）
+//   → {items:[{id,name,api_key:'sk-…',status:'active'}]} —— 字段是 api_key（下划线）。
+// 控制台（baizhi.cloud）用户页的「API KEY」只发 `bzy_` 前缀（15 位），拿它打
+// 模型网关**恒 401「API Key 无效」**（上游 2026-11-03 审计更正 + 真机 2026-11-04 复现）。
+
+const CONSOLE_KEYS_PATH = '/api/console/api-keys'
+const CONSOLE_BASE = 'https://ai-models.app.baizhi.cloud'
+const LOGIN_URL = 'https://baizhi.cloud/console/user'
+const LOGIN_WINDOW_MS = 4 * 60_000
+/** cookie 就位后，换 Key 的宽限（用户可能要去 /console/keys 现建一把）。 */
+const KEY_GRACE_MS = 6 * 60_000
+
+/** 经 CDP Storage.getCookies 读控制台两枚 HttpOnly cookie（页面 evaluate 读不到）。 */
+async function readConsoleCookies(session) {
+  const pages = await fetch(`http://127.0.0.1:${session.port}/json`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json()).catch(() => [])
+  const target = (Array.isArray(pages) ? pages : []).find((t) => t.type === 'page' && String(t.url ?? '').includes('baizhi.cloud') && t.webSocketDebuggerUrl)
+  if (!target) return undefined
+  const ws = new WebSocket(target.webSocketDebuggerUrl)
+  await new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('CDP 连接超时')), 8000)
+    ws.addEventListener('open', () => { clearTimeout(t); resolve() })
+    ws.addEventListener('error', () => { clearTimeout(t); reject(new Error('CDP 连接失败')) })
+  })
+  try {
+    const reply = await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('CDP 求值超时')), 8000)
+      ws.addEventListener('message', (ev) => {
+        let msg
+        try { msg = JSON.parse(ev.data) } catch { return }
+        if (msg.id !== 1) return
+        clearTimeout(t)
+        msg.error ? reject(new Error(msg.error.message || 'CDP 错误')) : resolve(msg.result)
+      })
+      ws.send(JSON.stringify({ id: 1, method: 'Storage.getCookies', params: {} }))
+    })
+    const cookies = reply?.cookies
+    if (!Array.isArray(cookies)) return undefined
+    let slSession
+    let baizhiSession
+    for (const entry of cookies) {
+      if (typeof entry?.value !== 'string' || entry.value.length === 0) continue
+      // ⚠️ domain **精确** baizhi.cloud：同域下 ai-models.app / agent-toolkit.app 还有
+      //    别的 sl-session，后缀包含判据会随机拿到网关那枚（上游实测的坑）。
+      const domain = String(entry.domain ?? '').replace(/^\./, '').toLowerCase()
+      if (domain !== 'baizhi.cloud') continue
+      if (entry.name === 'sl-session') slSession = entry.value
+      else if (entry.name === 'baizhi_session') baizhiSession = entry.value
+    }
+    if (slSession === undefined || baizhiSession === undefined) return undefined
+    return `sl-session=${slSession}; baizhi_session=${baizhiSession}`
+  } finally {
+    try { ws.close() } catch { /* ignore */ }
+  }
+}
+
+/** 控制台登录态换 sk- 推理 Key（大模型商店域，cookie 认证）。 */
+async function exchangeKey(cookie) {
+  const result = await platformRequest(CONSOLE_KEYS_PATH, cookie, { baseUrl: CONSOLE_BASE })
+  if (!result.ok) return { ok: false, error: result.error }
+  const items = Array.isArray(result.data?.items) ? result.data.items : []
+  for (const item of items) {
+    const key = typeof item?.api_key === 'string' ? item.api_key.trim() : ''
+    const status = typeof item?.status === 'string' ? item.status : 'active'
+    if (status !== 'active') continue
+    if (/^sk-[A-Za-z0-9_-]{16,}$/.test(key)) {
+      return { ok: true, key, name: typeof item?.name === 'string' && item.name !== '' ? item.name : undefined }
+    }
+  }
+  return { ok: false, error: '这个大模型商店账号下还没有可用的 sk- 密钥——请在打开的浏览器里到 https://ai-models.app.baizhi.cloud/console/keys 新建一把' }
+}
+
+/** 登录进度页：浏览器状态区 + 粘贴兜底表单（单文件、无外部资源）。 */
+function renderLoginPage(phaseMessage) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录百智云</title>
+<style>
+body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#111;color:#eee;
+     max-width:460px;margin:40px auto;padding:24px;border-radius:12px;background:#1a1a1a}
+h2{margin-top:0}
+label{display:block;margin:14px 0 6px;font-size:13px;color:#aaa}
+input{width:100%;padding:10px;box-sizing:border-box;border:1px solid #333;border-radius:6px;
+      background:#0d0d0d;color:#eee}
+button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:6px;background:#3b82f6;
+       color:#fff;font-size:15px;cursor:pointer}
+#status{margin:14px 0;font-size:13px;min-height:20px;color:#9ca3af}
+.paste{border-top:1px solid #333;margin-top:20px;padding-top:6px}
+</style></head><body>
+<h2>登录百智云</h2>
+<p style="font-size:13px;color:#9ca3af">已在浏览器里打开 baizhi.cloud 控制台——请在那里完成登录（微信扫码即可）。
+登录成功后插件会自动取推理 Key（sk-）并读取积分。</p>
+<div id="status">${phaseMessage ?? '等待浏览器登录…'}</div>
+<div class="paste">
+  <label>或者：直接粘贴 API Key（sk-…；高级用法「sk-…|控制台cookie」直通积分面板）</label>
+  <input id="key" placeholder="sk-…">
+  <button id="go">使用此 Key</button>
+  <div id="msg" style="margin-top:10px;font-size:13px;min-height:20px;color:#9ca3af"></div>
+</div>
+<script>
+const poll = async () => {
+  try {
+    const r = await fetch('/login/status');
+    const j = await r.json();
+    document.getElementById('status').textContent = j.message || j.phase || '';
+    if (j.phase === 'done') return;
+  } catch {}
+  setTimeout(poll, 1500);
+};
+poll();
+document.getElementById('go').onclick = async () => {
+  const key = document.getElementById('key').value.trim();
+  if (!key) { document.getElementById('msg').textContent = '请先粘贴'; return }
+  document.getElementById('msg').textContent = '验证中…';
+  try {
+    const r = await fetch('/paste', { method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify({ key }) });
+    const j = await r.json();
+    document.getElementById('msg').textContent = j.ok ? '登录成功，可以关闭此页面' : (j.message || '失败');
+  } catch (e) { document.getElementById('msg').textContent = '失败：' + e.message }
+};
+</script></body></html>`
+}
+
+/**
+ * beginLogin：拉起浏览器（独立 profile、可见、detached）→ 用户登控制台 →
+ * CDP 读两枚 cookie → 大模型商店换 sk- → settle。粘贴路随时可用（本地页表单）。
+ */
+async function beginLogin(openBrowser) {
+  let settleOk, settleFail
+  const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
+  result.catch(() => {})
+  let server
+  let closed = false
+  let timer
+  let session
+  let phase = 'starting'
+  let phaseMessage = '正在拉起浏览器…'
+
+  const closeServer = () => new Promise((resolve) => {
+    if (closed || !server) return resolve()
+    closed = true
+    server.close(() => resolve())
+  })
+  const settle = (ok, value) => {
+    if (timer !== undefined) clearTimeout(timer)
+    void closeServer()
+    if (session !== undefined) { void closeSession(session).catch(() => {}); session = undefined }
+    ok ? settleOk(value) : settleFail(value)
+  }
+
+  const setPhase = (p, m) => { phase = p; if (m !== undefined) phaseMessage = m }
+
+  timer = setTimeout(() => settle(false, new Error('百智云登录超时（10 分钟内未完成）')), LOGIN_WINDOW_MS + KEY_GRACE_MS)
+  timer.unref?.()
+
+  server = createServer(async (req, res) => {
+    const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
+    const sendJson = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify(data))
+    }
+    try {
+      if (pathname === '/' || pathname === '/login') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        res.end(renderLoginPage(phaseMessage))
+        return
+      }
+      if (pathname === '/login/status') return sendJson(200, { phase, message: phaseMessage })
+      if (pathname === '/paste') {
+        const body = await new Response(req).json().catch(() => ({}))
+        const raw = String(body.key ?? '').trim()
+        if (raw.length === 0) return sendJson(200, { ok: false, message: '请粘贴凭据' })
+        settle(true, { access_token: raw })
+        return sendJson(200, { ok: true })
+      }
+      res.writeHead(404); res.end('not found')
+    } catch (error) {
+      sendJson(200, { ok: false, message: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  const port = await new Promise((resolve, reject) => {
+    let done = false
+    server.once('error', (error) => { if (!done) { done = true; reject(error) } })
+    server.listen(0, '127.0.0.1', () => {
+      done = true
+      server.unref()
+      const addr = server.address()
+      resolve(typeof addr === 'object' && addr !== null ? addr.port : 0)
+    })
+  }).catch((error) => {
+    settle(false, new Error(`百智云回调端口无法监听（${error.message}）`))
+    throw error
+  })
+
+  const url = `http://127.0.0.1:${port}/login`
+  if (openBrowser) openBrowser(url)
+
+  // 后台登录循环：等两枚 cookie → 换 Key → settle（换不到 Key 时进宽限轮询）
+  void (async () => {
+    try {
+      setPhase('starting', '正在拉起浏览器…')
+      session = await launchLoginBrowser(LOGIN_URL)
+      setPhase('waiting-login', '浏览器已打开——请在窗口里登录 baizhi.cloud（微信扫码即可）')
+      const loginDeadline = Date.now() + LOGIN_WINDOW_MS
+      let cookie
+      while (Date.now() < loginDeadline) {
+        cookie = await readConsoleCookies(session).catch(() => undefined)
+        if (cookie !== undefined) break
+        await new Promise((r) => setTimeout(r, 1500))
+      }
+      if (cookie === undefined) return settle(false, new Error('百智云登录超时（4 分钟内没读到控制台登录态）'))
+      setPhase('exchanging', '已读到登录态，正在取推理 Key…')
+      const keyDeadline = Date.now() + KEY_GRACE_MS
+      for (;;) {
+        const exchange = await exchangeKey(cookie).catch((error) => ({ ok: false, error: error?.message ?? String(error) }))
+        if (exchange.ok) {
+          setPhase('done', '登录成功，可以关闭此页面')
+          return settle(true, {
+            access_token: exchange.key,
+            session_cookie: cookie,
+            ...(exchange.name !== undefined ? { nickname: exchange.name } : {}),
+          })
+        }
+        if (Date.now() >= keyDeadline) return settle(false, new Error(exchange.error))
+        setPhase('exchanging', `${exchange.error}（继续等待，最长 ${Math.ceil((keyDeadline - Date.now()) / 60000)} 分钟）`)
+        await new Promise((r) => setTimeout(r, 5000))
+      }
+    } catch (error) {
+      settle(false, error instanceof Error ? error : new Error(String(error)))
+    }
+  })()
+
+  return {
+    url,
+    result,
+    instructions: `在打开的页面里登录 baizhi.cloud（微信扫码），登录后自动取 Key；也可以在页面下方直接粘贴。手动打开：${url}`,
+  }
+}
+
 // ── 渠道对象 ────────────────────────────────────────────────────────────
 
 /**
@@ -577,6 +825,7 @@ export const baizhiChannel = {
   id: CHANNEL_ID,
   displayName: DISPLAY_NAME,
   fallbackModels: FALLBACK_MODELS,
+  beginLogin,
   /**
    * 粘贴型登录：只有 API Key 一格（与 qiniu 同款轻形态）。
    * 高级用法：粘贴原文末尾用「|」接控制台 cookie（`sk-…|sl-session=…; baizhi_session=…`）
