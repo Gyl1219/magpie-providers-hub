@@ -48,7 +48,10 @@
     "tests/loomy.test.mjs",
     "src/baizhi.mjs",
     "src/anthropic-bridge.mjs",
-    "tests/baizhi.test.mjs"
+    "tests/baizhi.test.mjs",
+    "tests/monkeycode.test.mjs",
+    "src/monkeycode-bridge.mjs",
+    "src/monkeycode.mjs"
   ],
   "keywords": [
     "magpie",
