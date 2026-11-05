@@ -1,7 +1,7 @@
 {
   "name": "magpie-providers-hub",
-  "version": "0.12.0",
-  "description": "magpie-providers-hub 的第三方 Magpie 适配：七条供应商（AStudio / Accio / LobsterAI / MagiCrew×2 / AutoClaw×2），各自登录、额度与开关",
+  "version": "0.12.1",
+  "description": "magpie-providers-hub 的第三方 Magpie 适配：十一条供应商（AStudio / Accio / LobsterAI / MagiCrew×2 / AutoClaw×2 / Loomy / MonkeyCode×2 / 七牛云 MaaS），各自登录、额度与开关",
   "type": "module",
   "main": "./index.mjs",
   "exports": {

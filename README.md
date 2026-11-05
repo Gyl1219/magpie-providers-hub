@@ -16,17 +16,18 @@ Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**�
 **不依赖 DSH**，不依赖 DSH 桌面版是否运行：登录、续期（渠道支持时）、模型目录、请求转发
 全部在插件内完成。
 
-## 形态：一个插件，八条随包供应商（+ 本机按需渠道）
+## 形态：一个插件，十一条随包供应商（+ 本机按需渠道）
 
-**装一次，Magpie 里出现八条供应商**，一个渠道一条：
+**装一次，Magpie 里出现十一条供应商**，一个渠道一条：
 
 ```
 hub-astudio   hub-accio   hub-lobsterai   hub-magicrew   hub-magicrew-intl   hub-autoclaw   hub-autoclaw-cn
+hub-loomy   hub-monkeycode   hub-monkeycode-intl   hub-qiniu
 ```
 
-另有四条**本机按需渠道**（灵犀 / 豆包工作 / Dola / 七牛云）与两条**待审渠道**
-（Loomy / MonkeyCode，见下方各节）：源码在仓库里、本机存在就会加载，但**不随 npm 包
-发布、未登记进 registry** —— 各自的差异说明审过之后再随包/登记（#652 评审定）。
+另有**本机按需渠道**（灵犀 / 豆包工作 / Dola / 百智云）：源码在仓库里、本机存在
+才会加载，**不随 npm 包发布、未登记进 registry**（#652 评审定：发布包只含 registry
+所列渠道）。七牛云自 v0.12.0 起随包并登记（#772）。
 ```
 本机按需：hub-lingxi   hub-doubaowork   hub-dola   hub-qiniu
 待审：     hub-loomy   hub-monkeycode   hub-monkeycode-intl
@@ -84,7 +85,7 @@ PR #502 的一轮审核（magpie-community/plugins）指出两件事，都成立
 | `loomy` | `hub-loomy` | Loomy（讯飞） | **微信扫码**（独有）/ 短信验证码 | `/api/v1/models` + 内置快照 | ❌ 无 token 续期（会话 14 天） |
 | `baizhi` | `hub-baizhi` | 百智云（BaiZhiCloud） | 粘贴 API Key（sk-…）| `/api/anthropic/v1/models`（Anthropic 协议） | ❌ 静态 Key 无续期（长期有效） |
 
-### baizhi（百智云）
+### baizhi（百智云，**本机按需、不随包**）
 
 **Anthropic Messages 协议**渠道（`ai-models.app.baizhi.cloud/api/anthropic`，
 `x-api-key` + `anthropic-version: 2023-06-01`），经共享翻译桥出 OpenAI 响应。

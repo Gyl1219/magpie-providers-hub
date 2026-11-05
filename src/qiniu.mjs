@@ -399,7 +399,9 @@ function planKeys(ids) {
   const out = new Map()
   for (const id of list) {
     const short = keyFor(id)
-    out.set(id, shortCount.get(short) === 1 ? short : keyFor(id))
+    // 短名碰撞时保留**完整 id**（把斜杠换成 - 以满足 key 不含斜杠的约束），
+    // 而不是两个分支都给短名（#772 评审非阻塞项）。
+    out.set(id, shortCount.get(short) === 1 ? short : String(id).replace(/\//g, '-'))
   }
   return out
 }
@@ -839,6 +841,9 @@ async function chat(credential, { body, signal } = {}) {
  */
 async function usage(credential, extras = {}) {
   const options = extras?.options ?? {}
+  // 时钟可注入：单测传固定 now，避免活动截止日（2026-11-30）之后用例变红。
+  // 生产不传 = 真实时间，行为不变（#772 评审第 2 条）。
+  const now = Number.isFinite(extras?.now) ? extras.now : Date.now()
   const keys = readCredentials(options)
 
   // 没配（或填错）AK/SK：**不报错、不出百分比**，只说明为什么没有额度。
@@ -855,9 +860,8 @@ async function usage(credential, extras = {}) {
   let resolved
   try {
     // 档位来源：登录问项（账号 metadata → 凭据）优先，其次插件 options。
-    // ⚠️ options 那条路实测走不通（`plugin options` 只接受插件声明过的开关），
-    //    所以真正可用的是登录问项。
-    resolved = resolveDailyLimit(options)
+    // options 由 magpie 以插件参数传入，代码与用例都按这一路径读取（见 README）。
+    resolved = resolveDailyLimit(options, now)
   } catch (error) {
     return [{ name: '额度', display: `档位配置有误：${error?.message ?? error}` }]
   }
@@ -865,7 +869,7 @@ async function usage(credential, extras = {}) {
   const hasLimit = limit > 0
   const modelFilter = hasLimit ? options.qiniuUsageModel ?? FREE_MODEL_FILTER : options.qiniuUsageModel
 
-  const result = await fetchTodayUsage({ ...keys, modelFilter })
+  const result = await fetchTodayUsage({ ...keys, modelFilter, now })
   // 读失败也**不抛**：抛了会被聚合层兜成「额度查询失败：…」+ 假 100%，看不清原因
   if (result.error) return [{ name: '额度', display: `读不到用量：${result.error}` }]
 

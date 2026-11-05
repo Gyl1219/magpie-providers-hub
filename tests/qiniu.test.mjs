@@ -418,9 +418,11 @@ test('用量：声明档位 → 百分比窗口，且只统计免费模型', asy
     }),
   }])
   try {
+    // 固定时钟：活动 2026-11-30 截止，用例不随真实日期变红（#772 评审第 2 条）
+    const FIXED_NOW = Date.parse('2026-11-15T12:00:00+08:00')
     const rows = await qiniuChannel.usage(
       CRED,
-      { options: { qiniuAccessKey: 'AK', qiniuSecretKey: 'SK', qiniuActivityTier: 'verified' } },
+      { options: { qiniuAccessKey: 'AK', qiniuSecretKey: 'SK', qiniuActivityTier: 'verified' }, now: FIXED_NOW },
     )
     const [w] = rows
     assert.equal(w.name, '今日额度')
@@ -492,4 +494,15 @@ test('额度窗口是「重置型」：源码不手拼带作废时间的档位�
   const src = readFileSync(join(import.meta.dirname, '..', 'src', 'qiniu.mjs'), 'utf8')
   assert.ok(!src.includes('到期'), '重置型渠道不该出现「到期」口径')
   assert.ok(!/expiryBandedWindows|assignExpiryBands/.test(src), '本渠道没有作废包，不需要滚动指针工具')
+})
+
+test('目录：短名碰撞时保留完整 id（key 不含斜杠），不随遍历顺序变', () => {
+  // a/x 与 b/x 的短名都是 'x' ⇒ 两条都得用完整 id 压平，不能用短名
+  const keys = qiniuPlanKeys(['b/x', 'a/x', 'solo'])
+  assert.equal(keys.get('a/x'), 'a-x')
+  assert.equal(keys.get('b/x'), 'b-x')
+  assert.equal(keys.get('solo'), 'solo')
+  assert.equal(keys.get('solo'), 'solo', '唯一短名仍用短名')
+  const reordered = qiniuPlanKeys(['solo', 'a/x', 'b/x'])
+  assert.deepEqual([...reordered.entries()].sort(), [...keys.entries()].sort(), '顺序无关')
 })
