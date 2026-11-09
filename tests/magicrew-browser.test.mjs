@@ -16,9 +16,22 @@ const basename = (p) => p.split(/[\\/]/).pop()
 const PROFILE_BASE = join(tmpdir(), 'magpie-providers-hub-login')
 
 test('导出契约完整', () => {
-  for (const fn of ['findBrowser', 'newProfileDir', 'sweepProfiles', 'launchLoginBrowser', 'waitForCreds', 'closeSession']) {
+  for (const fn of ['findBrowser', 'newProfileDir', 'sweepProfiles', 'launchLoginBrowser', 'waitForCreds', 'closeSession', 'findDefaultBrowser', 'openInDefaultBrowser', 'isDefaultProfileBound']) {
     assert.equal(typeof mod[fn], 'function', `缺 ${fn}`)
   }
+  assert.equal(mod.GOOGLE_HANDOFF_KEY, 'google-handoff')
+})
+
+test('isDefaultProfileBound：未交接 = false，交接后 = true', () => {
+  assert.equal(mod.isDefaultProfileBound(undefined), false)
+  assert.equal(mod.isDefaultProfileBound({}), false)
+  assert.equal(mod.isDefaultProfileBound({ defaultProfileBound: true }), true)
+})
+
+test('closeSession：defaultProfileBound 时跳过关窗与删 profile（不摸用户默认 profile）', async () => {
+  // 一次性窗口本就受 session.child 持有；本轮已绑定默认 profile，
+  // closeSession 整体跳过（不吻合的 port 也不会去 fetch）。
+  await mod.closeSession({ defaultProfileBound: true, dir: '/tmp/should-not-delete' })
 })
 
 test('findBrowser 返回 null 或一个浏览器路径（不抛错）', () => {

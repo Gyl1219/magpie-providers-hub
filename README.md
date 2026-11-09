@@ -211,6 +211,17 @@ PUT 一次轮换一次（一次性，必须串行 + 立即落盘）**。登录�
 （复用本机 Edge/Chrome 登录态，一次性 profile 用完即删）、手机号+密码、粘贴 JWT 与
 组织码。签到 = 每日登录赠送（+200/+50 积分，幂等）+ 新手福利任务。
 
+**Google 登录提示**：在插件拉起的窗口里点 Google 账号会报「无法登录：此浏览器或应用可能不安全」
+（截图里那个 `accounts.google.com/v3/signin/rejected`）。这不归 magicrew 的登录页管：
+根因是插件用 `--remote-debugging-port` 启动 Chrome ⇒ `navigator.webdriver === true`，
+Google 对这个自动化标记直接拒掉（`--disable-blink-features=AutomationControlled` 靠不住，
+不依赖）。载体页多了一个按钮——**「①′ 用我日常的浏览器走 Google 登录」**：先点①开窗，再点①′，
+同样一张登录页会被你自己正在用的浏览器打开 Google 那一跳；登录完成 ② 里的 302 会回来，
+① 的一次性 profile CDP 读 JWT 判定，日常 profile 不被清、不被标记为自动化。
+
+两步的序：**① → ①′**（顺序错了 ①′ 会明确说「请先点 ①」）。没有装 Google 的浏览器
+（`findDefaultBrowser()` 找不到）时 ①′ 明确失败，不会静默用插件窗口走 Google。
+
 ⚠️ 上游网关有两条协议债，已在 `chat` 里改写：**`max_tokens` < 512 会被 reasoning
 吃光导致返回空 content**（统一抬到 512）；**可用积分不足时上游回 HTTP 400**（改写成
 402，否则 magpie 不会换账号重试）。另 `tool` schema 的 `additionalProperties: {}` /

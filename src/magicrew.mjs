@@ -492,7 +492,10 @@ export function makeChannel(site) {
 <div class="sub">${site.web}</div>
 
 <button id="browser" class="big">① 一键浏览器登录（推荐）</button>
-<div class="hint">点它 → 弹出浏览器窗口 → 在里面用微信 / 手机号 / Google / 邮箱 / 飞书 登录 → 登录完成自动接上，无需回来点任何按钮。</div>
+<div class="hint">点它 → 弹出浏览器窗口 → 在里面用微信 / 手机号 / 邮箱 / 飞书 登录 → 登录完成自动接上，无需回来点任何按钮。<br>选 <b>Google</b> 登录时：请点第二个按钮，而不是在弹出的窗口里点你的 Google 账号 —— 插件自己那个窗口里的 Google 会被 Google 拒（「此浏览器或应用可能不安全」）。
+</div>
+<button id="google-handoff">①′ 用我日常的浏览器走 Google 登录</button>
+<div class="hint">用你正在用的浏览器完成 Google 登录 → 登录完成回到这个页面的浏览器会自动接上。两只窗口就是同一张登录页，不要关第二个窗口。</div>
 <div class="err" id="err"></div>
 
 <div class="sep">或</div>
@@ -524,12 +527,22 @@ async function post(path, body) {
 }
 $('browser').addEventListener('click', async () => {
   $('browser').disabled = true
+  $('google-handoff').disabled = false
   err('已弹出浏览器，请在里面完成登录…（登录成功后这里会自动跳转）')
   try {
     const r = await post('/api/browser-login')
     if (!r.ok) throw new Error(r.message || '浏览器登录失败')
     okScreen()
   } catch (e) { err(e.message); $('browser').disabled = false }
+})
+$('google-handoff').addEventListener('click', async () => {
+  $('google-handoff').disabled = true
+  err('已切到你日常的浏览器窗口完成 Google 登录…（两只窗口就是同一张登录页）')
+  try {
+    const r = await post('/api/google-handoff')
+    if (!r.ok) throw new Error(r.message || '交接失败')
+    err('已用日常浏览器打开登录页 —— 完成后回到弹出浏览器窗口会自动接上')
+  } catch (e) { err(e.message); $('google-handoff').disabled = false }
 })
 $('go').addEventListener('click', async () => {
   const phone = $('phone').value.trim(), password = $('password').value
@@ -586,6 +599,11 @@ $('go-jwt').addEventListener('click', async () => {
       res.end(JSON.stringify(data))
     }
 
+    // ① 开窗后会话挂在这：Google 交接（②）靠它把 defaultProfileBound 落上去。
+    //    closeSession 在 settle 前把 session 关了再删 profile，关之前就是这个引用。
+    let activeBrowserSession
+    const markDefaultBound = () => { if (activeBrowserSession) activeBrowserSession.defaultProfileBound = true }
+
     server = createServer(async (req, res) => {
       const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
       try {
@@ -641,8 +659,11 @@ $('go-jwt').addEventListener('click', async () => {
           try {
             // 直接开到登录页（/login 实测 200），省得用户再找入口
             session = await launchLoginBrowser(`${site.web}/login`)
+            activeBrowserSession = session
             // 页面可能落在任意子域，用根域匹配 target（letsmagic.cn / magicrew.ai）
             const hostFragment = new URL(site.web).hostname.replace(/^www\./, '')
+            // ② 发生过（走用户日常浏览器）：关窗时不删默认 profile
+            //     （同一份 window 引用，只挂到另一张 profile 上）
             const creds = await waitForCreds(session, hostFragment, { timeout: 300_000 })
             if (!creds) throw new Error('浏览器登录超时（5 分钟内未检测到登录完成）')
             const { jwt, org, name } = creds
@@ -659,9 +680,23 @@ $('go-jwt').addEventListener('click', async () => {
               refreshTokenExpiresAt: gw.refreshTokenExpiresAt,
             })
           } finally {
+            activeBrowserSession = undefined
             void closeSession(session)
           }
           return
+        }
+        if (pathname === '/api/google-handoff') {
+          // ②：用户日常浏览器跳 Google 那一跳（见 magicrew-browser 文件头）。
+          // 只能在 ① 已经开窗时触发：同一张登录页 URL，用日常浏览器完成
+          // Google —— 完成后 302 回站点，CDP 读 ① 的 profile 就够。
+          if (!activeBrowserSession) {
+            return sendJson(res, 200, { ok: false, message: '请先点「① 一键浏览器登录」把登录窗口拉起，再点这个按钮' })
+          }
+          const { openInDefaultBrowser } = await import('./magicrew-browser.mjs')
+          const target = openInDefaultBrowser(`${site.web}/login`, activeBrowserSession)
+          if (!target) return sendJson(res, 200, { ok: false, message: '本机没找到你的日常浏览器，没法走 Google 交接 —— 换其它登录方式' })
+          markDefaultBound()
+          return sendJson(res, 200, { ok: true })
         }
         sendJson(res, 404, { ok: false, message: 'not found' })
       } catch (error) {
