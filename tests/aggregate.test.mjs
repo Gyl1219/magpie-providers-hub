@@ -350,3 +350,25 @@ test('tierSummarize：状态条/失败条透传、不可求和的桶不动', () 
   ])
   assert.ok(single.some((w) => w.name === '星火积分'), '单条永久保留原命名')
 })
+
+test('MonkeyCode 档位前缀模型不再 404（`monkeycode-{basic,pro,ultra}/…` 是上游订阅档位命名空间）', async () => {
+  // 真机 2026-11-09：`monkeycode-basic/deepseek-v4-flash` 发网关 200，裸
+  // `deepseek-v4-flash` 403 无权；resolve 把档位前缀误判成"别的供应商的前缀"
+  // 直接 404（magpie 侧表现为"无法识别的模型"）。
+  for (const exportName of ['HubMonkeycodePlugin', 'HubMonkeycodeIntlPlugin']) {
+    const plugin = await HUB_PLUGINS[exportName]({}, {})
+    const cfg = {}
+    await plugin.config(cfg)
+    const { fetch: pluginFetch } = await plugin.auth.loader(async () => undefined)
+    const ok = await pluginFetch('http://lubbock.invalid/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'monkeycode-basic/deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    assert.notEqual(ok.status, 404, `${exportName}: 档位模型不应 404（无账号时应走未登录 401）`)
+    const miss = await pluginFetch('http://lubbock.invalid/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'other-vendor/some-model', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    assert.equal(miss.status, 404, `${exportName}: 未知模型仍应 404`)
+  }
+})

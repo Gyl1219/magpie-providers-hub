@@ -984,6 +984,17 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
     const prefix = parts[parts.length - 2]
     const outer = parts.length >= 3 ? parts[parts.length - 3] : undefined
     const ours = prefix === PROVIDER || prefix === channel.id || outer === PROVIDER || outer === LEGACY_PROVIDER
+    // ⚠️ MonkeyCode 档位前缀 `monkeycode-{basic,pro,ultra}` 是**上游订阅档位的
+    // 命名空间**，不是渠道前缀（2026-11-09 真机：`monkeycode-basic/deepseek-v4-flash`
+    // 发网关 200；裸 `deepseek-v4-flash` 403 无权）：resolve 认它，
+    // 且转发给上游的 model 保留完整档位 id（去掉前缀会落到无权/无此模型的裸名）。
+    const tier = /^monkeycode-(basic|pro|ultra)$/.test(prefix) ? prefix : undefined
+    if (tier !== undefined && (channel.id === 'monkeycode' || channel.id === 'monkeycode-intl')) {
+      if (parts.length === 2 || outer === PROVIDER || outer === channel.id || outer === LEGACY_PROVIDER) {
+        return { channel, model: `${tier}/${model}` }
+      }
+      return undefined
+    }
     return ours ? { channel, model } : undefined
   }
 
