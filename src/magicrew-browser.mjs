@@ -11,11 +11,43 @@
 //   拿到的是旧账号。一次性目录把这条路堵死。
 //
 // ⚠ 本机必须有 Chrome / Edge / Brave / Chromium 之一（headful，非 headless）。
+//
+// ═══ Google 登录被拒（「此浏览器或应用可能不安全」）═════════════════
+// 根因是 navigator.webdriver：Chrome 被 --remote-debugging-port 启动时，
+// 每个页面都带着 webdriver=true，Google 在 accounts.google.com/v3/signin/rejected
+// 拒掉（--disable-blink-features=AutomationControlled 可靠性不一，还会随版本失效，
+// 所以本模块不靠它）。一次性 profile 省了 cookie/历史只是叠加项。
+//
+// 约束：用户默认浏览器里没有调试端口，CDP 读不到 localStorage；又不能把
+// --remote-debugging-port 开到用户默认 profile 上 —— 那样他的 webdriver 标记
+// 会由这一次注入（直到重启），用户所有窗口都带自动化痕迹。于是两个窗口各用
+// 一张 profile，是**唯一**同时满足「Google 不拒」 + 「CDP 能读」 + 「不污染
+// 用户默认 profile」的解：
+//   ① 登录页照旧开一次性 profile + CDP（能读、判定可靠）；
+//   ② 用户点「Google 登录」时把**同一地址交给用户自己那只浏览器**
+//      （系统默认浏览器，无 --user-data-dir、无 --remote-debugging-port）
+//      —— 用的是他自己的已登录 Google 会话，完成后会 302 回站点；
+//   ③ CDP 在 ① 的 profile 轮询 localStorage（JWT）；302 回来后的落点页面
+//      也会带着该站的会话 cookie（实测见 monkeycode：一路）。
+//      两路任一命中即完成判定。
+// Google 那一跳永远不在装着插件控制器的窗口里。
+//
+// 本模块与调用方约定的固定名（跨函数通信 + 测试锚点）：
+//   · `baseline` —— waitForCreds 的入参快照：默认浏览器那张 profile 里
+//     可能躺着上个账号的 JWT。本模块当前 CDP 只读一次性 profile，
+//     所以 caller 从未见过默认浏览器里的 JWT，baseline 对它自然只读
+//     「旧登录态」这一个事实：旧账号在时 baseline.jwt 不是 null，就是
+//     调用方（magicrew / monkeycode）会在开窗前先读默认窗口一次，
+//     把那一份当 baseline 传进来（或不传）。仅靠本文不写盘。
+//   · `defaultProfileBound` —— session 上的标记，是 `openInDefaultBrowser`
+//     的副作用：② 已发生 ⇒ 本轮窗口拥有用户默认 profile，收尾时不删；
+//     `isDefaultProfileBound` 只是读它（供调用方/测试确认交接发生）。
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 /**
  * 一次性 Chromium profile 的落点。
@@ -27,6 +59,66 @@ import { join } from 'node:path'
  *    `magicrew-login-*` 目录名。
  */
 const BASE = () => join(tmpdir(), 'magpie-providers-hub-login')
+
+/**
+ * 本机**用户已经在开的**日常 Chromium 系浏览器（日常浏览器 = 装着他 Google
+ * 登录态的那一个）。
+ *
+ * ⚠️ 只用于 ②（Google 那一跳）：它只用来让用户完成 Google 登录，插件绝不通过
+ *    它读 localStorage、绝不往它的 profile 写。返回 `{ exe }` 或 null。
+ */
+export function findDefaultBrowser() {
+  const hit = process.env.MAGPIE_PROFILES_PROBE
+  if (hit) return { exe: hit }
+  if (process.platform === 'win32') {
+    // UserChoice 拿到的 ProgID → 其 shell\open\command 的可执行路径（带参时只取 .exe）
+    const viaRegistry = (() => {
+      try {
+        const out = execFileSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\URL Associations\\http\\UserChoice', '/v', 'ProgID'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        const prog = out.match(/REG_SZ\s+(\S+)/)?.[1]
+        if (!prog) return null
+        const cmd = execFileSync('reg', ['query', `HKCU\\Software\\Classes\\${prog}\\shell\\open\\command`, '/ve'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        const path = String(cmd).match(/REG_SZ\s+"([^"]+)"/)?.[1]
+        return path && existsSync(path) ? path : null
+      } catch { return null }
+    })()
+    if (viaRegistry) return { exe: viaRegistry }
+  }
+  const exe = findBrowser()
+  return exe ? { exe } : null
+}
+
+/**
+ * 本轮登录用「用户日常浏览器」的那张浏览器截图（② 的绑定地址）。
+ * 若用户后面在两个窗口之间切换（① 的一次性窗口 / ② 的默认窗口），
+ * 这是给 ② 的那一份：一次登录只用一份。
+ */
+export const GOOGLE_HANDOFF_KEY = 'google-handoff'
+
+/**
+ * 用**用户日常浏览器**开 URL —— 没有 --user-data-dir，没有 --remote-debugging-port，
+ * 纯按 URL 把它交给系统默认处理。给 ② 的 Google 登录跳用：
+ * 跳过去的正是用户自己的已登录窗口。
+ *
+ * 开成功后在 `session` 上落 `defaultProfileBound = true`（见文件头），
+ * `closeSession` 据此跳过 profile 删除；`session` 不存在时静默不开。
+ *
+ * 返回 `{ exe }`（开成功了用的是哪一款）或 null（找不到浏览器）。
+ */
+export function openInDefaultBrowser(url, session) {
+  const target = findDefaultBrowser()
+  if (!target) return null
+  try { spawn(target.exe, [url], { stdio: 'ignore', detached: true, windowsHide: false }).unref?.() } catch { return null }
+  if (session) session.defaultProfileBound = true
+  return target
+}
+
+/** ② 已发生：本轮登录窗拥有用户默认 profile（`closeSession` 据此跳过删；测试锚点）。 */
+export function isDefaultProfileBound(session) {
+  return Boolean(session?.defaultProfileBound)
+}
 
 /** 找本机 Chromium 内核浏览器。 */
 export function findBrowser() {
@@ -248,9 +340,12 @@ export async function waitForCreds(session, hostFragment, { timeout = 300_000, i
   return null
 }
 
-/** 关浏览器（先 Browser.close，再兜底 taskkill 整棵进程树），然后删 profile。 */
+/** 关浏览器（先 Browser.close，再兜底 taskkill 整棵进程树），然后删 profile。
+ *  ② 已发生时不删：窗口拥有用户默认 profile —— 关浏览器到这里为止，
+ *  不动它的登录态与 localStorage / cookie。 */
 export async function closeSession(session) {
   if (!session) return
+  if (session.defaultProfileBound) return
   try {
     const r = await fetch(`http://127.0.0.1:${session.port}/json/version`, { signal: AbortSignal.timeout(3000) })
     const v = await r.json()
