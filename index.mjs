@@ -43,6 +43,7 @@ import { accioChannel } from './src/accio.mjs'
 import { lobsteraiChannel } from './src/lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './src/magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './src/autoclaw.mjs'
+import { marvisChannel } from './src/marvis.mjs'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -58,7 +59,7 @@ import { dirname, join } from 'node:path'
  */
 const here = dirname(fileURLToPath(import.meta.url))
 const lazy = {}
-for (const name of ['lingxi', 'doubaowork', 'dola', 'qiniu', 'loomy', 'monkeycode', 'baizhi']) {
+for (const name of ['lingxi', 'marvis-private', 'doubaowork', 'dola', 'qiniu', 'loomy', 'monkeycode', 'baizhi']) {
   const file = join(here, 'src', `${name}.mjs`)
   if (existsSync(file)) {
     try {
@@ -74,6 +75,10 @@ export const HubMagicrewPlugin = makeHubPlugin(magicrewChannel)
 export const HubMagicrewIntlPlugin = makeHubPlugin(magicrewIntlChannel)
 // 按需渠道：有才导出
 export const HubLingxiPlugin = lazy.lingxi ? makeHubPlugin(lazy.lingxi.lingxiChannel) : undefined
+// 公开 marvis：随包发布（registry 登记后即为正式渠道）
+export const HubMarvisPlugin = makeHubPlugin(marvisChannel)
+// 私有 marvis：本机薄壳，不随包；同一份实现，只换 id 与显示名
+export const HubMarvisPrivatePlugin = lazy['marvis-private'] ? makeHubPlugin(lazy['marvis-private'].marvisPrivateChannel) : undefined
 export const HubDoubaoWorkPlugin = lazy.doubaowork ? makeHubPlugin(lazy.doubaowork.doubaoworkChannel) : undefined
 export const HubDolaPlugin = lazy.dola ? makeHubPlugin(lazy.dola.dolaChannel) : undefined
 export const HubQiniuPlugin = lazy.qiniu ? makeHubPlugin(lazy.qiniu.qiniuChannel) : undefined
@@ -93,6 +98,8 @@ export const HUB_PLUGINS = {
   HubMagicrewPlugin,
   HubMagicrewIntlPlugin,
   ...(HubLingxiPlugin === undefined ? {} : { HubLingxiPlugin }),
+  HubMarvisPlugin,
+  ...(HubMarvisPrivatePlugin === undefined ? {} : { HubMarvisPrivatePlugin }),
   ...(HubDoubaoWorkPlugin === undefined ? {} : { HubDoubaoWorkPlugin }),
   ...(HubDolaPlugin === undefined ? {} : { HubDolaPlugin }),
   ...(HubQiniuPlugin === undefined ? {} : { HubQiniuPlugin }),

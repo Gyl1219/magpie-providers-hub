@@ -43,11 +43,13 @@ test('每个实例只注册自己那一条（七条必备 + 本机按需渠道�
   }
 })
 
-test('登录入口：oauth 在前、粘贴型在后（灵犀两条，其余一条）', async () => {
+test('登录入口：oauth 在前、粘贴型在后（灵犀两条，marvis 三条，其余一条）', async () => {
   for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
     const plugin = await makePlugin({}, {})
     const methods = plugin.auth.methods
-    assert.ok(methods.length >= 1 && methods.length <= 2, `${exportName} 入口数异常：${methods.length}`)
+    // ⚠ 上限从 2 放宽到 3：marvis 有三条登录路（QQ / 微信 / 本机导入），
+    //   按 codearts 的形态**没有**粘贴兜底；其余渠道仍是 1-2 条。
+    assert.ok(methods.length >= 1 && methods.length <= 3, `${exportName} 入口数异常：${methods.length}`)
     const apiIndexes = methods.map((m, i) => (m.type === 'api' ? i : -1)).filter((i) => i >= 0)
     const oauthMethods = methods.filter((m) => m.type === 'oauth')
     // oauth 入口必须在前（主路径），粘贴型入口在后（兜底）

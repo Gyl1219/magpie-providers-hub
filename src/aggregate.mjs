@@ -42,6 +42,7 @@ import { accioChannel } from './accio.mjs'
 import { lobsteraiChannel } from './lobsterai.mjs'
 import { magicrewChannel, magicrewIntlChannel } from './magicrew.mjs'
 import { autoclawChannel, autoclawCnChannel } from './autoclaw.mjs'
+import { marvisChannel } from './marvis.mjs'
 import { CHANNEL_ICONS } from './icons.mjs'
 
 // ── 按需加载的渠道（发布包里没有对应文件，本机有才加载）────────────────
@@ -51,6 +52,7 @@ import { CHANNEL_ICONS } from './icons.mjs'
 //   加载模式：existsSync + 动态 import，文件不在就静默跳过，不拖垮插件。
 const lazyChannels = {
   lingxi: './lingxi.mjs',
+  'marvis-private': './marvis-private.mjs',
   doubaowork: './doubaowork.mjs',
   dola: './dola.mjs',
   qiniu: './qiniu.mjs',
@@ -101,7 +103,10 @@ const PROVIDER_NAME_OVERRIDES = {}
  */
 const CHANNELS = [
   astudioChannel, accioChannel, lobsteraiChannel, magicrewChannel, magicrewIntlChannel,
+  // 公开 marvis 随包发布；私有那条（marvis-private）是本机薄壳，文件不在就跳过
+  marvisChannel,
   ...(lazyLoaded.lingxi ? [lazyLoaded.lingxi] : []),
+  ...(lazyLoaded['marvis-private'] ? [lazyLoaded['marvis-private']] : []),
   ...(lazyLoaded.doubaowork ? [lazyLoaded.doubaowork] : []),
   ...(lazyLoaded.dola ? [lazyLoaded.dola] : []),
   ...(lazyLoaded.qiniu ? [lazyLoaded.qiniu] : []),
@@ -1101,7 +1106,9 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
           type: 'oauth',
           label,
           async authorize() {
-            const started = await channel.beginLogin(openBrowser, {})
+            // ⚠ 把 loginMethods 条目的 `arg` 透传给渠道：多登录入口（如 marvis 的
+            //   QQ / 微信 / 本机导入）靠它区分点了哪个；不收参的渠道（lingxi）忽略即可。
+            const started = await channel.beginLogin(openBrowser, { arg })
             // 登录前的账号槽状态（accountId → 此前凭据是否已过期）—— 判据见下
             const preSlots = new Map(
               readMagpieAuthSlots(PROVIDER)
