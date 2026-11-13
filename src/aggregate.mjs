@@ -972,10 +972,38 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
     return auth
   })
 
-  /** 请求体里的 model 可能是 `glm-5.3` / `hub-officeace/glm-5.3` / 旧 `officeace/glm-5.3`。 */
+  /**
+   * 请求体里的 model 可能是 `glm-5.3` / `hub-officeace/glm-5.3` / 旧 `officeace/glm-5.3`。
+   *
+   * ⚠️ 有的渠道上游模型名**自带斜杠**（MonkeyCode 的 `monkeycode-basic/deepseek-flash`、
+   * `monkeycode-pro/deepseek-v4-pro`）。这类名字一旦按斜杠切段，倒数第二段 `monkeycode-basic`
+   * 既不是 provider 也不是 channel id，就会被判成「别的供应商的模型」→ 404；
+   * 就算放过，只取最后一段发上游也必 403（上游只认带档位前缀的全名）。
+   *
+   * 故渠道可用 `modelHasSlash: true` 声明。声明后：先剥真正的供应商前缀
+   * （`hub-<id>/` / `<id>/` / `providers-hub/`，允许叠加），**剩下的整串**就是上游模型名，
+   * 不再按斜杠切段。
+   */
   const resolve = (modelId) => {
-    const parts = String(modelId ?? '').trim().split('/').filter((s) => s !== '')
+    const raw = String(modelId ?? '').trim()
+    if (raw === '') return undefined
+    const parts = raw.split('/').filter((s) => s !== '')
     if (parts.length === 0) return undefined
+
+    if (channel.modelHasSlash === true) {
+      // 逐个剥掉属于本供应商的前缀段，剩余全部保留给上游。
+      let index = 0
+      while (index < parts.length - 1) {
+        const segment = parts[index]
+        const isOurs = segment === PROVIDER || segment === channel.id
+          || segment === LEGACY_PROVIDER || segment === HUB_PREFIX + channel.id
+        if (!isOurs) break
+        index += 1
+      }
+      const model = parts.slice(index).join('/')
+      return model === '' ? undefined : { channel, model }
+    }
+
     const model = parts[parts.length - 1]
     if (model === '') return undefined
     if (parts.length === 1) return { channel, model }

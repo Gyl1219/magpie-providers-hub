@@ -934,6 +934,10 @@ function makeChannel(site) {
   return {
     id: site.id,
     displayName: site.displayName,
+    // ⚠️ 上游模型名**自带斜杠**（`monkeycode-basic/deepseek-flash`）。
+    // 不声明这个，aggregate 的 resolve() 会把 `monkeycode-basic` 当成渠道前缀、
+    // 只把 `deepseek-flash` 发给网关 → 网关 403 Forbidden（真机实测）。
+    modelHasSlash: true,
     fallbackModels: catalogOf(),
     beginLogin: (openBrowser) => beginLoginFor(site, openBrowser),
     loginMethods: [{ label: '浏览器登录（官方页登录自动换 Key）或手动粘贴' }],
