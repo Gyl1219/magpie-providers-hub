@@ -1,4 +1,4 @@
-﻿// LobsterAI（有道龙虾）渠道 —— 移植自 DSH `lobsterai.ts` / `lobsterai-oauth.ts` /
+// LobsterAI（有道龙虾）渠道 —— 移植自 DSH `lobsterai.ts` / `lobsterai-oauth.ts` /
 // `lobsterai-product.ts` / `lobsterai-credits.ts`。
 //
 // ## 协议速览（DSH 实证，见 lobsterai2api + docs/lobsterai-integration-plan.md §4）
@@ -348,27 +348,39 @@ async function fetchCatalog(credential) {
   const models = {}
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue
-    const id = typeof row.id === 'string' ? row.id.trim()
-      : (typeof row.model === 'string' ? row.model.trim() : '')
+    // ⚠️ 上游 2026-11 的字段名是 `modelId` / `modelName`。早前只读 `id` / `model`，
+    //    结果 19 条全被下面的 `continue` 跳过 → `catalog()` 成功返回空表 →
+    //    聚合层静默回落 6 条兜底目录（真机报障：「道龙虾怎么只有 6 个模型」）。
+    //    三组写法都认，别只留一种。
+    const id = typeof row.modelId === 'string' ? row.modelId.trim()
+      : typeof row.id === 'string' ? row.id.trim()
+        : (typeof row.model === 'string' ? row.model.trim() : '')
     if (id.length === 0) continue
-    const name = typeof row.name === 'string' && row.name.length > 0 ? row.name : id
+    const name = typeof row.modelName === 'string' && row.modelName.length > 0 ? row.modelName
+      : (typeof row.name === 'string' && row.name.length > 0 ? row.name : id)
     const context = readNum(row.contextWindow ?? row.context_length) ?? 131_072
     const output = readNum(row.maxTokens ?? row.max_tokens) ?? 8192
     const inputs = Array.isArray(row.inputModalities) ? row.inputModalities : []
-    const attachment = inputs.includes('image') || row.supportsVision === true || row.vision === true
+    const attachment = row.supportsImage === true || inputs.includes('image')
+      || row.supportsVision === true || row.vision === true
+    // `supportsThinking` 有值；`supportsToolCalling` 实测 19 条全是 null（未声明），
+    // 只能是「说了才信、没说按支持」——LobsterAI 全平台模型都可调工具。
+    const reasoning = row.supportsThinking === true
+    const toolCall = row.supportsToolCalling === false ? false : true
     models[id] = {
       name,
       limit: { context, output },
-      tool_call: true,
-      // ⚠️ 两处都要写（见 lingxi.mjs modelRow 注释）：magpie 读 capabilities.input.image，
-      //    models.dev 那条路径读顶层 modalities/attachment。只写一处会误判能力。
+      // ⚠️ 顶层 `tool_call` / `reasoning` 与嵌套 `capabilities` **两处都要写**：
+      //    magpie 网关那条路径读顶层（`m.tool_call ?? true`），models.dev 那条读嵌套。
+      tool_call: toolCall,
+      reasoning,
       attachment,
-      modalities: { input: attachment ? ['text', 'image'] : ['text'] },
+      modalities: { input: attachment ? ['text', 'image'] : ['text'], output: ['text'] },
       capabilities: {
         temperature: true,
-        reasoning: true,
+        reasoning,
         attachment,
-        toolcall: true,
+        toolcall: toolCall,
         input: { text: true, image: attachment, audio: false, video: false, pdf: false },
         output: { text: true, image: false, audio: false, video: false, pdf: false },
       },
@@ -379,21 +391,73 @@ async function fetchCatalog(credential) {
       release_date: '',
     }
   }
+  // ⚠️ 防线：上游给了数据但一条都没认出来，说明字段名又变了。
+  //    这时**必须抛错**，不能返回空表 —— 空表会被聚合层静默换成兜底目录，
+  //    故障表现成「模型少了几个」，没人看得出是解析失败（2026-11 就这么漏过一次）。
+  if (rows.length > 0 && Object.keys(models).length === 0) {
+    const sample = JSON.stringify(rows[0]).slice(0, 200)
+    throw new Error(`LobsterAI 目录字段对不上：上游返回 ${rows.length} 条但无法解析出模型 id。样本：${sample}`)
+  }
   return models
 }
 
 /**
- * 兜底目录（DSH 实测 `GET /api/models/available` 拉到的常用条目）。
+ * 兜底目录（2026-11 真机 `GET /api/models/available` 的 19 条快照）。
+ *
  * ⚠️ 上游若有变化以远端为准；这里只在远端整体失败时顶替。
+ * ⚠️ 早前这份表只有 6 条**已下线**的模型（deepseek-v4 / kimi-k2.6 / minimax-m3…），
+ *    而上游早换成了 deepseek-flash / kimi-k3.1-pro / MiniMax-M3 这一代。
+ *    于是「远端解析失败 → 静默落到兜底」时，用户看到的既少又是旧模型 ——
+ *    典型的「只有 6 个模型」报障就是这么来的。
+ * 能力字段与 fetchCatalog 输出同构：顶层 `tool_call`/`reasoning`/`attachment` +
+ * 嵌套 `capabilities`，两处都写。
  */
-const FALLBACK_MODELS = {
-  'deepseek-v4': { name: 'DeepSeek V4', limit: { context: 131_072, output: 8192 } },
-  'deepseek-v4-flash': { name: 'DeepSeek V4 Flash', limit: { context: 1_000_000, output: 8192 } },
-  'glm-5.3': { name: 'GLM-5.3', limit: { context: 1_000_000, output: 8192 } },
-  'kimi-k2.6': { name: 'Kimi K2.6', limit: { context: 262_144, output: 8192 } },
-  'qwen3.8-max': { name: 'Qwen 3.8 Max', limit: { context: 1_000_000, output: 8192 } },
-  'minimax-m3': { name: 'MiniMax M3', limit: { context: 1_000_000, output: 8192 } },
-}
+const FALLBACK_MODELS = Object.fromEntries(
+  [
+    ['deepseek-flash', 'DeepSeek-V4.1-Flash', 1_000_000, true, true],
+    ['deepseek-v4-pro', 'DeepSeek-V4-Pro', 1_000_000, false, true],
+    ['deepseek-v4-flash', 'DeepSeek-V4-Flash', 1_000_000, false, true],
+    ['deepseek-v4-flash-vision-exp', 'DeepSeek-V4-Flash-Vision-Exp', 1_000_000, true, true],
+    ['glm-5.3', 'GLM-5.3', 1_000_000, false, true],
+    ['glm-5.3-flash', 'GLM-5.3-Flash', 1_000_000, true, true],
+    ['glm-5.3-flashx', 'GLM-5.3-FlashX', 1_000_000, true, true],
+    ['glm-5.2', 'GLM-5.2', 1_000_000, false, true],
+    ['kimi-k3.1-pro', 'Kimi-K3.1-Pro', 1_048_576, true, true],
+    ['kimi-k3.1-pro-highspeed', 'Kimi-K3.1-Pro-Highspeed', 1_048_576, true, true],
+    ['kimi-k2.8-preview', 'Kimi-K2.8-Preview', 262_144, true, true],
+    ['MiniMax-M3', 'MiniMax-M3', 1_000_000, true, true],
+    ['MiniMax-M3.1-Flash', 'MiniMax-M3.1-Flash', 1_000_000, true, true],
+    ['qwen3.8-max', 'Qwen3.8-Max', 1_000_000, true, true],
+    ['qwen3.8-flash', 'Qwen3.8-Flash', 1_000_000, true, true],
+    ['qwen3.8-omni-flash', 'Qwen3.8-Omni-Flash', 1_000_000, true, true],
+    ['qwen3.7-max', 'Qwen3.7-Max', 1_000_000, false, true],
+    ['qwen3.7-plus', 'Qwen3.7-Plus', 1_000_000, true, true],
+    ['doubao-seed-2-1-pro-260915', 'Doubao-Seed-2.1-Pro', 256_000, true, true],
+  ].map(([id, name, context, vision, reasoning]) => [
+    id,
+    {
+      name,
+      limit: { context, output: 8192 },
+      tool_call: true,
+      reasoning,
+      attachment: vision,
+      modalities: { input: vision ? ['text', 'image'] : ['text'], output: ['text'] },
+      capabilities: {
+        temperature: true,
+        reasoning,
+        attachment: vision,
+        toolcall: true,
+        input: { text: true, image: vision, audio: false, video: false, pdf: false },
+        output: { text: true, image: false, audio: false, video: false, pdf: false },
+      },
+      options: {},
+      headers: {},
+      variants: {},
+      status: 'active',
+      release_date: '',
+    },
+  ]),
+)
 
 // ── chat（OpenAI 兼容，**仅 SSE、裸流不套信封**）────────────────────────
 
