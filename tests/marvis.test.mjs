@@ -81,7 +81,7 @@ if (!existsSync(MARVIS_URL)) {
 
       const sent = JSON.parse(calls[0].init.body)
       // checkpoint 7：显示名 → 槽位名，真实模型名绝不出现在 model 字段
-      assert.equal(sent.model, 'main-auto')
+      assert.equal(sent.model, 'deepseek-v4-pro-external')
       // 信封 {body,signal,renew} 的其余键绝不进请求体
       assert.ok(!('renew' in sent) && !('signal' in sent), '信封键外泄到上游 body')
       // 工具 schema：顶层补 type:"object"（缺一个上游就 3000101）
@@ -102,10 +102,10 @@ if (!existsSync(MARVIS_URL)) {
     const { calls, impl } = recorder(() => new Response('data: ok\n\n', { status: 200 }))
     const ac = new AbortController()
     await withMockFetch(impl, async () => {
-      await marvisChannel.chat(ACCT, { body: { model: 'main-auto', messages: [] }, signal: ac.signal })
+      await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] }, signal: ac.signal })
       assert.equal(calls[0].init.signal, ac.signal, 'signal 必须原样透传')
 
-      await marvisChannel.chat(ACCT, { body: { model: 'main-auto', messages: [] } })
+      await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
       assert.equal(calls[1].init.signal, undefined, '没给 signal 时不得自造 timeout signal')
     })
   })
@@ -116,7 +116,7 @@ if (!existsSync(MARVIS_URL)) {
       () => new Response(payload, { status: 200, headers: { 'content-type': 'text/plain' } }),
     )
     await withMockFetch(impl, async () => {
-      const res = await marvisChannel.chat(ACCT, { body: { model: 'main-auto', messages: [] } })
+      const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
       assert.match(res.headers.get('content-type') ?? '', /event-stream/)
       // 若 chat 先读过 body，这里会拿到空串（「只有第一段就结束」的根因）
       assert.equal(await res.text(), payload)
@@ -132,7 +132,7 @@ if (!existsSync(MARVIS_URL)) {
     ]) {
       const { impl } = recorder(() => resp.clone())
       await withMockFetch(impl, async () => {
-        const res = await marvisChannel.chat(ACCT, { body: { model: 'main-auto', messages: [] } })
+        const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
         assert.equal(res.status, 401)
         assert.equal(res.headers.get('x-magpie-sign-in'), 'expired', '摘号重登靠这个头')
         const body = await res.json()
@@ -144,7 +144,7 @@ if (!existsSync(MARVIS_URL)) {
   test('错误分流：风控 4100404 → 503（可重试换 uskey）', async () => {
     const { impl } = recorder(() => json({ code: 4100404, msg: '风控拦截' }, 403))
     await withMockFetch(impl, async () => {
-      const res = await marvisChannel.chat(ACCT, { body: { model: 'main-auto', messages: [] } })
+      const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
       assert.equal(res.status, 503)
       assert.equal((await res.json()).error.code, 'risk_blocked')
     })
@@ -154,7 +154,7 @@ if (!existsSync(MARVIS_URL)) {
     for (const resp of [json({ code: 4100402, msg: '模型不存在' }, 400), json({ msg: 'nope' }, 404)]) {
       const { impl } = recorder(() => resp.clone())
       await withMockFetch(impl, async () => {
-        const res = await marvisChannel.chat(ACCT, { body: { model: 'main-auto', messages: [] } })
+        const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
         assert.equal(res.status, 404)
         assert.equal((await res.json()).error.code, 'model_unavailable')
       })
@@ -164,7 +164,7 @@ if (!existsSync(MARVIS_URL)) {
   test('错误分流：未知错误原样透出状态码与 body', async () => {
     const { impl } = recorder(() => new Response('oops', { status: 500 }))
     await withMockFetch(impl, async () => {
-      const res = await marvisChannel.chat(ACCT, { body: { model: 'main-auto', messages: [] } })
+      const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
       assert.equal(res.status, 500)
       assert.equal(await res.text(), 'oops')
     })
@@ -173,7 +173,7 @@ if (!existsSync(MARVIS_URL)) {
   test('凭据坏 → 401 Response，不抛（checkpoint 3 可达面）', async () => {
     const { impl } = recorder(() => json({}, 200))
     await withMockFetch(impl, async () => {
-      const res = await marvisChannel.chat('garbage-not-a-credential', { body: { model: 'main-auto' } })
+      const res = await marvisChannel.chat('garbage-not-a-credential', { body: { model: 'deepseek-v4-pro-external' } })
       assert.ok(res instanceof Response)
       assert.equal(res.status, 401)
       assert.equal(res.headers.get('x-magpie-sign-in'), 'expired')
@@ -299,18 +299,18 @@ if (!existsSync(MARVIS_URL)) {
     assert.equal(typeof marvisChannel.catalog, 'function')
   })
 
-  test('fallbackModels/catalog：只列 codearts 确知的 main-auto，能力三处齐写', async () => {
+  test('fallbackModels/catalog：只列 codearts 确知的 deepseek-v4-pro-external，能力三处齐写', async () => {
     assert.equal(typeof marvisChannel.fallbackModels, 'object', '必须是对象：聚合层 Object.keys() 取数量')
     const models = await marvisChannel.catalog()
     assert.equal(Object.keys(models).length, MARVIS_TABLE.length)
-    // ⚠️ 公开版只列 main-auto：Marvis 无远端目录端点，猜别的槽位会让用户
+    // ⚠️ 公开版只列一条：Marvis 无远端目录端点，猜别的槽位会让用户
     //    看到「点了就 4100402」的假模型。本机更多槽位在 marvis-private.mjs。
     assert.equal(MARVIS_TABLE.length, 1)
     assert.deepEqual(
       Object.keys(models).map((k) => models[k].name).filter(Boolean).length > 0
         ? MARVIS_TABLE.map(([slot]) => slot)
         : [],
-      ['main-auto'],
+      ['deepseek-v4-pro-external'],
       '槽位名写错不报错，只会 4100402 —— 公开版锁死 codearts 确知的那一条',
     )
     for (const [name, m] of Object.entries(models)) {
@@ -702,7 +702,7 @@ if (!existsSync(MARVIS_URL)) {
       async () => {
         let renewCalls = 0
         const res = await marvisChannel.chat(RT_CRED, {
-          body: { model: 'main-auto', messages: [] },
+          body: { model: 'deepseek-v4-pro-external', messages: [] },
           renew: async (current) => {
             renewCalls += 1
             return { ...current, accessToken: 'OLD' } // token 不变也要重发（续期只重置有效期）
@@ -723,7 +723,7 @@ if (!existsSync(MARVIS_URL)) {
       },
       async () => {
         const res = await marvisChannel.chat(RT_CRED, {
-          body: { model: 'main-auto', messages: [] },
+          body: { model: 'deepseek-v4-pro-external', messages: [] },
           renew: async () => {
             throw new Error('续期没成功')
           },
@@ -744,7 +744,7 @@ if (!existsSync(MARVIS_URL)) {
       },
       async () => {
         const res = await marvisChannel.chat(RT_CRED, {
-          body: { model: 'main-auto', messages: [] },
+          body: { model: 'deepseek-v4-pro-external', messages: [] },
           renew: async (current) => {
             renewCalls += 1
             return { ...current }

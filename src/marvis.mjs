@@ -180,12 +180,22 @@ function businessHeaders(acct, { query, method = 'GET' }) {
 // 已移除（上游 400 无效模型 id / 500 / 空响应）：
 //   glm-5v-turbo-thinking · claude-opus-4-6-thinking · memory-compress · profile-request-placeholder
 //   kimi-k2.5（500 RPC）· hunyuan-2.0-instruct-20251111（空响应）· venus-vision-llm（→ default）
-// ⚠️ 只有一条，与 codearts 一致：Marvis **没有远端目录端点**（那个仓库实测
-//    9 个候选端点全 404），而槽位表只确知 main-auto 一个。
-//    猜别的槽位名会让用户看到「点了就 4100402 无效模型」的假模型 —— 宁可少列。
+// ⚠️ 只有一条，与 codearts 一致：Marvis **没有远端目录端点**（上游实测 10 个候选
+//    端点全 404/400），槽位表是静态兜底。猜别的槽位名会让用户看到「点了就
+//    4100402 无效模型」的假模型 —— 宁可少列。
+//
+// ⚠️⚠️ 上行槽位 2026-11-14 由 `main-auto` 改为 `deepseek-v4-pro-external`
+//    （codearts 的用户裁定）。两者**真实下行是同一个模型**
+//    `deepseek-v4-1-flash-261017`（响应体 model 字段可证），所以展示名
+//    「DeepSeek V4.1 Flash」不变，对用户透明。
+//    存量配置里的 `main-auto` / 下标 `0` / 真实模型 id 由 canonicalModelId 归一，
+//    否则老会话会「目录未命中」静默退化成未知模型（text-only、无上下文、不报错）。
+//
+//    ⚠️ `claude-*` / `gpt-5.4` 在实测账号下是 `400 4130001 无效模型id`（未授权），
+//    「槽位表里有」不等于「这个号能用」；槽位还按账号/套餐下发。
 //    本机想用更多槽位，在 marvis-private.mjs 里覆写 fallbackModels/catalog。
 const TABLE = [
-  ['main-auto', 'DeepSeek V4.1 Flash', 1_000_000, { tools: true, vision: true }],
+  ['deepseek-v4-pro-external', 'DeepSeek V4.1 Flash', 1_000_000, { tools: true, vision: true }],
 ]
 
 /** 默认输出上限（Marvis 的 default 槽位写的是 32000） */
@@ -197,12 +207,22 @@ const slotToName = new Map(TABLE.map(([slot, name]) => [slot, name]))
 const nameToSlot = new Map(TABLE.map(([slot, name]) => [name, slot]))
 /** 旧版存量：magpie 把数组下标持久化成了 `"0"…"7"`，路由里写 `marvis/0` */
 const MODEL_ALIASES = Object.fromEntries(TABLE.map(([slot], index) => [String(index), slot]))
+const LEGACY_SLOTS = Object.freeze({
+  // 2026-11-14 前的上行槽位；两个槽位下行同一个真实模型，换过去对用户无感
+  'main-auto': 'deepseek-v4-pro-external',
+})
+const REAL_MODEL_IDS = Object.freeze({
+  // 响应体 model 字段被用户粘进配置过；真实 id 直传上游会 400 无效模型id
+  'deepseek-v4-1-flash-261017': 'deepseek-v4-pro-external',
+})
 
-/** 把任意写法的模型 id 归一到槽位名：下标 / 显示名 / 槽位名都能进来 */
+/** 把任意写法的模型 id 归一到槽位名：下标 / 旧槽位 / 真实 id / 显示名 / 槽位名都能进来 */
 function canonicalModelId(id) {
   const raw = typeof id === 'string' ? id.trim() : ''
   if (raw === '') return TABLE[0][0]
   if (MODEL_ALIASES[raw]) return MODEL_ALIASES[raw]
+  if (LEGACY_SLOTS[raw]) return LEGACY_SLOTS[raw]
+  if (REAL_MODEL_IDS[raw]) return REAL_MODEL_IDS[raw]
   if (nameToSlot.has(raw)) return nameToSlot.get(raw)
   if (slotToName.has(raw)) return raw
   // 未知名字原样交给上游 —— 让它给出明确的 4100402，而不是我们静默换模型
