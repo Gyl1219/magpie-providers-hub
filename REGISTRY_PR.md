@@ -45,7 +45,7 @@ MYCF711 的 #399 在 2026-10-27 被卡住的原话：
 >
 > ```bash
 > node tools/registry-entry.mjs          # 打条目片段（id 从 files 实推，顺序稳定）
-> node tools/registry-entry.mjs --check  # 校验：条数=12 / 私有渠道不在包里 / 摘要字数
+> node tools/registry-entry.mjs --check  # 校验：条数=12 / 随包渠道与 files 一致 / 摘要字数
 > ```
 >
 > 当前实跑结果：**12 条渠道，`summary.zh` 605 字，`summary.en` 1268 字符**。
