@@ -325,6 +325,64 @@ test('chat：HTTP 200 + text/html = 风控拦截页，必须报风控而不是�
   }
 })
 
+test('chat：HTTP 403 + text/html = 网关拒绝页，绝不能续期（续期会轮换 refresh_token → invalid_grant → 账号被标死）', async () => {
+  let renewCalls = 0
+  const stub = stubFetch([{
+    match: '/api/adk/llm/generateContent',
+    respond: () => new Response('<html><body>403 Forbidden: request blocked</body></html>', {
+      status: 403,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    }),
+  }])
+  try {
+    const response = await accioChannel.chat(CRED, {
+      body: { model: 'qwen-3-8-flash', messages: [{ role: 'user', content: 'hi' }] },
+      renew: async () => {
+        renewCalls += 1
+        return { ...CRED, access_token: 'ane22_new', refresh_token: 'rr_2' }
+      },
+    })
+    const payload = await response.json()
+    assert.equal(response.status, 403)
+    assert.equal(renewCalls, 0, '403+HTML 是风控拒绝页，不是凭据过期 —— 一次续期都不许发')
+    assert.equal(stub.calls.length, 1, '不许为重发而二次请求')
+    assert.match(payload.error.message, /403/, '状态码要在文案里')
+    assert.match(payload.error.message, /拒绝页|text\/html|HTML/, '要说明是 HTML 拒绝页')
+    assert.match(payload.error.message, /没有触发续期/, '要讲清为什么不续期（否则后人会"顺手修好"）')
+    assert.match(payload.error.message, /request blocked/, '服务端原文要带给用户')
+  } finally {
+    stub.restore()
+  }
+})
+
+test('chat：HTTP 403 + JSON = 真的是凭据失效，照旧续期一次重发', async () => {
+  let renewCalls = 0
+  const stub = stubFetch([{
+    match: '/api/adk/llm/generateContent',
+    respond: ({ calls }) => (calls.length === 1
+      ? new Response('{"error":{"code":"PERMISSION_DENIED"}}', {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      })
+      : sse([{ content: { role: 'model', parts: [{ text: 'ok' }] }, turn_complete: true }])),
+  }])
+  try {
+    const response = await accioChannel.chat(CRED, {
+      body: { model: 'qwen-3-8-flash', messages: [{ role: 'user', content: 'hi' }] },
+      renew: async () => {
+        renewCalls += 1
+        return { ...CRED, access_token: 'ane22_new', refresh_token: 'rr_2' }
+      },
+    })
+    await response.text()
+    assert.equal(renewCalls, 1, 'JSON 403 仍按凭据过期处理')
+    assert.equal(stub.calls.length, 2, '续期后要重发一次')
+    assert.equal(JSON.parse(stub.calls[1].body).token, 'ane22_new', '重发必须带新 token')
+  } finally {
+    stub.restore()
+  }
+})
+
 test('chat：请求体必须 token 在 body（放 Authorization 头恒流内 402）+ sg_k + snake_case', async () => {
   let captured
   const stub = stubFetch([{

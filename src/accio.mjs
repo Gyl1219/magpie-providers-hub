@@ -947,6 +947,25 @@ async function chat(credential, { body: openaiBody, signal, renew }) {
   )
 
   let response = await send(credential)
+
+  // ⚠️⚠️ 网关的 403 有两种，必须先分开再决定要不要续期：
+  //    ① 凭据被提前撤销 → 续期一次重发是对的
+  //    ② 风控/网关拒绝页（403 + text/html）→ **不能续期**：
+  //       续期会轮换 refresh_token（一次性），并发消费会 invalid_grant 把账号标死，
+  //       还会把其它客户端的登录态顶掉。这种情况直接报错，把原文透出来。
+  //    codearts 的同一处修复（PR #76 双审计）就是这么分流的。
+  const deniedMediaType = (response.headers.get('content-type') ?? '').split(';', 1)[0].trim().toLowerCase()
+  if (response.status === 403 && deniedMediaType === 'text/html') {
+    const peek = await response.text().catch(() => '')
+    void response.body?.cancel?.().catch?.(() => {})
+    return Response.json(
+      { error: { type: 'provider_error', message: 'accio: 推理请求被网关拒绝（HTTP 403 + HTML 拒绝页）——'
+        + '通常是风控，不是凭据过期，因此没有触发续期（续期会轮换 refresh_token 并把账号标死）。'
+        + (peek === '' ? '' : ` 服务端原文：${peek.slice(0, 200)}`) } },
+      { status: 403 },
+    )
+  }
+
   // HTTP 401/403：凭据可能被服务端提前撤销而本地 expires_at 未到 —— 续期一次重发。
   // ⚠️ token 在 body 里，重发前必须把新 token 写回（applyAccessToken 同位）。
   if ((response.status === 401 || response.status === 403) && typeof renew === 'function') {
