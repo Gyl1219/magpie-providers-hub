@@ -84,25 +84,67 @@ const SITES = {
   },
 }
 
+/**
+ * 网关支持的思考档位 —— **只有这四档**（issue #11）。
+ * ⚠️ 与 `monkeycode-bridge.mjs` 的 `monkeycodeThinkingFor()` 一一对应：
+ *    none → `{type:'disabled'}`；low/medium/high → `{type:'enabled', budget_tokens: 2048/4096/8192}`。
+ *    声明 minimal/xhigh/max 之类会静默失效（桥返回 undefined ⇒ 不下发 thinking，用户以为选了档）。
+ */
+const THINKING_EFFORTS = Object.freeze(['none', 'low', 'medium', 'high'])
+/** 默认档位（medium = 4096 budget，与上游桌面端一致）。 */
+const DEFAULT_THINKING_EFFORT = 'medium'
+
 /** 内置目录 —— 网关 /v1/models 实测 405，这份表就是全量事实（上游快照）。 */
 const GATEWAY_MODELS = {
-  'monkeycode-basic/deepseek-flash': { name: 'DeepSeek Flash（basic 额度）', limit: { context: 1_048_576, output: 8_192 } },
-  'monkeycode-basic/deepseek-v4-flash': { name: 'DeepSeek V4 Flash（basic 额度）', limit: { context: 1_048_576, output: 8_192 } },
-  'monkeycode-pro/deepseek-flash': { name: 'DeepSeek Flash（pro 额度）', limit: { context: 1_048_576, output: 8_192 } },
-  'monkeycode-pro/deepseek-v4-pro': { name: 'DeepSeek V4 Pro（pro 额度）', limit: { context: 1_048_576, output: 8_192 } },
-  'monkeycode-ultra/deepseek-v4-pro': { name: 'DeepSeek V4 Pro（ultra 额度）', limit: { context: 1_048_576, output: 8_192 } },
+  'monkeycode-basic/deepseek-flash': { name: 'DeepSeek Flash（basic 额度）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
+  'monkeycode-basic/deepseek-v4-flash': { name: 'DeepSeek V4 Flash（basic 额度）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
+  'monkeycode-pro/deepseek-flash': { name: 'DeepSeek Flash（pro 额度）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
+  'monkeycode-pro/deepseek-v4-pro': { name: 'DeepSeek V4 Pro（pro 额度）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
+  'monkeycode-ultra/deepseek-v4-pro': { name: 'DeepSeek V4 Pro（ultra 额度）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
   // 不带前缀的 = 直接扣积分（与订阅档位无关）
-  'deepseek-flash': { name: 'DeepSeek Flash（按积分计费）', limit: { context: 1_048_576, output: 8_192 } },
-  'deepseek-v4-flash': { name: 'DeepSeek V4 Flash（按积分计费）', limit: { context: 1_048_576, output: 8_192 } },
-  'deepseek-v4-pro': { name: 'DeepSeek V4 Pro（按积分计费）', limit: { context: 1_048_576, output: 8_192 } },
+  'deepseek-flash': { name: 'DeepSeek Flash（按积分计费）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
+  'deepseek-v4-flash': { name: 'DeepSeek V4 Flash（按积分计费）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
+  'deepseek-v4-pro': { name: 'DeepSeek V4 Pro（按积分计费）', limit: { context: 1_048_576, output: 8_192 }, reasoning: true, efforts: THINKING_EFFORTS, defaultEffort: DEFAULT_THINKING_EFFORT },
   // ⚠️ glm-5 刻意不声明 contextWindow：不是 deepseek，窗口与 1M 毫无关系，
   //   照抄就是谎报（且会把宿主的溢出压缩推迟到不可能达到的 token 数）。
+  //   同时不声明 reasoning：GLM-5 在 MonkeyCode 网关没有受控思考档位（声明了也静默失效）。
   'glm-5': { name: 'GLM-5（按积分计费）', limit: { context: 128_000, output: 8_192 } },
 }
 
 /** 目录返回裸模型名（magpie 拼 hub-monkeycode/<名>）—— 这里给一份键序稳定的快照。 */
 function catalogOf() {
-  return JSON.parse(JSON.stringify(GATEWAY_MODELS))
+  const models = {}
+  for (const [id, entry] of Object.entries(GATEWAY_MODELS)) {
+    // ⚠️ 只有显式 `reasoning: true` 才暴露档位：glm-5 等不声明就一个档位都不给
+    //    （声明了但上游不认 = 谎报，宿主会按它下发 reasoning_effort，白等思考）。
+    const reasoning = entry.reasoning === true
+    const efforts = reasoning && Array.isArray(entry.efforts) ? entry.efforts.filter((e) => typeof e === 'string' && e !== '') : []
+    const defaultEffort = reasoning && typeof entry.defaultEffort === 'string' ? entry.defaultEffort : undefined
+    models[id] = {
+      name: entry.name,
+      limit: { ...entry.limit },
+      tool_call: true,
+      // ⚠️ 只声明已验证的两项：reasoning（本次）与 toolcall（桥把 Anthropic tool_use
+      //    映射回 OpenAI tool_calls，单测覆盖）。**不**声明图片能力 —— 桥能把 base64
+      //    data URL 转成 Anthropic image 块，但网关是否受理未真机验证；写 false 是谎报
+      //    （会挡住本可用的图），写 true 也是谎报。保持「未声明」，与改动前一致。
+      capabilities: {
+        temperature: true,
+        reasoning,
+        toolcall: true,
+      },
+      options: efforts.length > 0
+        ? { reasoning_efforts: [...efforts], ...(defaultEffort !== undefined ? { default_reasoning_effort: defaultEffort } : {}) }
+        : {},
+      headers: {},
+      // 档位 → 上行字段（magpie 选档后按这里拼请求；值最终由桥翻成 Anthropic thinking）
+      variants: Object.fromEntries(efforts.map((effort) => [effort, { reasoning_effort: effort }])),
+      status: 'active',
+      release_date: '',
+    }
+    if (efforts.length > 0 && defaultEffort !== undefined) models[id].defaultEffort = defaultEffort
+  }
+  return models
 }
 
 // ── 失败分类（monkeycode.ts 移植）───────────────────────────────────────

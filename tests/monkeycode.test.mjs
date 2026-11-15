@@ -194,7 +194,23 @@ test('目录：内置表（glm-5 不谎报 1M 窗口）', async () => {
   assert.equal(cat['glm-5'].limit.context, 128_000, 'glm-5 用保守值，不照抄 deepseek 的 1M')
   const intl = await monkeycodeIntlChannel.catalog({})
   assert.ok(intl['monkeycode-basic/deepseek-flash'], '国际站同目录（同构部署）')
+  // #11 修复：deepseek 模型暴露受控思考档位（none/low/medium/high，默认 medium）
+  const flash = cat['deepseek-flash']
+  assert.equal(flash.capabilities?.reasoning, true, 'deepseek 模型声明 reasoning 能力')
+  assert.deepEqual(flash.options?.reasoning_efforts ?? [], ['none', 'low', 'medium', 'high'], '档位四档齐全')
+  assert.equal(flash.options?.default_reasoning_effort, 'medium', '默认 medium')
+  // glm-5 不声明 reasoning —— 不得出现档位
+  const glm = cat['glm-5']
+  assert.notEqual(glm.capabilities?.reasoning, true, 'glm-5 不暴露 reasoning')
+  assert.ok(!('reasoning_efforts' in (glm.options ?? {})), 'glm-5 无档位列表')
 })
+
+test('目录 #11：思考档位经 intl catalog() 同样暴露', async () => {
+  const intl = await monkeycodeIntlChannel.catalog({});
+  assert.equal(intl['deepseek-flash'].capabilities?.reasoning, true, '国际站 deepseek 也声明 reasoning');
+  assert.deepEqual(intl['deepseek-flash'].options?.reasoning_efforts ?? [], ['none', 'low', 'medium', 'high']);
+  assert.equal(intl['deepseek-flash'].options?.default_reasoning_effort, 'medium');
+});
 
 // ── 余额（两池）─────────────────────────────────────────────────────────
 
