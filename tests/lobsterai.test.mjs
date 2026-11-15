@@ -58,6 +58,76 @@ test('信封：code !== 0 即失败（含 code 为字符串的形态）', () => 
   assert.equal(parseEnvelope('nope').ok, false)
 })
 
+// ── 登录：exchange 响应不含身份 ⇒ 用 profile-summary 补 ─────────────────
+//
+// 真机（2026-11-15，172.16.3.33 上的 magpie）：两个有道龙虾账号先后登录，
+// 第二个直接把第一个覆盖了 —— exchange 响应没有 nickname/uid，accountId
+// 退化成渠道显示名，两个号落进同一个槽。
+
+const EXCHANGE_OK = {
+  match: '/api/auth/exchange',
+  respond: () => json({ code: 0, data: { accessToken: 'at_new', refreshToken: 'rt_new', expiresIn: 3600 } }),
+}
+
+/** 真跑一次 loopback 登录：beginLogin 起本地服务，再按拿到的 URL 回一次回调。 */
+const runLogin = async (routes) => {
+  const stub = stubFetch(routes)
+  try {
+    let callback
+    const handle = await lobsteraiChannel.beginLogin((url) => {
+      // 登录参数在 hash 里：#/login?source=electron&redirect_uri=...
+      const query = new URLSearchParams(url.split('?')[1] ?? '')
+      const redirect = query.get('redirect_uri')
+      callback = `${redirect}?code=CODE-1&state=${query.get('state')}`
+      globalThis.fetch(callback).catch(() => {})
+    })
+    assert.ok(callback, '登录必须给出带 redirect_uri 的授权页')
+    const credential = await handle.result
+    return { credential, calls: stub.calls }
+  } finally {
+    stub.restore()
+  }
+}
+
+test('登录：exchange 不带身份时用 profile-summary 的 id + 昵称补上（同渠道多账号才分得开槽）', async () => {
+  const { credential, calls } = await runLogin([
+    EXCHANGE_OK,
+    { match: '/api/user/profile-summary', respond: () => json({ code: 0, data: { id: 169340, nickname: ' mzzhcc ' } }) },
+  ])
+  assert.equal(credential.uid, '169340', 'id 要落成 uid 串')
+  assert.equal(credential.nickname, 'mzzhcc', '昵称前后空白要清掉')
+  assert.equal(credential.access_token, 'at_new', 'token 照旧')
+  const profile = calls.find((c) => c.url.includes('/api/user/profile-summary'))
+  assert.ok(profile, '要读一次 profile-summary')
+  assert.equal(profile.headers.Authorization, 'Bearer at_new', '⚠️ 要用刚换到的 token')
+})
+
+test('登录：profile-summary 失败不拖垮登录（身份字段缺省，accountId 退回渠道名）', async () => {
+  const cases = [
+    { match: '/api/user/profile-summary', respond: () => json({ code: 500, msg: 'boom' }, 500) },
+    { match: '/api/user/profile-summary', respond: () => json({ code: 401, msg: 'token 无效' }) },
+    { match: '/api/user/profile-summary', respond: () => json({ code: 0, data: { nickname: '   ' } }) },
+  ]
+  for (const failure of cases) {
+    const { credential } = await runLogin([EXCHANGE_OK, failure])
+    assert.equal(credential.access_token, 'at_new', '登录本身必须成功')
+    assert.equal(credential.uid, undefined)
+    assert.equal(credential.nickname, undefined, '空白昵称不能写进凭据')
+  }
+})
+
+test('登录：exchange 自带的 uid/nickname 被 profile-summary 的权威值覆盖', async () => {
+  const { credential } = await runLogin([
+    {
+      match: '/api/auth/exchange',
+      respond: () => json({ code: 0, data: { accessToken: 'at_new', refreshToken: 'rt_new', uid: 'old-uid', nickname: '渠道给的' } }),
+    },
+    { match: '/api/user/profile-summary', respond: () => json({ code: 0, data: { id: '169340', nickname: '真昵称' } }) },
+  ])
+  assert.equal(credential.uid, '169340')
+  assert.equal(credential.nickname, '真昵称')
+})
+
 // ── 目录 ────────────────────────────────────────────────────────────────
 
 test('目录：必须带客户端能力头与版本头（否则少 kimi-k3）', async () => {

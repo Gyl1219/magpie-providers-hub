@@ -200,6 +200,12 @@ Authorization**（带着会被拒，匿名头只有 Accept/Content-Type/User-Age
 **模型列表必须带 `X-LobsterAI-Client-Capabilities` + `X-LobsterAI-Client-Version`**，
 否则只回 25 个模型且缺 `kimi-k3`。
 
+**同一渠道可登多个账号**：exchange 响应不带昵称/uid（token 里只有 `accountMode`/`sub`
+等字段），而 magpie 的账号槽按 `accountId` 分（昵称缺失就退回渠道显示名）⇒ 不补身份的话
+第二个号登录会直接覆盖第一个（2026-11-15 实测）。所以登录后用刚换到的 token 读一次
+`profile-summary`，把 `data.id` / `data.nickname` 写进凭据当身份；读不到就退回渠道名，
+登录照常成功。
+
 ### magicrew / magicrew-intl（超级麦吉）
 
 超级麦吉：**国内 `letsmagic.cn` 与国际 `magicrew.ai` 是两个渠道**（账号体系隔离，
