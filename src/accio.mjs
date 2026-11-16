@@ -172,7 +172,15 @@ function toCredential(path, data, extra = {}) {
   }
 }
 
-const exchangeCode = async ({ code, codeVerifier, redirectUri }) => {
+/**
+ * 用授权码换取凭据。
+ *
+ * ⚠️ `region` **只是写进凭据元数据的标签**，不参与请求构造：两站共用同一个
+ * gateway（`GATEWAY` 常量），换取端点与报文逐字一致（真机实测）。它的作用是
+ * 让**续期**（`refreshCredential` 读 `current.region`）与**后续请求**知道该用
+ * 哪个登录域 —— 丢了它，国际版账号续期后会按国内版处理。
+ */
+const exchangeCode = async ({ code, codeVerifier, redirectUri, region = 'cn' }) => {
   const res = await fetch(`${GATEWAY}${TOKEN_EXCHANGE_PATH}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -180,7 +188,7 @@ const exchangeCode = async ({ code, codeVerifier, redirectUri }) => {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
   const text = await res.text()
-  return toCredential(TOKEN_EXCHANGE_PATH, unwrapEnvelope(TOKEN_EXCHANGE_PATH, res.status, text), { region: 'cn' })
+  return toCredential(TOKEN_EXCHANGE_PATH, unwrapEnvelope(TOKEN_EXCHANGE_PATH, res.status, text), { region })
 }
 
 /** 续期失败的**终态**标记（refresh_token 真的不能用了）。 */
@@ -215,8 +223,20 @@ export async function refreshCredential(current) {
   return next
 }
 
-/** 起本地回调服务 + 授权 URL，**立刻**返回（beginLogin 契约）。 */
-async function beginLogin(openBrowser) {
+/**
+ * 起本地回调服务 + 授权 URL，**立刻**返回（beginLogin 契约）。
+ *
+ * 唯一 `await` 的地方是 `listen(0)` 的端口绑定（毫秒级），不等用户 ——
+ * 授权 URL 里必须带真实端口，而 `listen(0)` 的端口号只能从 `listening` 事件取。
+ *
+ * @param {((url: string) => void) | undefined} openBrowser 宿主给的浏览器打开器
+ * @param {{ arg?: string }} [opts] hub 契约的第二个参数：`loginMethods` 条目的
+ *   `arg` 原样透传到这里（见 `src/aggregate.mjs` 的 `buildOne`）。本渠道用它
+ *   区分中国版 / 国际版 —— 两个**登录页域名不同**，且区域会写进凭据供续期用。
+ *   未传或未登记的值一律回落 `'cn'`（与凭据里的历史默认一致，保证旧入口不变）。
+ */
+async function beginLogin(openBrowser, opts = {}) {
+  const region = opts.arg === 'global' ? 'global' : 'cn'
   const pkce = createPkce()
   const state = randomBytes(32).toString('hex')
   let settleOk, settleFail
@@ -261,7 +281,7 @@ async function beginLogin(openBrowser) {
     // 先回提示页再后台兑换：用户不必盯着转圈的标签页等换 token。
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       .end(page('Accio 授权', '授权已收到，可以关闭此页面并返回。'))
-    exchangeCode({ code, codeVerifier: pkce.verifier, redirectUri })
+    exchangeCode({ code, codeVerifier: pkce.verifier, redirectUri, region })
       .then(settleOk)
       .catch((error) => settleFail(error instanceof Error ? error : new Error(String(error))))
   })
@@ -279,11 +299,18 @@ async function beginLogin(openBrowser) {
     ok ? settleOk(error) : settleFail(error)
   }
   const fail = (error) => settle(false, error)
+  /**
+   * 主动取消：关掉本地回调服务并让 `result` 以取消错误结束。
+   * 宿主关掉登录窗（或测试做完断言）时调它 —— 否则这个监听会挂到
+   * `LOGIN_TIMEOUT_MS` 才自己退。
+   */
+  const cancel = (reason = 'accio: 登录已取消') => fail(new Error(reason))
 
   timer = setTimeout(() => fail(new Error('accio: 登录超时（未收到授权回调）')), LOGIN_TIMEOUT_MS)
   timer.unref?.()
 
   // ⚠️ 先挂 'error' 再 listen（EADDRINUSE 是异步 error 事件，不挂会崩进程）。
+  // 这一段**只等端口绑定**（毫秒级），不等用户登录 —— 契约禁的是后者。
   const port = await new Promise((resolve, reject) => {
     let settledListen = false
     server.once('error', (error) => {
@@ -304,12 +331,14 @@ async function beginLogin(openBrowser) {
   })
 
   const redirectUri = `http://127.0.0.1:${port}${CALLBACK_PATH}`
-  const loginUrl = buildAuthUrl({ region: 'cn', redirectUri, state, codeChallenge: pkce.challenge })
+  const loginUrl = buildAuthUrl({ region, redirectUri, state, codeChallenge: pkce.challenge })
   if (openBrowser) openBrowser(loginUrl)
   return {
     url: loginUrl,
     result,
-    instructions: `在打开的页面里完成 Accio（阿里）登录，完成后本窗口自动继续。也可以手动打开：${loginUrl}`,
+    cancel,
+    instructions: `在打开的页面里完成 Accio（阿里）${region === 'global' ? '国际版' : '中国版'}登录，`
+      + `完成后本窗口自动继续。也可以手动打开：${loginUrl}`,
   }
 }
 
@@ -1147,11 +1176,22 @@ const fallbackModels = Object.fromEntries(FALLBACK_MODELS.map((m) => [slugOf(m.n
   tool_call: true,
 }]))
 
+/**
+ * 两条登录入口（oauth）：中国版与国际版。
+ * `arg` 由 `aggregate.mjs` 的 `buildOne` 透传给 `beginLogin` —— 两边措辞要
+ * 与账号卡片上的域名一致，否则用户会选错站（登录页域名不同，进错站登不上）。
+ */
+const LOGIN_METHODS = [
+  { label: '登录 Accio (阿里) 中国版（www.accio-ai.com）', arg: 'cn' },
+  { label: '登录 Accio (阿里) 国际版（zh.accio.com）', arg: 'global' },
+]
+
 export const accioChannel = {
   id: CHANNEL_ID,
   displayName: DISPLAY_NAME,
   fallbackModels,
   beginLogin,
+  loginMethods: LOGIN_METHODS,
   refresh: refreshCredential,
   expired,
   catalog,
