@@ -58,6 +58,47 @@ test('global 区域换登录域；gateway 恒同一个（区域只是登录参�
   assert.equal(url.origin, 'https://zh.accio.com')
 })
 
+test('★ 登录入口有两个区域（中国版 / 国际版），arg 能真正换登录域', async () => {
+  // 症状：只有一个入口时，国际版账号点「新建账号」会被拉到国内站、登不上（GitHub issue #5）。
+  const methods = accioChannel.loginMethods
+  assert.equal(methods.length, 2, '少一个区域入口 = 国际版账号无法登录')
+  assert.deepEqual(methods.map((m) => m.arg), ['cn', 'global'])
+  // 措辞里必须带域名：两个登录页域名不同，选错站就登不上。
+  assert.ok(methods[0].label.includes('www.accio-ai.com'))
+  assert.ok(methods[1].label.includes('zh.accio.com'))
+
+  /**
+   * `beginLogin` 承诺**立刻**返回（不等登录），故这里只取 `url` 就结束，
+   * 然后 `cancel()` 关掉本地回调服务 —— 不关的话这个监听会挂到登录超时，
+   * `node --test` 的事件循环也就不退（真机事故：CI 卡住 5 分钟）。
+   */
+  const started = await accioChannel.beginLogin(undefined, { arg: 'global' })
+  try {
+    assert.equal(new URL(started.url).origin, 'https://zh.accio.com')
+    assert.ok(started.instructions.includes('国际版'))
+  } finally {
+    started.cancel()
+    await started.result.catch(() => {})
+  }
+
+  const cn = await accioChannel.beginLogin(undefined, { arg: 'cn' })
+  try {
+    assert.equal(new URL(cn.url).origin, 'https://www.accio-ai.com')
+  } finally {
+    cn.cancel()
+    await cn.result.catch(() => {})
+  }
+
+  // 未传 / 未登记的 arg 一律回落 cn（旧入口行为一格不变）
+  const legacy = await accioChannel.beginLogin(undefined)
+  try {
+    assert.equal(new URL(legacy.url).origin, 'https://www.accio-ai.com')
+  } finally {
+    legacy.cancel()
+    await legacy.result.catch(() => {})
+  }
+})
+
 test('令牌信封：expiresAt 秒→毫秒；缺一不可；sgcookie 透传', () => {
   // 经 refreshCredential 的解析路径验证 toCredential
   const stub = stubFetch([{
