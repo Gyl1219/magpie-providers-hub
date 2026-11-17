@@ -255,7 +255,9 @@ async function exchangeAuthCode(code, session) {
   }
   const envelope = parseEnvelope(payload)
   if (!envelope.ok) throw new Error(`LobsterAI exchange 失败：${envelope.message}`)
-  return toCredential(envelope.data)
+  const credential = toCredential(envelope.data)
+  await attachIdentity(credential)
+  return credential
 }
 
 /** 响应载荷 → 本插件凭据（`expires_at` 统一毫秒字符串）。 */
@@ -280,6 +282,39 @@ function toCredential(data) {
   if (userId !== undefined) credential.user_id = userId
   if (nickname !== undefined) credential.nickname = nickname
   return credential
+}
+
+/**
+ * 补账号身份（uid / nickname）。
+ *
+ * ⚠️ exchange 响应**不带** nickname / uid（实测 2026-11-15：token 里只有
+ * `accountMode`/`exp`/`iat`/`sub`/`type`/`yid`），而 magpie 的账号槽由
+ * `accountId` 区分（aggregate 的 `resolveAccountId` 读 `credential.nickname`，
+ * 没有就退回渠道显示名）⇒ 每个号登录都算「LobsterAI（龙虾）」，后登录的
+ * 直接覆盖前一个，**同一渠道只能留一个账号**。
+ *
+ * 登录后用刚拿到的 token 读一次 `profile-summary`（`usage` 早就在用同一个
+ * 端点），拿稳定的 `data.id` 与昵称当身份。必须做在**登录路径**里：事后改
+ * nickname = 改 accountId = 槽 key 变，而 magpie 没有删槽接口（旧槽会变成
+ * 删不掉的鬼影账号）。读不到就维持原样 —— 登录本身不受影响。
+ */
+async function attachIdentity(credential) {
+  try {
+    const result = await requestJson(PROFILE_PATH, credential)
+    if (!result.ok) return
+    const envelope = parseEnvelope(result.body)
+    if (!envelope.ok) return
+    const data = typeof envelope.data === 'object' && envelope.data !== null ? envelope.data : {}
+    const id = data.id
+    if (typeof id === 'number' || (typeof id === 'string' && id.length > 0)) {
+      credential.uid = String(id)
+    }
+    if (typeof data.nickname === 'string' && data.nickname.trim().length > 0) {
+      credential.nickname = data.nickname.trim()
+    }
+  } catch {
+    // 身份读不到就沿用渠道名；登录本身不受影响。
+  }
 }
 
 // ── 续期（**不带 Authorization**）────────────────────────────────────────
