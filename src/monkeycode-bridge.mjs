@@ -350,17 +350,28 @@ function readUsage(raw) {
   const u = typeof raw === 'object' && raw !== null ? raw : {}
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.trunc(v) : undefined)
   const input = num(u.input_tokens)
+  // ⚠️ Anthropic 的 input_tokens 只是**未命中缓存**的部分；真正发出去的上下文是
+  //    input + cache_read + cache_creation。只取 input_tokens 会把 Codex 每轮
+  //    20 万 tokens 的请求在 magpie 里记成几千，用量被低估一个数量级。
+  //    OpenAI 的 prompt_tokens 语义本就含缓存命中部分，这里按该语义相加。
+  const cacheRead = num(u.cache_read_input_tokens)
+  const cacheWrite = num(u.cache_creation_input_tokens)
+  const totalInput = input === undefined && cacheRead === undefined && cacheWrite === undefined
+    ? undefined
+    : (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
   const output = num(u.output_tokens)
   const thinking = num(u.output_tokens_details?.thinking_tokens)
   return {
-    ...(input !== undefined || output !== undefined
+    ...(totalInput !== undefined || output !== undefined
       ? {
-          prompt_tokens: input ?? 0,
+          prompt_tokens: totalInput ?? 0,
           completion_tokens: output ?? 0,
-          total_tokens: (input ?? 0) + (output ?? 0),
+          total_tokens: (totalInput ?? 0) + (output ?? 0),
         }
       : {}),
-    ...(input !== undefined ? { prompt_tokens_details: { cache_read: num(u.cache_read_input_tokens) ?? 0 } } : {}),
+    ...(totalInput !== undefined
+      ? { prompt_tokens_details: { cache_read: cacheRead ?? 0, cache_write: cacheWrite ?? 0 } }
+      : {}),
     ...(thinking !== undefined ? { completion_tokens_details: { reasoning_tokens: thinking } } : {}),
   }
 }
