@@ -24,6 +24,7 @@ const {
   monkeycodeMaxTokensFor,
   monkeycodeThinkingFor,
   mapFinishReason,
+  anthropicSseToOpenAi,
   anthropicJsonToOpenAi,
 } = await import('../src/monkeycode-bridge.mjs')
 
@@ -369,4 +370,122 @@ test('anthropicJsonToOpenAi：text + tool_use 块 → OpenAI message', () => {
   assert.equal(out.choices[0].finish_reason, 'tool_calls')
   assert.equal(out.choices[0].message.tool_calls[0].function.name, 'search')
   assert.equal(out.usage.total_tokens, 7)
+})
+
+// ── 用量：缓存命中/写入必须计入 prompt_tokens ───────────────────────────
+
+test('usage：prompt_tokens = input + cache_read + cache_creation（Anthropic input 只含未命中部分）', () => {
+  const out = anthropicJsonToOpenAi({
+    id: 'msg_1', stop_reason: 'end_turn',
+    content: [{ type: 'text', text: 'ok' }],
+    usage: {
+      input_tokens: 1_000,
+      cache_read_input_tokens: 180_000,
+      cache_creation_input_tokens: 20_000,
+      output_tokens: 50,
+    },
+  }, { model: 'deepseek-flash' })
+  assert.equal(out.usage.prompt_tokens, 201_000, '缓存读写都算进上下文')
+  assert.equal(out.usage.completion_tokens, 50)
+  assert.equal(out.usage.total_tokens, 201_050)
+  assert.deepEqual(out.usage.prompt_tokens_details, { cache_read: 180_000, cache_write: 20_000 })
+})
+
+test('usage：只有缓存字段时也不得把 prompt_tokens 记成 0', () => {
+  const out = anthropicJsonToOpenAi({
+    id: 'msg_2', stop_reason: 'end_turn', content: [],
+    usage: { cache_read_input_tokens: 7, output_tokens: 1 },
+  }, { model: 'deepseek-flash' })
+  assert.equal(out.usage.prompt_tokens, 7)
+  assert.equal(out.usage.total_tokens, 8)
+  assert.deepEqual(out.usage.prompt_tokens_details, { cache_read: 7, cache_write: 0 })
+})
+
+test('usage：上游没给任何 token 字段 → 不物化 usage（不写 0 骗人）', () => {
+  const out = anthropicJsonToOpenAi({ id: 'msg_3', stop_reason: 'end_turn', content: [] }, { model: 'glm-5' })
+  assert.equal(out.usage, undefined)
+})
+
+test('流式 usage：message_start 的 input+cache 与 message_delta 的 output 合并成收尾 chunk', async () => {
+  const sse = [
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}}',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+    'data: {"type":"message_stop"}',
+    '',
+  ].join('\n\n')
+  const stream = new Response(sse, { headers: { 'content-type': 'text/event-stream' } }).body
+  let usageChunk
+  for await (const frame of anthropicSseToOpenAi(stream, { model: 'deepseek-flash' })) {
+    const line = frame.trim()
+    if (!line.startsWith('data: ')) continue
+    const data = line.slice(6)
+    if (data === '[DONE]') continue
+    const payload = JSON.parse(data)
+    if (payload.usage !== undefined) usageChunk = payload
+  }
+  assert.ok(usageChunk, '流式必须发收尾 usage chunk')
+  assert.equal(usageChunk.usage.prompt_tokens, 125)
+  assert.equal(usageChunk.usage.completion_tokens, 2)
+  assert.equal(usageChunk.usage.total_tokens, 127)
+  assert.deepEqual(usageChunk.usage.prompt_tokens_details, { cache_read: 100, cache_write: 20 })
+})
+
+// ── 积分：今日扣费与负数余额 ────────────────────────────────────────────
+
+/** 北京时区「今天 0 点」的 Unix 秒（与实现同源推法，但独立计算）。 */
+const beijingDayStartSec = () => {
+  const now = new Date(Date.now() + 8 * 3600_000)
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000 - 8 * 3600
+}
+
+test('usage：今日已扣 = 今日 model_consumption 正数流水求和（千分之一 → 积分）', async () => {
+  const dayStart = beijingDayStartSec()
+  const stub = stubFetch([
+    { match: '/api/v1/users/wallet/transaction', respond: ({ url }) => {
+      assert.match(url, /page=1&size=300/, '只拉第一页 300 条')
+      return json({ code: 0, data: { transactions: [
+        { kind: 'model_consumption', created_at: dayStart + 60, amount: 1_500 },
+        { kind: 'model_consumption', created_at: dayStart + 120, amount: 250 },
+        { kind: 'model_consumption', created_at: dayStart - 60, amount: 9_000 },   // 昨天
+        { kind: 'checkin', created_at: dayStart + 180, amount: 5_000 },            // 非消费
+        { kind: 'model_consumption', created_at: dayStart + 240, amount: -300 },   // 退款不计
+        { kind: 'model_consumption', created_at: 'nope', amount: 777 },            // 坏时间戳
+      ] } })
+    } },
+    { match: '/api/v1/users/wallet', respond: () => json({ code: 0, data: { balance: 12_345, daily_token_balance: 8_000_000, daily_token_limit: 10_000_000 } }) },
+    { match: '/api/v1/users/subscription', respond: () => json({ code: 0, data: { plan: 'pro' } }) },
+  ])
+  try {
+    const rows = await monkeycodeChannel.usage({ access_token: 'oma_K', session_cookie: 'monkeycode_ai_session=V' })
+    const credits = rows.find((r) => r.name === '积分余额')
+    assert.equal(credits.limit, 12.345)
+    assert.equal(credits.display, '剩余 12.345 · 今日已扣 1.75')
+  } finally { stub.restore() }
+})
+
+test('usage：余额被扣穿 → 说人话（已透支），流水拿不到就不加今日已扣', async () => {
+  const stub = stubFetch([
+    { match: '/api/v1/users/wallet/transaction', respond: () => new Response('upstream down', { status: 500 }) },
+    { match: '/api/v1/users/wallet', respond: () => json({ code: 0, data: { balance: -5_509 } }) },
+    { match: '/api/v1/users/subscription', respond: () => json({ code: 0, data: { plan: 'basic' } }) },
+  ])
+  try {
+    const rows = await monkeycodeChannel.usage({ access_token: 'oma_K', session_cookie: 'monkeycode_ai_session=V' })
+    const credits = rows.find((r) => r.name === '积分余额')
+    assert.equal(credits.limit, -5.509)
+    assert.equal(credits.display, '已透支 5.509（上游欠费，调用会 402）')
+  } finally { stub.restore() }
+})
+
+test('usage：流水信封 code 非 0 → 静默不显示今日已扣（余额照常）', async () => {
+  const stub = stubFetch([
+    { match: '/api/v1/users/wallet/transaction', respond: () => json({ code: 1, message: '权限不足' }) },
+    { match: '/api/v1/users/wallet', respond: () => json({ code: 0, data: { balance: 1_000_000 } }) },
+    { match: '/api/v1/users/subscription', respond: () => json({ code: 0, data: { plan: 'pro' } }) },
+  ])
+  try {
+    const rows = await monkeycodeChannel.usage({ access_token: 'oma_K', session_cookie: 'monkeycode_ai_session=V' })
+    assert.equal(rows.find((r) => r.name === '积分余额').display, '剩余 1000')
+  } finally { stub.restore() }
 })

@@ -288,6 +288,123 @@ test('checkin：100002 → failed + signIn expired', async () => {
   } finally { stub.restore() }
 })
 
+// ── 目录：新形状 {object:"list",data:[…]} / 旧信封回归 ──────────────────
+
+const catalogRow = (overrides = {}) => ({
+  id: 'catalog-model-a',
+  type: 'chat',
+  name: 'Catalog Model A · x2.0',
+  context_length: 262_144,
+  max_output_tokens: 4096,
+  default_reasoning_effort: 'low',
+  reasoning_efforts: ['low', 'high'],
+  input_modalities: ['text'],
+  ...overrides,
+})
+
+test('catalog：新形状 {object:"list",data:[…]} 解析成功，不回落 FALLBACK_MODELS', async () => {
+  const stub = stubFetch([{
+    match: '/models',
+    respond: () => json({ object: 'list', data: [catalogRow()] }),
+  }])
+  try {
+    const models = await loomyChannel.catalog({ access_token: 'AT' })
+    // 'catalog-model-a' 不在 FALLBACK_MODELS 里 —— 只有真从 data 解析出来才会存在。
+    // 若解析失败回落兜底，这个键不会出现（兜底里全是已下线模型）。
+    assert.ok(Object.hasOwn(models, 'catalog-model-a'), '新形状的模型被解析出来，未回落兜底')
+    assert.equal(models['catalog-model-a'].name, 'Catalog Model A · x2.0', '倍率从 name 末尾括号提取')
+    assert.equal(models['catalog-model-a'].limit.context, 262_144)
+    assert.equal(models['catalog-model-a'].status, 'active')
+    // 兜底独有键不在结果里，进一步证明不是 FALLBACK_MODELS
+    assert.equal(Object.hasOwn(models, 'spark-x'), false, '兜底独有模型不出现')
+    assert.equal(Object.hasOwn(models, 'deepseek-v4-flash-0731'), false)
+  } finally { stub.restore() }
+})
+
+test('catalog：旧信封 {code:"000000",data:[…]} 回归兼容，解析结果一致', async () => {
+  const stub = stubFetch([{
+    match: '/models',
+    respond: () => json({ code: '000000', data: [catalogRow()] }),
+  }])
+  try {
+    const models = await loomyChannel.catalog({ access_token: 'AT' })
+    assert.ok(Object.hasOwn(models, 'catalog-model-a'), '旧信封同样解析出模型')
+    assert.equal(models['catalog-model-a'].limit.context, 262_144)
+    assert.equal(models['catalog-model-a'].limit.output, 4096, '旧信封也带 max_output_tokens')
+  } finally { stub.restore() }
+})
+
+test('catalog：max_output_tokens 缺失/非法 → limit.output 回落 8192', async () => {
+  const stub = stubFetch([{
+    match: '/models',
+    respond: () => json({ object: 'list', data: [
+      catalogRow({ id: 'model-no-out', max_output_tokens: undefined }),
+      catalogRow({ id: 'model-bad-out', max_output_tokens: 'abc' }),
+    ] }),
+  }])
+  try {
+    const models = await loomyChannel.catalog({ access_token: 'AT' })
+    assert.equal(models['model-no-out'].limit.output, 8_192, '缺失 → 默认 8192')
+    assert.equal(models['model-bad-out'].limit.output, 8_192, '非数字 → 不物化，回落默认')
+  } finally { stub.restore() }
+})
+
+test('catalog：default_reasoning_effort 采信远端；缺失/空串 → defaultEffort 回落 high', async () => {
+  const stub = stubFetch([{
+    match: '/models',
+    respond: () => json({ object: 'list', data: [
+      catalogRow({ id: 'model-eff-low', default_reasoning_effort: 'low' }),
+      catalogRow({ id: 'model-eff-empty', default_reasoning_effort: '' }),
+      catalogRow({ id: 'model-eff-none', default_reasoning_effort: undefined }), // 显式 undefined 才能盖掉帮手默认 'low'，真正测「缺失」
+    ] }),
+  }])
+  try {
+    const models = await loomyChannel.catalog({ access_token: 'AT' })
+    assert.equal(models['model-eff-low'].defaultEffort, 'low', '远端给了就采信（不强制 high）')
+    assert.equal(models['model-eff-empty'].defaultEffort, 'high', '空串 → 回落本地默认 high')
+    assert.equal(models['model-eff-none'].defaultEffort, 'high', '缺失 → 回落本地默认 high')
+  } finally { stub.restore() }
+})
+
+test('recordModelEfforts：catalog 记录档位 → chat 白名单（合法档下发，非法档静默不发）', async () => {
+  const stub = stubFetch([
+    {
+      match: '/models',
+      respond: () => json({ object: 'list', data: [catalogRow({ id: 'effort-model' })] }),
+    },
+    {
+      match: '/chat/completions',
+      respond: () => json({ id: 'x', choices: [{ message: { content: 'OK' } }] }),
+    },
+  ])
+  try {
+    const models = await loomyChannel.catalog({ access_token: 'AT' })
+    // variants 来自 reasoning_efforts（不是全量档位）
+    assert.deepEqual(models['effort-model'].variants, {
+      low: { reasoning_effort: 'low' },
+      high: { reasoning_effort: 'high' },
+    })
+    // 合法档 high 在 efforts ['low','high'] 内 → 下发
+    await loomyChannel.chat(
+      { access_token: 'AT' },
+      { body: { model: 'effort-model', stream: false, messages: [{ role: 'user', content: 'hi' }], reasoning_effort: 'high' } },
+    )
+    const legal = stub.calls.find(
+      (c) => c.url.includes('/chat/completions') && JSON.parse(c.body).reasoning_effort === 'high',
+    )
+    assert.ok(legal, '合法档 high 被下发')
+    // 非法档 xhigh 不在 efforts 内 → 静默不下发
+    await loomyChannel.chat(
+      { access_token: 'AT' },
+      { body: { model: 'effort-model', stream: false, messages: [{ role: 'user', content: 'hi' }], reasoning_effort: 'xhigh' } },
+    )
+    const illegal = stub.calls.find(
+      (c) => c.url.includes('/chat/completions') && JSON.parse(c.body).reasoning_effort === 'xhigh',
+    )
+    assert.equal(illegal, undefined, '非法档 xhigh 静默不下发')
+  } finally { stub.restore() }
+})
+
 // ── 过期判据 ────────────────────────────────────────────────────────────
 
 test('expired：expires_at 字符串能解析；无 expires 不凭猜测判过期', () => {
