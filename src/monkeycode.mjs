@@ -451,6 +451,35 @@ function nextUtc8DayStartMs(nowMs) {
 }
 
 /**
+ * 今日已扣积分。上游只给 wallet 的当前余额，不给「今天花了多少」；
+ * /wallet/transaction 是唯一的扣费流水（amount 单位千分之一积分）。
+ * 拿不到就返回 undefined —— 宁可少一行，不编数字。
+ */
+async function fetchTodaySpend(credential, site) {
+  const cookie = cookieOf(credential)
+  if (cookie === undefined) return undefined
+  const result = await platformRequest(
+    cookie,
+    `${site.platformBaseUrl}/api/v1/users/wallet/transaction?page=1&size=300`,
+    { method: 'GET' },
+    site,
+  )
+  if (!result.ok) return undefined
+  const unwrapped = unwrapEnvelope(result.data)
+  if (!unwrapped.ok) return undefined
+  const list = Array.isArray(unwrapped.value?.transactions) ? unwrapped.value.transactions : []
+  const dayStartSec = (nextUtc8DayStartMs(Date.now()) - 86_400_000) / 1000
+  let milli = 0
+  for (const row of list) {
+    if (row?.kind !== 'model_consumption') continue
+    if (typeof row.created_at !== 'number' || row.created_at < dayStartSec) continue
+    const amount = readNumber(row.amount)
+    if (amount !== undefined && amount > 0) milli += amount
+  }
+  return Math.round(milli) / 1000
+}
+
+/**
  * usage —— 两池分开（积分与 token 额度不可互相折算，加总没有语义）。
  * 无 cookie 时优雅降级：推理可用，只是查不到余额（一条说明窗，不是错误）。
  */
@@ -465,6 +494,7 @@ async function usageFor(site, credential) {
     }]
   }
   const plan = await fetchPlan(credential, site)
+  const todaySpend = await fetchTodaySpend(credential, site)
   const windows = []
   const { balance, dailyTokenBalance, dailyTokenLimit } = wallet.wallet
   // 每日额度：amount/limit 形态（used 按真实消耗算 —— used 是路由排序的输入）；
@@ -483,13 +513,16 @@ async function usageFor(site, credential) {
     })
   }
   // 积分：amount/limit 形态（balance 字段会关进度条）；上游只给当前余额，不给总额
+  // ⚠️ 上游按 token 后结算、扣费不设下限，余额可以被扣穿成负数（实测 -5509 千分之一
+  //    积分）。照原样显示「剩余 -5.509」容易被当成插件算错，负数时改说人话。
   windows.push({
     name: '积分余额',
     used: 0,
     amount: 0,
     limit: balance,
     unit: '积分',
-    display: `剩余 ${balance}`,
+    display: (balance < 0 ? `已透支 ${Math.abs(balance)}（上游欠费，调用会 402）` : `剩余 ${balance}`)
+      + (todaySpend === undefined ? '' : ` · 今日已扣 ${todaySpend}`),
   })
   return windows
 }

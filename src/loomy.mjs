@@ -124,9 +124,14 @@ function parseEnvelope(payload) {
     return { ok: false, code: '', message: '响应不是 JSON 对象', data: undefined }
   }
   const code = typeof payload.code === 'string' ? payload.code : ''
+  // 余额不足等失败走 HTTP 402 + {error:{message}}，没有 code/desc 信封；
+  // 不取这一层会显示成「业务错误 (缺少 code)」，看不出是没积分了。
+  const errorMessage = typeof payload.error?.message === 'string' ? payload.error.message : ''
   const message = typeof payload.desc === 'string' && payload.desc.length > 0
     ? payload.desc
-    : (typeof payload.message === 'string' ? payload.message : '')
+    : (typeof payload.message === 'string' && payload.message.length > 0
+        ? payload.message
+        : errorMessage)
   if (code !== OK_CODE) {
     return { ok: false, code, message: message.length > 0 ? message : `业务错误 ${code || '(缺少 code)'}`, data: undefined }
   }
@@ -402,9 +407,19 @@ async function fetchCatalog(credential) {
   })
   if (!r.ok) throw new Error(`Loomy 目录读取失败：HTTP ${r.status}`)
   const body = await r.json()
-  const envelope = parseEnvelope(body)
-  if (!envelope.ok) throw new Error(`Loomy 目录读取失败：${envelope.message}`)
-  const rows = Array.isArray(envelope.data) ? envelope.data : []
+  // 上游 2026-11 起 /models 已改成 OpenAI 标准形状 {object:"list",data:[…]}，
+  // 不再带 {code:"000000"} 信封。旧信封仍兼容。
+  // ⚠️ 只认信封会让解析恒失败 → 静默回落到 FALLBACK_MODELS（全是已下线模型，
+  //    上游对未知模型 ID 静默转 spark-x2.6：真机 2026-11-18 请求
+  //    qwen-3.8-max / Kimi-k2.6 / mimo-v2.5 全部回了 spark-x2.6）。
+  let rows
+  if (Array.isArray(body?.data)) {
+    rows = body.data
+  } else {
+    const envelope = parseEnvelope(body)
+    if (!envelope.ok) throw new Error(`Loomy 目录读取失败：${envelope.message}`)
+    rows = Array.isArray(envelope.data) ? envelope.data : []
+  }
   const models = {}
   for (const row of rows) {
     if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
@@ -413,12 +428,21 @@ async function fetchCatalog(credential) {
     const display = splitRate(row.name ?? '').name
     const rate = splitRate(row.name ?? '').rate
     const declaredContext = Number(row.context_length)
+    const declaredOutput = Number(row.max_output_tokens)
+    // 上游 default_reasoning_effort 实测为 low；强制 high 会让简单请求也等长思考
+    // （真机同一问句：无档 37.7s / low 11.9s）。远端没给时才回落本地默认。
+    const defaultEffort = typeof row.default_reasoning_effort === 'string' && row.default_reasoning_effort !== ''
+      ? row.default_reasoning_effort
+      : LOOMY_DEFAULT_EFFORT
     const efforts = Array.isArray(row.reasoning_efforts)
       ? row.reasoning_efforts.filter((e) => typeof e === 'string' && e !== '')
       : undefined
     models[id] = {
       name: rate !== '' ? `${display} · ${rate}` : display,
-      limit: { context: contextWindowOf(id, Number.isFinite(declaredContext) ? declaredContext : 128_000), output: 8_192 },
+      limit: {
+        context: contextWindowOf(id, Number.isFinite(declaredContext) ? declaredContext : 128_000),
+        output: Number.isFinite(declaredOutput) && declaredOutput > 0 ? declaredOutput : 8_192,
+      },
       tool_call: true,
       capabilities: {
         temperature: true,
@@ -431,7 +455,10 @@ async function fetchCatalog(credential) {
       status: 'active',
       release_date: '',
     }
-    if (efforts !== undefined && efforts.length > 0) models[id].defaultEffort = LOOMY_DEFAULT_EFFORT
+    if (efforts !== undefined && efforts.length > 0) {
+      models[id].defaultEffort = defaultEffort
+      recordModelEfforts(id, efforts)
+    }
   }
   return models
 }
@@ -541,6 +568,14 @@ async function checkin(credential) {
 
 const modelIndex = []
 const effortsOf = (modelId) => modelIndex.find((m) => catalogKey(m.id) === catalogKey(modelId))?.efforts
+
+/** catalog 每读一次就把各模型的真实档位记进来 —— chat 的档位白名单（effortsOf）靠它生效。 */
+function recordModelEfforts(modelId, efforts) {
+  const key = catalogKey(modelId)
+  const known = modelIndex.find((m) => catalogKey(m.id) === key)
+  if (known !== undefined) known.efforts = efforts
+  else modelIndex.push({ id: modelId, efforts })
+}
 
 async function chat(credential, { body: openaiBody, signal, renew }) {
   const inner = String(openaiBody?.model ?? '')
