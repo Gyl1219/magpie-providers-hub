@@ -27,6 +27,7 @@ if (!existsSync(MARVIS_URL)) {
     MARVIS_WALLET_URL,
     marvisUalSignature,
     marvisLlmHeaders,
+    marvisSanitizeChatBody,
   } = await import(MARVIS_URL.href)
 
   /** 竖线凭据一行（parseCredential 的推荐形态） */
@@ -110,6 +111,104 @@ if (!existsSync(MARVIS_URL)) {
     })
   })
 
+  // ── 请求体净化：空 tools / system 身份句（上游 4100406 两条成因）──────────
+
+  test('净化：空 tools 整键删除，非空 tools 原样保留（tools: [] 上游会臆造 DSML 标记）', () => {
+    const empty = marvisSanitizeChatBody({ model: 'm', messages: [], tools: [] })
+    assert.equal('tools' in empty.body, false, 'tools: [] 必须整键消失')
+    assert.equal(empty.droppedTools, true)
+
+    const kept = marvisSanitizeChatBody({ model: 'm', messages: [], tools: [{ type: 'function', function: { name: 'f' } }] })
+    assert.equal(kept.body.tools.length, 1)
+    assert.equal(kept.droppedTools, false)
+
+    // 无 tools 键 / tools 是 null / 非数组 → 一个字节都不动
+    for (const body of [{ model: 'm', messages: [] }, { model: 'm', messages: [], tools: null }, { model: 'm', messages: [], tools: 'x' }]) {
+      const out = marvisSanitizeChatBody(body)
+      assert.equal(out.body, body, '无空数组时返回同一对象（不改写）')
+      assert.equal(out.droppedTools, false)
+    }
+  })
+
+  test('净化：system 里的英文身份句中文化，句后约束原样保留', () => {
+    const out = marvisSanitizeChatBody({
+      model: 'm',
+      messages: [
+        { role: 'system', content: 'You are Claude Code, Anthropic\'s official CLI for Claude. Always answer in Chinese.' },
+        { role: 'user', content: 'hi' },
+      ],
+    })
+    assert.equal(out.rewrittenIdentity, 1)
+    const sys = out.body.messages[0].content
+    assert.ok(!/Claude|Anthropic/i.test(sys), '身份句里的厂商名必须消失')
+    assert.ok(sys.includes('Always answer in Chinese.'), '句后约束原样保留')
+    assert.equal(out.body.messages[1].content, 'hi', '用户消息一个字都不动')
+  })
+
+  test('净化：块数组形态（[{type:text,text}]）同样改写；非 system 角色不碰', () => {
+    const out = marvisSanitizeChatBody({
+      model: 'm',
+      messages: [
+        { role: 'system', content: [{ type: 'text', text: 'You are Codex, an OpenAI coding agent. Follow the rules.' }] },
+        { role: 'user', content: 'You are Claude Code, right? keep me verbatim' },
+        { role: 'developer', content: [{ type: 'text', text: 'no identity here' }] },
+      ],
+    })
+    assert.equal(out.rewrittenIdentity, 1, '只有 system 那条被改写')
+    const block = out.body.messages[0].content[0]
+    assert.ok(!/OpenAI|Codex/.test(block.text))
+    assert.ok(block.text.includes('Follow the rules.'))
+    assert.equal(out.body.messages[1].content, 'You are Claude Code, right? keep me verbatim', '用户消息不动')
+    assert.deepEqual(out.body.messages[2].content, [{ type: 'text', text: 'no identity here' }], '无身份句的 developer 不动')
+  })
+
+  test('净化：认不出的身份句/无身份句 → 原文返回（绝不乱改别人的 prompt）', () => {
+    for (const content of [
+      'You are a helpful assistant.',
+      '你是运行在终端里的助手。',
+      'You are the maintainer of this repo.',
+      '',
+    ]) {
+      const body = { model: 'm', messages: [{ role: 'system', content }] }
+      const out = marvisSanitizeChatBody(body)
+      assert.equal(out.body, body, `不该改写：${content}`)
+      assert.equal(out.rewrittenIdentity, 0)
+    }
+  })
+
+  test('净化：幂等 —— 跑第二遍不再产生任何改写', () => {
+    const once = marvisSanitizeChatBody({
+      model: 'm',
+      messages: [{ role: 'system', content: 'You are Claude Code, Anthropic\'s official CLI. Keep it short.' }],
+      tools: [],
+    })
+    const twice = marvisSanitizeChatBody(once.body)
+    assert.equal(twice.body, once.body, '第二遍必须原样返回同一个对象')
+    assert.equal(twice.rewrittenIdentity, 0)
+    assert.equal(twice.droppedTools, false)
+  })
+
+  test('chat 发出前净化：空 tools 不外发、system 身份句中文化（真机 4100406 两条成因）', async () => {
+    const { calls, impl } = recorder(() => new Response('data: ok\n\n', { status: 200 }))
+    await withMockFetch(impl, async () => {
+      await marvisChannel.chat(ACCT, {
+        body: {
+          model: 'deepseek-v4-pro-external',
+          messages: [
+            { role: 'system', content: 'You are Claude Code, Anthropic\'s official CLI for Claude. Be terse.' },
+            { role: 'user', content: 'hi' },
+          ],
+          tools: [],
+        },
+      })
+      const sent = JSON.parse(calls[0].init.body)
+      assert.equal('tools' in sent, false, '空 tools 绝不能出现在发往上游的 body 里')
+      assert.ok(!/Claude|Anthropic/i.test(sent.messages[0].content), '身份句不得原样发出去')
+      assert.ok(sent.messages[0].content.includes('Be terse.'))
+      assert.equal(sent.messages[1].content, 'hi')
+    })
+  })
+
   test('chat 成功响应绝不读 body：流原样透传，content-type 归一成 event-stream', async () => {
     const payload = 'data: one\n\ndata: two\n\n'
     const { impl } = recorder(
@@ -157,6 +256,22 @@ if (!existsSync(MARVIS_URL)) {
         const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
         assert.equal(res.status, 404)
         assert.equal((await res.json()).error.code, 'model_unavailable')
+      })
+    }
+  })
+
+  test('错误分流：4100406 非法请求 → 400 + invalid_request（不换号、不自愈）', async () => {
+    for (const resp of [
+      json({ code: 4100406, msg: '非法请求' }, 403),
+      json({ code: 4100406, msg: 'illegal request' }, 400),
+    ]) {
+      const { impl } = recorder(() => resp.clone())
+      await withMockFetch(impl, async () => {
+        const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
+        assert.equal(res.status, 400, '必须报 400 —— 403 会被 magpie 当可重试')
+        const body = await res.json()
+        assert.equal(body.error.code, 'invalid_request')
+        assert.match(body.error.message, /4100406/)
       })
     }
   })

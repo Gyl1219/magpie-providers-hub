@@ -47,6 +47,53 @@ const ACCOUNT_BASE = 'https://account.xfinfr.com'
 
 const OK_CODE = '000000'
 const AUTH_ERROR_CODE = '100002'
+
+// ── 上游网关自身故障（与账号无关）──────────────────────────────────────
+//
+// DSH 侧用 UPSTREAM 码把这类故障从「换号重试」里摘出去：网关 5xx 与
+// 「模型服务暂时不可用」原来落进 other 分支，宿主每轮白重试 5 次（6 → 1）。
+// 这里按 HTTP 契约复原同一语义：**识别出来，一次即止**。
+//
+// 判据两条，任一命中：
+//   ① HTTP 5xx —— 网关级故障；
+//   ② 业务信封（HTTP 200 + code）正文里明确说服务暂时不可用。
+const UPSTREAM_FAULT_TEXT = /(?:该)?模型服务(?:暂时|临时)?不可用|服务(?:暂时|临时)不可用|temporarily\s+unavailable|service\s+unavailable|bad\s+gateway|gateway\s+time(?:d)?-?out|upstream\s+(?:error|timeout|unavailable|failure)/i
+
+/**
+ * 上游故障对 magpie 的出口状态：**400**。
+ *
+ * 为什么不是 502/503（依据仓库内实证，不是照抄 DSH 结论）：
+ *   - `magicrew.mjs:343-347`：magpie 的 retryable() 在 400 分支只查 quotaWords
+ *     （quota|余额|额度|欠费）；**其余 400 → 整轮直接失败、账号不 rest、
+ *     同 provider 其它账号一个都不问**。
+ *   - `marvis.mjs:426`：503 是「可重试」——会换号重打。而 loomy 的 5xx 是
+ *     网关级故障，同渠道所有账号打的是同一个网关，换号纯属白打（DSH 真机
+ *     实测每轮 6 次请求全废）。
+ *   ⇒ 400 = 一次即止，与本渠道「上游故障不参与换号」的语义完全一致。
+ *     代价是状态码字面语义偏弱，故 message 里原样带上真实 HTTP 状态。
+ */
+const UPSTREAM_FAULT_STATUS = 400
+
+/** 上游故障判定：HTTP 5xx 或正文命中「服务暂时不可用」类文案。 */
+function isUpstreamFault(status, text) {
+  if (Number.isFinite(status) && status >= 500) return true
+  return UPSTREAM_FAULT_TEXT.test(String(text ?? ''))
+}
+
+/** 上游故障响应：类型独立（upstream_error），文案讲清「为什么这次不换号」。 */
+function upstreamFaultResponse(status, message) {
+  return Response.json(
+    {
+      error: {
+        type: 'upstream_error',
+        code: 'upstream_unavailable',
+        message: `Loomy 上游网关故障（HTTP ${status}）：${message}`
+          + '——这是网关级故障，同渠道所有账号共用同一网关，换号无用，本轮不再重试。',
+      },
+    },
+    { status: UPSTREAM_FAULT_STATUS },
+  )
+}
 const REQUEST_TIMEOUT_MS = 60_000
 const SMS_CODE_TTL_SECONDS = 300
 /** 登录会话 14 天（登录请求里向服务端声明的 expire）。 */
@@ -625,6 +672,12 @@ async function chat(credential, { body: openaiBody, signal, renew }) {
   const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
   if (!contentType.includes('text/event-stream')) {
     const text = await response.text().catch(() => '')
+    // ⓪ 网关 5xx：直接判上游故障，不再往下走成功解析。
+    //    真机形态：网关挂掉时 body 可能是 HTML 报错页，甚至带上 choices 样的
+    //    残片 —— 先判 5xx 才能保证这类故障一定落到「一次即止」的分支里。
+    if (Number.isFinite(response.status) && response.status >= 500) {
+      return upstreamFaultResponse(response.status, text.slice(0, 200) || '网关无正文')
+    }
     // ① 非流式成功就是 OpenAI 的 chat.completion JSON（没有 {code,…} 信封）
     //    —— 真机：stream:false 上游回了 200 + content:"OK"，读成信封会误判 502
     try {
@@ -648,6 +701,12 @@ async function chat(credential, { body: openaiBody, signal, renew }) {
         )
       }
     } catch { /* 原样 */ }
+    // ③ HTTP 200 信封但正文说「服务暂时不可用」：同样是网关故障。
+    //    放在成功解析与 100002 之后 —— 正常回答的正文里出现这几个字（模型在
+    //    复述这段话）不能被误判，只有走到这条报错路径时才做文案匹配。
+    if (isUpstreamFault(response.status, message)) {
+      return upstreamFaultResponse(response.status, message)
+    }
     return Response.json(
       { error: { type: 'provider_error', message: `Loomy 返回（HTTP ${response.status}）：${message}` } },
       { status: response.status >= 400 ? response.status : 502 },
@@ -657,8 +716,15 @@ async function chat(credential, { body: openaiBody, signal, renew }) {
   return response
 }
 
-/** 非 SSE 响应是否是「登录失效」（100002）。 */
+/**
+ * 非 SSE 响应是否是「登录失效」（100002）。
+ *
+ * 网关 5xx 一律不算登录失效：那时候信封里的 code 不可信（可能是网关自己
+ * 造的），拿它去 renew 只会白打一次换号请求 —— 与本渠道「上游故障一次即止」
+ * 的语义相悖。
+ */
 async function looksAuthDead(response) {
+  if (Number.isFinite(response.status) && response.status >= 500) return false
   const clone = response.clone()
   try {
     const envelope = parseEnvelope(await clone.json())

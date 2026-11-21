@@ -201,6 +201,75 @@ async function fetchCatalog(credential) {
 
 // ── chat（OpenAI 进 → Anthropic Messages 出 → OpenAI 响应回）────────────
 
+// ── 上游文案脱敏 ───────────────────────────────────────────────────────
+//
+// 上游把凭据回显进错误串是常态（`invalid key sk-…`、`session expired sl-session=…`），
+// 而这些串会被 magpie 原样渲染到卡片和 Toast 上 —— 等于把用户自己的 Key 打在屏幕上。
+// 统一在**出站前**过一道筛子：只盖凭据本体，错误语义（上下文超限、限流原因）保留。
+//
+// 八类漏网形态都在这张表里：
+//   ① 全角（`ｓｋ－…`，网关回显可能是全角）  ② 一条消息里多值
+//   ③ 裸 `sk-`（只有前缀没有 body）          ④ `session` / `*_session` 具名值
+//   ⑤ `sl-session=…` 这类 cookie 串          ⑥ `Bearer …` 认证头
+//   ⑦ JWT（三段点分）                        ⑧ `api_key` / `apiKey` 具名值
+
+/** 全角 → 半角：`ｓｋ－ｘ` 与 `sk-x` 必须同等对待（两种回显都出现过）。 */
+function toHalfWidth(text) {
+  return text
+    .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/\u3000/g, ' ')
+}
+
+// 字符类一律用 \w（= A-Z a-z 0-9 _）+ 显式列出的符号，避免写字面量长串。
+const TOKEN_BODY = String.raw`[\w.~+/=%$-]`
+const NAMED_CRED = String.raw`(api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?cookie|session[_-]?id|session|secret|cookie|password|passwd)`
+const COOKIE_NAME = String.raw`[\w-]*(?:session|token|secret|key|cookie|passwd|password)[\w-]*`
+// OAuth code / state 这类**不带 credential 名**的查询参数（`?code=…&state=…`）
+const OAUTH_PARAM = String.raw`(code|state|ticket|sig|signature|auth|SIGN)`
+
+/** 占位符本身：靠它做幂等（已盖过的不再盖，否则 `sk-***` → `sk-******`）。 */
+const MASKED = '***'
+const MASKED_AHEAD = String.raw`(?!\*)`
+
+const EMAIL = String.raw`[\w.+-]+@[\w-]+(?:\.[\w-]+)+`
+// 中国大陆手机号（11 位、1 开头、可带 +86 / 空格 / 横线分隔）
+const MOBILE = String.raw`(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)`
+
+const REDACTIONS = [
+  // ⑥ 认证头
+  [new RegExp(String.raw`\b(Bearer|Basic)\s+${MASKED_AHEAD}${TOKEN_BODY}{4,}`, 'gi'), `$1 ${MASKED}`],
+  // ⑦ JWT（三段点分，首段 eyJ）
+  [new RegExp(String.raw`\beyJ${MASKED_AHEAD}[\w-]{6,}\.[\w-]{6,}\.[\w-]{6,}`, 'g'), MASKED],
+  // ⑧④ 具名凭据：api_key=… / "apiKey": "…" / access_token: …
+  [new RegExp(String.raw`\b${NAMED_CRED}["'\x60]?\s*[=:]\s*["'\x60]?${MASKED_AHEAD}${TOKEN_BODY}{8,}`, 'gi'), `$1=${MASKED}`],
+  // ⑤④ cookie 串：名字里带 session/token/key/cookie/secret 的 name=value
+  [new RegExp(String.raw`\b(${COOKIE_NAME})\s*=\s*["'\x60]?${MASKED_AHEAD}${TOKEN_BODY}{8,}`, 'gi'), `$1=${MASKED}`],
+  // ⑨ URL 里的 OAuth code/state（不带 credential 名，上面两条都盖不到）
+  [new RegExp(String.raw`([?&]${OAUTH_PARAM})=${MASKED_AHEAD}${TOKEN_BODY}{4,}`, 'g'), `$1=${MASKED}`],
+  // ①③ sk- 本体（全角经 toHalfWidth 已归一）：带 body 与裸前缀一条规则搞定，
+  //     拆两条会把已盖成 `sk-***` 的再盖一次（`sk-******`）
+  [new RegExp(String.raw`\bsk-${MASKED_AHEAD}[\w-]*`, 'gi'), `sk-${MASKED}`],
+  // ⑩ 邮箱 / 手机号（上游风控文案里常带「谁被拒了」）
+  [new RegExp(EMAIL, 'g'), MASKED],
+  [new RegExp(MOBILE, 'g'), MASKED],
+]
+
+/**
+ * 脱敏上游文案：全角归一 → 逐条盖凭据 → 压平空白（防把换行/控制字符带进 UI）→ 截断。
+ *
+ * @param {unknown} input 上游原文（可以是对象、字符串、undefined）
+ * @param {{ limit?: number }} [options] limit 默认 240 字符
+ * @returns {string} 可直接展示的文案（空输入返回空串）
+ */
+function redactUpstream(input, { limit = 240 } = {}) {
+  let text = typeof input === 'string' ? input : input === undefined || input === null ? '' : String(input)
+  if (text === '') return ''
+  text = toHalfWidth(text)
+  for (const [pattern, replacement] of REDACTIONS) text = text.replace(pattern, replacement)
+  text = text.replace(/\s+/g, ' ').trim()
+  return text.length > limit ? `${text.slice(0, limit)}…` : text
+}
+
 /**
  * 网关响应分类（上游 classifyBaizhiError 同口径）：
  *   401/403 auth（静态 Key 重取无意义）· 429 rate_limit · 402 quota ·
@@ -218,7 +287,12 @@ function classifyStatus(status, upstreamKind, upstreamMessage) {
 
 function errorResponse(status, upstreamKind, upstreamMessage) {
   return Response.json(
-    { error: { type: 'provider_error', message: `百智云：${classifyStatus(status, upstreamKind, upstreamMessage)}` } },
+    {
+      error: {
+        type: 'provider_error',
+        message: `百智云：${redactUpstream(classifyStatus(status, upstreamKind, upstreamMessage))}`,
+      },
+    },
     { status },
   )
 }
@@ -331,7 +405,8 @@ async function platformRequest(path, cookie, init = {}) {
     const message = typeof parsed?.message === 'string' && parsed.message.length > 0
       ? parsed.message
       : `业务错误 ${String(parsed?.code ?? '(缺少 code)')}`
-    return { ok: false, error: message, status: response.status }
+    // 控制台错误文案会直接进 usage/checkin 的 display 与 message —— 出口前脱敏
+    return { ok: false, error: redactUpstream(message), status: response.status }
   }
   return { ok: true, data: parsed.data, status: response.status }
 }
@@ -654,7 +729,7 @@ async function exchangeKeyViaBrowser(session) {
   const raw = await cdpSend(target, 'Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true })
   const text = typeof raw?.result?.value === 'string' ? raw.result.value : ''
   let parsed
-  try { parsed = JSON.parse(text) } catch { return { ok: false, error: `商店接口返回非 JSON：${text.slice(0, 120)}` } }
+  try { parsed = JSON.parse(text) } catch { return { ok: false, error: `商店接口返回非 JSON：${redactUpstream(text, { limit: 120 })}` } }
   // ⚠️ 信封解包：响应是 {code, data:{items:[…]}}——items 在 data 下（真机 2026-11-04：
   //   直接读顶层 items 永远为空，误报「没有可用的 sk- 密钥」）
   const items = Array.isArray(parsed?.data?.items) ? parsed.data.items
@@ -668,7 +743,7 @@ async function exchangeKeyViaBrowser(session) {
       return { ok: true, key, name: typeof item?.name === 'string' && item.name !== '' ? item.name : undefined }
     }
   }
-  return { ok: false, error: `这个大模型商店账号下还没有可用的 sk- 密钥——请在打开的浏览器里到 https://ai-models.app.baizhi.cloud/console/keys 新建一把（响应片段：${text.slice(0, 240)}）` }
+  return { ok: false, error: `这个大模型商店账号下还没有可用的 sk- 密钥——请在打开的浏览器里到 https://ai-models.app.baizhi.cloud/console/keys 新建一把（响应片段：${redactUpstream(text)}）` }
 }
 
 /** 登录进度页：浏览器状态区 + 粘贴兜底表单（单文件、无外部资源）。 */
@@ -881,3 +956,6 @@ export const baizhiChannel = {
   checkin,
   usage,
 }
+
+// 供单测使用（非渠道契约的一部分）
+export { redactUpstream as baizhiRedactUpstream, toHalfWidth as baizhiToHalfWidth }

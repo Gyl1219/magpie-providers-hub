@@ -9,7 +9,7 @@ import { join } from 'node:path'
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-hub-baizhi-'))
 process.env.DSH_HUB_SNAPSHOT_PATH = join(sandbox, 'snapshot.js')
 
-const { baizhiChannel, BAIZHI_MAX_CONTEXT } = await import('../src/baizhi.mjs')
+const { baizhiChannel, BAIZHI_MAX_CONTEXT, baizhiRedactUpstream } = await import('../src/baizhi.mjs')
 
 test.after(() => {
   rmSync(sandbox, { recursive: true, force: true })
@@ -142,6 +142,115 @@ test('chat 错误分类：401 凭据 / 402 quota / 429 限流 / 400 invalid_requ
   const invalid = await caseOf(400, 'invalid_request_error', 'This model maximum context length is 1048576 tokens')
   assert.equal(invalid.status, 400)
   assert.match(invalid.body.error.message, /1048576/, 'invalid_request 的上游原文透传（上下文超限要看得见）')
+})
+
+// ── 上游文案脱敏（八类漏网形态）─────────────────────────────────────────
+
+test('脱敏：sk- 本体（含全角、裸前缀、多值）一律盖掉', () => {
+  // ① 全角回显 ③ 裸 sk- ② 同一条消息里多值
+  const out = baizhiRedactUpstream('invalid key ｓｋ－abcdef123456 ; also sk- and sk-XYZ987654321 and sk-ok')
+  assert.ok(!/sk-(?!\*\*\*)/i.test(out), `不得残留未盖的 key：${out}`)
+  for (const secret of ['abcdef123456', 'XYZ987654321', 'ok']) {
+    // 'sk-ok' 这类短值哪怕只有两位也必须盖掉（裸前缀规则覆盖）
+    assert.ok(!out.includes(secret), `残留 ${secret}：${out}`)
+  }
+  assert.ok(out.includes('invalid key'), '错误原因要留着')
+})
+
+test('脱敏：④ session / *_session 具名值、⑤ cookie 串', () => {
+  const out = baizhiRedactUpstream('session expired: sl-session=abcdefgh12345; baizhi_session=ZYXWVUTSRQ98765; session=TOPSECRETVALUE')
+  assert.ok(!out.includes('abcdefgh12345'))
+  assert.ok(!out.includes('ZYXWVUTSRQ98765'))
+  assert.ok(!out.includes('TOPSECRETVALUE'))
+  assert.ok(out.includes('expired'), '语义保留')
+})
+
+test('脱敏：⑥ Bearer / ⑦ JWT / ⑧ api_key 具名值', () => {
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.c2lnbmF0dXJlc2lnbmF0dXJl'
+  const out = baizhiRedactUpstream(`auth failed Bearer abcdef1234567890 token=${jwt} and "apiKey": "live-abcdef123456"`)
+  assert.ok(!out.includes(jwt), 'JWT 三段必须整段盖掉')
+  assert.ok(!out.includes('abcdef1234567890'))
+  assert.ok(!out.includes('live-abcdef123456'))
+  assert.ok(out.includes('auth failed'))
+})
+
+test('脱敏：⑨ URL 里的 OAuth code/state（不带 credential 名）', () => {
+  const out = baizhiRedactUpstream('redirect failed: https://gw/cb?code=abc123def456&state=ZZZZ1111XYZ&ok=1')
+  assert.ok(!out.includes('abc123def456'))
+  assert.ok(!out.includes('ZZZZ1111XYZ'))
+  assert.ok(out.includes('&ok=1'), '非凭据参数保留')
+  assert.ok(out.includes('?code=***'))
+})
+
+test('脱敏：⑩ 邮箱 / 手机号（风控文案里常带「谁被拒了」）', () => {
+  const out = baizhiRedactUpstream('user bob.smith@example.com or +86 13800138000 is blocked')
+  assert.ok(!out.includes('bob.smith@example.com'))
+  assert.ok(!out.includes('13800138000'))
+  assert.ok(out.includes('is blocked'), '原因保留')
+})
+
+test('脱敏幂等：连跑三次结果不变（`sk-***` 不得再被盖成 `sk-******`）', () => {
+  for (const input of [
+    'key sk-live-abcdef123456 sl-session=ABCDEFGH12345',
+    'Bearer abcdef1234567890123 unauthorized',
+    'https://gw/cb?code=abc123def456&state=ZZZZ1111',
+    'user bob.smith@example.com phone 13800138000',
+  ]) {
+    const once = baizhiRedactUpstream(input)
+    const twice = baizhiRedactUpstream(once)
+    const thrice = baizhiRedactUpstream(twice)
+    assert.equal(twice, once, `二次脱敏不幂等：${once} → ${twice}`)
+    assert.equal(thrice, once, `三次脱敏不幂等：${once} → ${thrice}`)
+  }
+})
+
+test('脱敏：脱敏后仍可读（压平空白、截断、空输入）', () => {
+  assert.equal(baizhiRedactUpstream(undefined), '')
+  assert.equal(baizhiRedactUpstream(null), '')
+  assert.equal(baizhiRedactUpstream(''), '')
+  // 换行/制表压成单空格（防 prompt 注入式多行 toast）
+  assert.equal(baizhiRedactUpstream('line1\n\nline2\t\tline3'), 'line1 line2 line3')
+  const long = 'x'.repeat(400)
+  const truncated = baizhiRedactUpstream(long, { limit: 40 })
+  assert.equal(truncated.length, 41, '截断后带一个省略号')
+  assert.ok(truncated.endsWith('…'))
+})
+
+test('脱敏：普通错误文案不被误伤（上下文超限原样可读）', () => {
+  const message = 'This model maximum context length is 1048576 tokens. However, your messages resulted in 2000000 tokens.'
+  assert.equal(baizhiRedactUpstream(message), message)
+})
+
+test('chat 错误出口：上游把 Key 回显进 message 时，返回给宿主的文案里不得有 Key', async () => {
+  const stub = stubFetch([{
+    match: '/api/anthropic/v1/messages',
+    respond: () => new Response(
+      JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'bad key sk-live-abcdef123456789 and session=ABCDEFGH12345678' } }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    ),
+  }])
+  try {
+    const res = await baizhiChannel.chat(
+      { access_token: 'sk-ABC' },
+      { body: { model: 'deepseek-v4-flash', stream: false, messages: [{ role: 'user', content: 'hi' }] } },
+    )
+    assert.equal(res.status, 400)
+    const body = await res.json()
+    assert.ok(!/sk-[A-Za-z0-9]/.test(body.error.message.slice(4)), `响应里残留 Key：${body.error.message}`)
+    assert.ok(!body.error.message.includes('ABCDEFGH12345678'))
+    assert.ok(body.error.message.includes('bad key'), '错误原因保留')
+  } finally { stub.restore() }
+})
+
+test('usage 出口：控制台业务错误里的凭据同样被盖掉', async () => {
+  const stub = stubFetch([{
+    match: '/api/v1/user/wallet/balance',
+    respond: () => json({ code: 1001, message: 'session 已过期：sl-session=abcdefgh12345' }),
+  }])
+  try {
+    const rows = await baizhiChannel.usage({ access_token: 'sk-A', session_cookie: 'sl-session=X; baizhi_session=Y' })
+    assert.ok(!JSON.stringify(rows).includes('abcdefgh12345'), `usage 显示了 cookie 值：${JSON.stringify(rows)}`)
+  } finally { stub.restore() }
 })
 
 // ── usage（两套凭据分工）────────────────────────────────────────────────

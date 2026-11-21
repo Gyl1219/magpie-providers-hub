@@ -418,6 +418,101 @@ function normalizeTools(tools) {
   return changed ? out : tools
 }
 
+// ── 请求体净化 ─────────────────────────────────────────────────────────────
+//
+// 两件事，都是**发出去之前**做的，命中不了就原样放行（绝不猜）：
+
+/**
+ * 空 `tools` 必须整键删除。
+ *
+ * 真机（IKVL6C）实录：上游收到 `tools: []` 会认为「本轮有函数能力、但零个定义」，
+ * 模型于是把工具调用写成正文里的 DSML 标记（`<|DSML|invoke ...`），宿主当成
+ * 普通文本渲染。没有工具就干脆不声明这个字段。
+ *
+ * @returns {{ body: object, dropped: boolean }}
+ */
+function dropEmptyTools(body) {
+  if (!Array.isArray(body?.tools) || body.tools.length > 0) return { body, dropped: false }
+  const out = { ...body }
+  delete out.tools
+  return { body: out, dropped: true }
+}
+
+/**
+ * 英文身份句在 `messages[]` 里会被腾讯网关拉黑（4100406 非法请求）。
+ *
+ * 真机逐格二分（39 次实发）：**中英不对称** —— 同一句约束写成中文放行，
+ * 写成英文身份句就 4100406。所以只替换**那一句身份本体**，句后所有约束原样保留。
+ *
+ * 只认明确点名厂商/产品的身份句；认不出的一律不动 —— 静默改写别人的 system
+ * 提示比 403 更难查。
+ */
+const IDENTITY_SENTENCE = /^\s*(You are|You're|I am|This is)\s+(?=[^\n]{0,120}?(?:Claude|Codex|Anthropic|OpenAI|ChatGPT|GPT-\d|Gemini|Copilot|Cursor|Windsurf))[^\n]{0,160}?[.。](\s|$)/i
+
+/** 替换成中性中文身份句（等价语义：终端里的编程助手），不引入厂商名。 */
+const NEUTRAL_IDENTITY = '你是运行在开发者终端里的编程助手。'
+
+function rewriteIdentityText(text) {
+  if (typeof text !== 'string') return { text, changed: false }
+  const match = IDENTITY_SENTENCE.exec(text)
+  if (match === null) return { text, changed: false }
+  const rest = text.slice(match[0].length)
+  return { text: NEUTRAL_IDENTITY + (rest.length > 0 ? ' ' + rest.replace(/^\s+/, '') : ''), changed: true }
+}
+
+/** 内容可能是字符串，也可能是 `[{type:'text',text}]` 块数组（两种形态都要走）。 */
+function rewriteIdentityContent(content) {
+  if (typeof content === 'string') {
+    const rewritten = rewriteIdentityText(content)
+    return { content: rewritten.text, changed: rewritten.changed }
+  }
+  if (!Array.isArray(content)) return { content, changed: false }
+  let changed = false
+  const out = content.map((part) => {
+    if (!part || typeof part !== 'object' || typeof part.text !== 'string') return part
+    const rewritten = rewriteIdentityText(part.text)
+    if (!rewritten.changed) return part
+    changed = true
+    return { ...part, text: rewritten.text }
+  })
+  return { content: changed ? out : content, changed }
+}
+
+/**
+ * 把 `messages[]` 里 system / developer 角色的身份句换成中性中文句。
+ * 只碰 system/developer —— 用户自己写的内容一个字都不动。
+ *
+ * @returns {{ body: object, rewritten: number }}
+ */
+function rewriteIdentityMessages(body) {
+  if (!Array.isArray(body?.messages)) return { body, rewritten: 0 }
+  let rewritten = 0
+  const messages = body.messages.map((message) => {
+    if (!message || typeof message !== 'object') return message
+    if (message.role !== 'system' && message.role !== 'developer') return message
+    const result = rewriteIdentityContent(message.content)
+    if (!result.changed) return message
+    rewritten += 1
+    return { ...message, content: result.content }
+  })
+  return { body: rewritten > 0 ? { ...body, messages } : body, rewritten }
+}
+
+/**
+ * 发送前的完整净化（幂等）：空 tools 删键 + system 身份句中文化。
+ *
+ * @returns {{ body: object, droppedTools: boolean, rewrittenIdentity: number }}
+ */
+function sanitizeChatBody(body) {
+  const tools = dropEmptyTools(body)
+  const identity = rewriteIdentityMessages(tools.body)
+  return {
+    body: identity.body,
+    droppedTools: tools.dropped,
+    rewrittenIdentity: identity.rewritten,
+  }
+}
+
 // ── 错误分流 ───────────────────────────────────────────────────────────────
 //
 // 上游业务错误放在响应体里，HTTP 可能仍是 200/4xx。magpie 只看状态码决定
@@ -429,6 +524,10 @@ function normalizeTools(tools) {
 const MODEL_ISSUE = /model.*not (found|exist|allowed|available)|no such model|不支持.*模型|模型.*(不存在|未开通|不可用)|4100402/i
 const RISK_BLOCK = /4100404|风控拦截/
 const AUTH_EXPIRED = /4100403|登录态过期|未登录/
+// 4100406「非法请求」= 请求体被判非法（实测最常见成因是 messages[] 里的英文身份句）。
+// ⚠ 换账号、重试都救不回来（同一个 body 打到哪个账号都一样），必须报 400 让
+//   magpie 停下，而不是像 unknown 那样 403 原样透出让宿主每轮重打。
+const INVALID_REQUEST = /4100406|非法请求/
 
 function errorResponse(status, code, message, headers = {}) {
   return new Response(JSON.stringify({ error: { type: 'upstream_error', code, message } }), {
@@ -475,6 +574,7 @@ async function chat(acct, request, opts = {}) {
   }
 
   // 归一：模型 id（下标 / 显示名 → 槽位名）+ 工具 schema（补 type: "object"）
+  //      + 空 tools 删键 + system 身份句中文化（见 sanitizeChatBody）
   if (parsed) {
     let changed = false
     const canonical = canonicalModelId(parsed.model)
@@ -485,6 +585,11 @@ async function chat(acct, request, opts = {}) {
     const tools = normalizeTools(parsed.tools)
     if (tools !== parsed.tools) {
       parsed.tools = tools
+      changed = true
+    }
+    const sanitized = sanitizeChatBody(parsed)
+    if (sanitized.body !== parsed) {
+      parsed = sanitized.body
       changed = true
     }
     // 上游有这些扩展头管着场景与配额，请求体里不需要再带
@@ -575,6 +680,15 @@ async function chat(acct, request, opts = {}) {
   }
   if (MODEL_ISSUE.test(text) || response.status === 404) {
     return errorResponse(404, 'model_unavailable', `该模型在当前账号不可用：${text.slice(0, 300)}`)
+  }
+  // 4100406 要在最终「原样透出」之前拦下：透出去是 403，magpie 会当成可重试，
+  // 每轮都拿同一个 body 重打，永远 4100406（真机 100% 403 就是这么来的）。
+  if (INVALID_REQUEST.test(text)) {
+    return errorResponse(
+      400,
+      'invalid_request',
+      `上游判请求体非法（4100406，不换账号也不会自愈）：${text.slice(0, 300)}`,
+    )
   }
   return new Response(text || null, { status: response.status, headers: response.headers })
 }
@@ -2246,6 +2360,9 @@ export {
   ualSignature as marvisUalSignature,
   normalizeTools as marvisNormalizeTools,
   withObjectType as marvisWithObjectType,
+  sanitizeChatBody as marvisSanitizeChatBody,
+  rewriteIdentityMessages as marvisRewriteIdentityMessages,
+  dropEmptyTools as marvisDropEmptyTools,
   syntheticUskey as marvisSyntheticUskey,
   currentScene as marvisScene,
   CHAT_URL as MARVIS_CHAT_URL,

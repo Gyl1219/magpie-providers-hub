@@ -244,6 +244,152 @@ test('chat：业务码 100002 → 401 登录失效（不误判成功）', async 
   } finally { stub.restore() }
 })
 
+// ── 上游网关故障：一次即止，不参与换号 ─────────────────────────────────
+//
+// 语义来源（仓库内实证，非照抄 DSH）：
+//   magicrew.mjs:343-347 —— magpie 400 分支非额度文案 ⇒ 整轮失败、账号不 rest、
+//     其它账号一个都不问；marvis.mjs:426 —— 503 属「可重试」，会换号。
+//   网关级故障同渠道共用网关，换号纯白打，故出口状态取 400。
+
+const chatBody = (stream = false) => ({
+  model: 'GLM-5.3-Flash', stream, messages: [{ role: 'user', content: 'hi' }],
+})
+
+test('chat：HTTP 502 → 400 upstream_error（一次即止，不换号）', async () => {
+  const stub = stubFetch([{ match: '/chat/completions', respond: () => json({ message: 'bad gateway' }, 502) }])
+  try {
+    const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody() })
+    assert.equal(res.status, 400, '出口必须是 400：magpie 400 非额度文案 ⇒ 不换号')
+    const err = (await res.json()).error
+    assert.equal(err.type, 'upstream_error')
+    assert.equal(err.code, 'upstream_unavailable')
+    assert.match(err.message, /502/, 'message 原样带真实 HTTP 状态（状态码语义偏弱，靠文案兜）')
+    assert.match(err.message, /换号无用/)
+  } finally { stub.restore() }
+})
+
+test('chat：HTTP 503 + 信封 100002 → 仍是上游故障，不触发 renew 换号', async () => {
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => json({ code: '100002', desc: 'token 无效' }, 503),
+  }])
+  let renewCalls = 0
+  try {
+    const res = await loomyChannel.chat(
+      { access_token: 'AT' },
+      { body: chatBody(), renew: async () => { renewCalls += 1; return { access_token: 'NEW' } } },
+    )
+    assert.equal(renewCalls, 0, '5xx 时信封 code 不可信，绝不能拿它去 renew')
+    assert.equal(res.status, 400)
+    assert.equal((await res.json()).error.type, 'upstream_error')
+    assert.equal(stub.calls.length, 1, '只打一次网关，不重发')
+  } finally { stub.restore() }
+})
+
+test('chat：HTTP 200 + 「该模型服务暂时不可用」→ 同样判上游故障', async () => {
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => json({ code: '500', desc: '该模型服务暂时不可用，请稍后再试' }),
+  }])
+  try {
+    const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody() })
+    assert.equal(res.status, 400, '业务信封里的网关故障也要摘出换号路径')
+    const err = (await res.json()).error
+    assert.equal(err.type, 'upstream_error')
+    assert.equal(err.code, 'upstream_unavailable')
+    assert.match(err.message, /暂时不可用/)
+  } finally { stub.restore() }
+})
+
+test('chat：英文 upstream 文案（service unavailable / bad gateway）也认', async () => {
+  for (const desc of ['Service Unavailable', 'bad gateway', 'upstream timeout']) {
+    const stub = stubFetch([{ match: '/chat/completions', respond: () => json({ code: '500', desc }) }])
+    try {
+      const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody() })
+      assert.equal(res.status, 400, `「${desc}」应判上游故障`)
+      assert.equal((await res.json()).error.type, 'upstream_error')
+    } finally { stub.restore() }
+  }
+})
+
+test('chat：普通业务错保持 provider_error + 原语义（不被上游分类吞掉）', async () => {
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => json({ code: '999999', desc: '参数不合法' }),
+  }])
+  try {
+    const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody() })
+    assert.equal(res.status, 502, '业务错沿用旧出口（200 信封 → 502）')
+    assert.equal((await res.json()).error.type, 'provider_error')
+  } finally { stub.restore() }
+})
+
+test('chat：HTTP 400 非上游文案 → provider_error 透出原状态码', async () => {
+  const stub = stubFetch([{ match: '/chat/completions', respond: () => json({ error: { message: 'invalid model' } }, 400) }])
+  try {
+    const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody() })
+    assert.equal(res.status, 400)
+    assert.equal((await res.json()).error.type, 'provider_error')
+  } finally { stub.restore() }
+})
+
+test('chat：正常回答的正文里出现「暂时不可用」不得误判（只有报错路径才做文案匹配）', async () => {
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => json({ id: 'x', choices: [{ message: { content: '当网关回「该模型服务暂时不可用」时应当重试' } }] }),
+  }])
+  try {
+    const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody() })
+    assert.equal(res.status, 200, '成功回答原样透传')
+    assert.match((await res.json()).choices[0].message.content, /暂时不可用/)
+  } finally { stub.restore() }
+})
+
+test('chat：请求 URL 与账号无关（同一网关基址）—— 换号绕不过网关故障', async () => {
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => json({ id: 'x', choices: [{ message: { content: 'OK' } }] }),
+  }])
+  try {
+    await loomyChannel.chat({ access_token: 'AT-A', userid: 'U1' }, { body: chatBody() })
+    await loomyChannel.chat({ access_token: 'AT-B', userid: 'U2' }, { body: chatBody() })
+    const urls = stub.calls.map((c) => c.url)
+    assert.equal(urls.length, 2)
+    assert.equal(urls[0], urls[1], '两个账号打的是同一个 URL')
+    assert.match(urls[0], /^https:\/\/loomyad\.xunfei\.cn\/api\/v1\/chat\/completions$/)
+    assert.doesNotMatch(urls[0], /U1|U2|AT-A|AT-B/, 'URL 里不带任何账号/凭据标识')
+  } finally { stub.restore() }
+})
+
+test('chat：额度不足仍是 402 原样透出（换号路径没被上游分类吞掉）', async () => {
+  // loomy 的额度不足走 HTTP 402 + {error:{message}}（见 parseEnvelope 注释），
+  // 402 是 magpie 唯一无条件换号的出口 —— 上游故障分类必须绕开它。
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => json({ error: { message: '积分不足，请充值' } }, 402),
+  }])
+  try {
+    const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody() })
+    assert.equal(res.status, 402, '额度不足必须保持 402：这是唯一会换号的出口')
+    const err = (await res.json()).error
+    assert.equal(err.type, 'provider_error', '不上游故障分类')
+    assert.match(err.message, /积分不足/)
+  } finally { stub.restore() }
+})
+
+test('chat：SSE 流式成功仍原样透传（上游故障分类不碰流式分支）', async () => {
+  const sse = 'data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n'
+  const stub = stubFetch([{
+    match: '/chat/completions',
+    respond: () => new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+  }])
+  try {
+    const res = await loomyChannel.chat({ access_token: 'AT' }, { body: chatBody(true) })
+    assert.equal(res.status, 200)
+    assert.match(await res.text(), /\[DONE\]/)
+  } finally { stub.restore() }
+})
+
 // ── 余额（两池）─────────────────────────────────────────────────────────
 
 test('usage：永久池走 amount/limit 形态（balance 会关进度条）；每日池 span+resetsAt', async () => {
