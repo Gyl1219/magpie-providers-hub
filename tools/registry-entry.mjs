@@ -49,8 +49,8 @@ export const PRIVATE_IDS = Object.freeze(['hub-lingxi'])
 export const UNREGISTERED_IDS = Object.freeze(['hub-doubaowork', 'hub-dola', 'hub-baizhi'])
 
 export const SUMMARY = Object.freeze({
-  zh: "十二家供应商一起装：AStudio（讯飞）、Accio（阿里）、LobsterAI（有道龙虾）、超级麦吉 MagiCrew（国内+国际）、AutoClaw（国内+国际）、Loomy（讯飞）、MonkeyCode（国内+国际）、七牛云 MaaS、腾讯 Marvis。一渠道一供应商（hub-渠道），各自登录、额度、开关与故障转移。AStudio：星火与 DeepSeek，签到送积分；独立的 astudio 插件走 Responses，两边共用同一积分池。Accio：15 模型按倍率计费。LobsterAI：DeepSeek/GLM/Kimi，可看图。MagiCrew：积分按到期日分档。AutoClaw：读桌面登录态或贴 token；导入会轮换一次性 refresh_token，桌面客户端会被登出、之后需重新登录；不支持网页 OAuth 与短信（那些用 opencode-autoclaw-auth）；与它共用同一账号积分。Loomy：微信扫码或短信；opencode-loomy-auth 只有短信与粘贴 session；两边共用同一积分。MonkeyCode：登录换 Key，三档额度。七牛云：按量计费 + 签到，七牛唯一入口。Marvis：QQ/微信 OAuth 或导入本机登录态，无粘贴入口；registry 无同渠道独立包。第三方适配 iJetLi/dsh-providers-hub（MIT）。",
-  en: "Twelve providers in one install: AStudio, Accio, LobsterAI, MagiCrew (CN + Intl), AutoClaw (Intl + CN), Loomy, MonkeyCode (CN + Intl), Qiniu MaaS and Tencent Marvis. One provider per channel (hub-<channel>): each has its own sign-in, metering, on/off switch and failover. AStudio: Spark + DeepSeek with daily check-in credits; the standalone astudio plugin uses Responses, and both draw on one points pool. Accio: 15 models priced by multiplier. LobsterAI: DeepSeek/GLM/Kimi, image input. MagiCrew: credit packs banded by expiry. AutoClaw: reads the desktop app login or takes a pasted token; importing rotates the one-time refresh token and signs the AutoClaw desktop app out, so it asks for sign-in again; web OAuth and SMS are not supported here (use opencode-autoclaw-auth for those), and both plugins read one account's balance. Loomy: WeChat QR or SMS; opencode-loomy-auth has SMS and pasted session only, and both read one account's balance. MonkeyCode: sign-in swaps the key, three quota tiers. Qiniu MaaS: pay-as-you-go with check-in credits, the only Qiniu entry. Marvis: QQ / WeChat OAuth or importing the local sign-in, no paste entry; no standalone package for this channel. Third-party adapter of iJetLi/dsh-providers-hub (MIT); no DSH needed at runtime.",
+  zh: "绿标必须是「magpie 社区」，其它徽标（含 Our Free Model）的同名包非本仓发布，请回 magpie 社区装；本仓 Gyl1219/magpie-providers-hub；十二家供应商一起装：AStudio（讯飞）、Accio（阿里）、LobsterAI（有道龙虾）、超级麦吉 MagiCrew（国内+国际）、AutoClaw（国内+国际）、Loomy（讯飞）、MonkeyCode（国内+国际）、七牛云 MaaS、腾讯 Marvis。一渠道一供应商（hub-渠道），各自登录、额度、开关与故障转移。AStudio：星火与 DeepSeek，签到送积分；独立的 astudio 插件走 Responses，两边共用同一积分池。Accio：15 模型按倍率计费。LobsterAI：DeepSeek/GLM/Kimi，可看图。MagiCrew：积分按到期日分档。AutoClaw：读桌面登录态或贴 token；导入会轮换一次性 refresh_token，桌面客户端会被登出、之后需重新登录；不支持网页 OAuth 与短信（那些用 opencode-autoclaw-auth）；与它共用同一账号积分。Loomy：微信扫码或短信；opencode-loomy-auth 只有短信与粘贴 session；两边共用同一积分。MonkeyCode：登录换 Key，三档额度。七牛云：按量计费 + 签到，七牛唯一入口。Marvis：QQ/微信 OAuth 或导入本机登录态，无粘贴入口；registry 无同渠道独立包。第三方适配 iJetLi/dsh-providers-hub（MIT）。",
+  en: "Badge must read “magpie community”: any other badge on a same-name package is not ours (Gyl1219/magpie-providers-hub). Twelve providers in one install: AStudio, Accio, LobsterAI, MagiCrew (CN + Intl), AutoClaw (Intl + CN), Loomy, MonkeyCode (CN + Intl), Qiniu MaaS and Tencent Marvis. One provider per channel (hub-<channel>): each has its own sign-in, metering, on/off switch and failover. AStudio: Spark + DeepSeek with daily check-in credits; the standalone astudio plugin uses Responses, and both draw on one points pool. Accio: 15 models priced by multiplier. LobsterAI: DeepSeek/GLM/Kimi, image input. MagiCrew: credit packs banded by expiry. AutoClaw: reads the desktop app login or takes a pasted token; importing rotates the one-time refresh token and signs the AutoClaw desktop app out, so it asks for sign-in again; web OAuth and SMS are not supported here (use opencode-autoclaw-auth for those), and both plugins read one account's balance. Loomy: WeChat QR or SMS; opencode-loomy-auth has SMS and pasted session only, and both read one account's balance. MonkeyCode: sign-in swaps the key, three quota tiers. Qiniu MaaS: pay-as-you-go with check-in credits, the only Qiniu entry. Marvis: QQ / WeChat OAuth or importing the local sign-in, no paste entry; no standalone package for this channel. Third-party adapter of iJetLi/dsh-providers-hub (MIT); no DSH needed at runtime.",
 })
 
 /** 按 package.json 的 files 推出「实际会进包的渠道 id」（含多站点渠道的拆分）。 */
@@ -103,7 +103,10 @@ export function assertSummary(summary = SUMMARY) {
   const problems = []
   const zhLen = [...summary.zh].length
   if (zhLen > ZH_LIMIT) problems.push(`summary.zh ${zhLen} 字，超过上限 ${ZH_LIMIT}`)
-  if (![...summary.zh].slice(0, 14).join('').startsWith(ZH_HEAD)) {
+  // 开头 14 字（原「十二家供应商一起装」）现在让位给防冒名判据 —— 徽标不对时，
+  // 用户看到的第二行必须是这句，不然他连「该看哪里」都不知道。
+  const headLen = [...ZH_HEAD].length
+  if (![...summary.zh].slice(0, Math.max(headLen, 14)).join('').startsWith(ZH_HEAD)) {
     problems.push(`summary.zh 开头必须是一句话总览（「${ZH_HEAD}…」），否则卡片截断后又只剩尾部`)
   }
   // 总览句 = 第一个句号之前；十二条渠道名必须在这句里出现，否则「读起来像单渠道插件」的病会复发
@@ -116,7 +119,7 @@ export function assertSummary(summary = SUMMARY) {
   return problems
 }
 
-const ZH_HEAD = '十二家供应商一起装'
+const ZH_HEAD = '绿标必须是'
 /** 总览句里必须出现的十二条渠道名（多站点渠道按显示名检查一次）。 */
 const OVERVIEW_NAMES = Object.freeze([
   'AStudio', 'Accio', 'LobsterAI', 'MagiCrew', 'AutoClaw', 'Loomy', 'MonkeyCode', '七牛云', 'Marvis',

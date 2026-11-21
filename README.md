@@ -5,6 +5,10 @@
 > **本仓库是原项目的第三方 Magpie 适配版本，不是原项目官方发布。**
 > 账号渠道、EAC 授权流程、本地服务与管理界面来自原项目，这些功能的主要实现归
 > 原作者及其上游贡献者。本仓库新增 Magpie 供应商接口、自动服务管理、浏览器管理入口和兼容测试。
+>
+> **只在 [magpie 社区](https://github.com/magpie-community/plugins) 上架。** 其它 registry
+> （含 Our Free Model）里的同名 `magpie-providers-hub` 条目不是本仓库发布 —— 卡片绿标应显示
+> 「magpie 社区」，显示别的徽标请核对作者与仓库地址（`Gyl1219/magpie-providers-hub`）。
 
 Magpie / OpenCode 供应商插件 —— 把 **DSH Providers Hub 里的渠道**做成**独立实现**。
 
