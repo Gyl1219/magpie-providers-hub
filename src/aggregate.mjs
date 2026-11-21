@@ -188,6 +188,39 @@ function credentialOfAuth(auth) {
 }
 
 /**
+ * 给凭据补上 magpie 认识的 OAuth 字段名（`access` / `refresh`，驼峰）。
+ *
+ * ⚠️ magpie 0.1.4656 的 `keptAs`（internal/provider，反编译）判定「登录成功
+ *    有没有东西可保存」**只认这三个字段**：
+ *       function keptAs(r) {
+ *         if ("refresh" in r || "key" in r) return r
+ *         if (typeof r.access === "string" && r.access) return { ...r, refresh: "" }
+ *         return null   // ← 什么字段都没有 → "gave nothing to keep"
+ *       }
+ *    而本插件各渠道的凭据字段名**不统一**（accio/lobsterai 用 `access_token`/
+ *    `refresh_token`，astudio 用 `accessToken`，magicrew 用 `token`+`refreshToken`，
+ *    autoclaw/marvis 用 `accessToken`），一个都不满足 `keptAs` 的判定 ——
+ *    于是登录回调成功（`started.result` resolve、甚至已落盘）后，magpie 仍报
+ *    `sign-in gave nothing to keep`，用户看到的是「登录了但失败」。
+ *
+ *    这里做一次**通用**映射：把渠道自己的凭据字段统一翻译成 magpie 认的
+ *    `access`/`refresh` 加进 auth 返回。magpie 的 `save` 会把 `type/provider/
+ *    refresh/access/expires` 剥掉、**其余字段原样保留**（`...extra`）进账号槽，
+ *    所以渠道自己的字段（如 `access_token`）不会丢，插件读凭据照旧。
+ *
+ *    映射优先取渠道自己用的字段名（下划线 → 驼峰 → `token` 兜底），
+ *    缺 refresh 的渠道（astudio）只补 access，magpie 会自己给空 refresh。
+ */
+export function magpieOAuthFieldsOf(credential) {
+  const access = credential?.access_token ?? credential?.accessToken ?? credential?.token ?? credential?.access
+  const refresh = credential?.refresh_token ?? credential?.refreshToken ?? credential?.refresh
+  return {
+    ...(typeof access === 'string' && access !== '' ? { access } : {}),
+    ...(typeof refresh === 'string' && refresh !== '' ? { refresh } : {}),
+  }
+}
+
+/**
  * 凭据的到期时刻（毫秒）。三渠道的字段形态各不相同：
  * - officeace：`expiresAt` 是 ISO 字符串；
  * - minimaxintl：`expires_at` 是毫秒**数字串**（本实现写入）；
@@ -275,7 +308,7 @@ function gatedRenew(channel, current) {
       // current 是 auth（带 channel 字段）就合并回 auth 形状；是裸凭据就保持裸
       // ⚠️ type 认 'success'（我们写进账号槽的形状）与 'oauth'（社区插件形状）
       const merged = current?.type === 'oauth' || current?.type === 'success'
-        ? { ...current, ...next }
+        ? { ...current, ...next, ...magpieOAuthFieldsOf(next) }
         : next
       return rememberCredential(channel, merged)
     })
@@ -1210,6 +1243,10 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
                   type: 'success',
                   channel: channel.id,
                   ...credential,
+                  // ⚠️ magpie 0.1.4656 的 keptAs 只认 access/refresh（驼峰）；
+                  //    各渠道凭据字段名不统一，这里统一补上，否则登录回调成功
+                  //    后 magpie 仍报「sign-in gave nothing to keep」。
+                  ...magpieOAuthFieldsOf(credential),
                   ...(expires !== undefined ? { expires } : {}),
                   accountId: resolveAccountId(credential),
                 }
