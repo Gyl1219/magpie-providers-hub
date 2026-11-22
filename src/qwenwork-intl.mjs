@@ -1,65 +1,70 @@
-// 千问办公国际版（qwenwork.ai）渠道 —— 独立 Ory/OIDC 发行方。
+// 千问办公国际版（qwenwork.ai）渠道 —— 包装器设备流 + 网关主机。
 //
-// ## 为什么登录必须是「粘贴式」
+// ## 登录：包装器设备流（**不是**粘贴式 Ory 回调）
 //
-// 国际版客户端走 `native-oauth` + `external-browser`，而**唯一**被注册的
-// redirect_uri 是 `https://gateway.qwenwork.ai/oauth/callback` —— 回调落在网关，
-// 插件收不到。环回端口与各种 `qwenwork://` 变体一律被 Ory 拒（实测
-// "does not match any of the pre-registered redirect urls"）。
+// 早前这版按「Ory 网页登录 + 用户粘贴回调」写，已作废：国际站唯一被注册的
+// redirect_uri 落在网关上，插件收不到回调。真机实测走通的路线是**包装器设备流**：
 //
-// 所以只有一条路走得通：插件打开授权页 → 用户在浏览器里登录 → 授权完成后
-// 浏览器停在那条深链（`qwenwork://…#code=…` 或 `…/oauth/callback?code=…`）→
-// 用户把整条地址粘回插件的本地页 → 插件拿 code 去 issuer 换 token。
+//   1. `GET https://gateway.qwenwork.ai/device/selectAccounts`（参数全在 query）
+//      `challenge=` S256 / `challenge_method=S256` / `nonce=` / `machine_id=` /
+//      `client_id=cc65e5fc-…` / `redirect_uri=qwenwork://`
+//      → 302 到 `https://qwenwork.ai/oauth2/auth`，那一跳里换成 issuer 的
+//        `client_id=qwenwork-desktop-app`、回调到网关、scope 含 `qwen_work`。
+//      **外层 client 与 scheme 是专属的一对**：换成 CN 的 client 或换成
+//      `https://gateway…/oauth/callback` 都是 400 `INVALID_DEVICE_FLOW`。
+//   2. 用户在浏览器里完成登录（插件只等，不接收任何粘贴）。
+//   3. 轮询 `GET https://gateway.qwenwork.ai/api/v1/deviceToken/poll`
+//      `?nonce=&verifier=&challenge_method=S256`：
+//        · 未授权 = **404 空体**（是「等待」，不是失败 —— 别把它当错误终止登录）
+//        · 成功   = **200 + token / refresh_token**
+//        · 多带 `client_id` = 400 `not_allowed`（所以 poll 只发这三个参数）
 //
-// ⚠️ 设备码流在这条渠道上不存在：网关 `/device/selectAccounts` 对任何 query 都
-//    400 `INVALID_DEVICE_FLOW`（两站对照实测），别再往那个方向试。
+// ## 续期：网关的 deviceToken/refresh，**只认包装器对**
 //
-// ## 常量出处
+//   `POST https://gateway.qwenwork.ai/api/v1/deviceToken/refresh`
+//   body `{ refresh_token, target: "c", client_id: <包装器 client>, redirect_uri: "qwenwork://" }`
 //
-// 全部来自 https://qwenwork.ai/.well-known/openid-configuration 与
-// 国际版桌面端 app.asar 的 `auth.browserLoginDeployments` / `GLOBAL_AUTHORITIES`。
-// 可复跑：`default-workspace/verify-intl-facts.mjs`（5/5 通过）。
+// 用 issuer 的对（`qwenwork-desktop-app` + 网关回调）会被 400
+// `INVALID_REFRESH_REQUEST`；所以**不要**改走 `/auth/oauth/token` 的
+// `grant_type=refresh_token`（那条老路已删）。
 //
-// ## COSY 路线复核（2026-11-21，匿名实测：只用假 token，不发真凭据）
+// ## 目录 / 对话 / 账号上下文：全在 gateway 上
 //
-// 结论一句话：**chat/catalog 走 `/algo/*` + COSY 签名，`/api/v1/*` 不是这条路。**
+//   · 目录 `GET  https://gateway.qwenwork.ai/algo/api/v2/model/list?Encode=1`（要 COSY 签名）
+//   · 对话 `POST https://gateway.qwenwork.ai/algo/api/v2/service/pro/sse/agent_chat_generation
+//     ?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`（要 COSY 签名，SSE）
+//   · 账号 `GET  https://gateway.qwenwork.ai/api/v1/adapter/user/account-context
+//     ?include=user,plan,quota`（普通 `Bearer <token>`，真机 200，界面上
+//     `700 credits / Free` 就是它的 `quota`）
 //
-// · `/api/v1/*` 只认 `Bearer <token>`：把完整 COSY 信封打过去仍是
-//   401 `User not authenticated`（models / chat / userinfo 三条都试过）。
-// · 真实路由（来自国际版 asar 与上游 0.3.0 intl 实现）：
-//   - 目录 `GET /algo/api/v2/model/list?Encode=1`
-//   - 对话 `POST /algo/api/v2/service/pro/sse/agent_chat_generation
-//     ?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`（SSE）
-// · 签名可以完全离线复现（公钥是 asar 里的公开常量，1024-bit）：
-//   `Authorization: Bearer COSY.<base64 payload>.<sig>`，
-//   `sig = md5(payload + "\n" + Cosy-Key + "\n" + ts + "\n" + wireBody + "\n" + path)`，
-//   path 去掉 `/algo` 前缀；payload 里是 AES-128-CBC 加密的用户信息，
-//   `Cosy-Key` 是用 RSA 公钥包的 AES 密钥。
-// · 实测证据（假 token，`Cosy-User` 也是假的）：
-//   - 签名正确 → `model/list` **200 + 完整模型目录**（分组形状，见下）；
-//   - 签名里把 path 写错 → 403 `{"code":"101","message":"Signature invalid"}`；
-//   - chat 用「故意签名不一致」作对照 → 200 SSE 里回 `101 Signature invalid`；
-//     签名一致时进到 token 校验（假 token → 500），说明签名这关已过。
-// · 目录真实形状是**分组**的：`{chat, assistant, inline, quest, nap, qwork,
-//   experts, qwake, app, qcode, byok_teams, byok_enterprise}`，每项
-//   `key`/`display_name`/`max_input_tokens`/`is_default`/`is_reasoning`/
-//   `price_factor`/`context_config`。`rowsOfGrouped()` 已按此形状实现
-//   （`byok_*` 组跳过：要用用户自己的第三方 key，列出来点了只会 400）。
-// · chat 的请求体还要按客户端字母表编码（`swapThirds(segmentEncode(json))`），
-//   并带 `X-Model-Key`/`X-Model-Source`、`Accept: text/event-stream`。
+// `openapi.qoder.sh` 上只有钱包（`/api/v1/adapter/user/wallets`，401）与一份
+// 同名的 `/algo/*` 挂载；本渠道的目录/对话/账号一律走 gateway —— 真机 200 都在这边。
 //
-// 本文件的 `catalog`/`chat` 已按上面的实测迁到 `/algo/*` + COSY 签名
-// （签名实现见 `./qwenwork-intl-cosy.mjs`）。
+// ## COSY 签名（chat/catalog）
+//
+// `/algo/*` 只认信封，不认普通 Bearer（实测带完整信封打 `/api/v1/*` 仍是
+// 401 `User not authenticated`）。签名实现在 `./qwenwork-intl-cosy.mjs`（龙娘维护，
+// 这里只 import 不改）：`Authorization: Bearer COSY.<payload>.<sig>`，
+// `sig = md5(payload\nkey\nts\nwireBody\npath)`，path 剥掉 `/algo` 前缀，
+// body 必须是 `encodeBody(json)` 之后的上线形态。
+//
+// ## 对话要两个业务字段（真机实测，缺了就是 400）
+//
+// 网关在签名之外还要 `request_id` 与 `session_id`（都走 snake_case，驼峰
+// `requestId` 会被当无效字段）：先回 `400 request_id is required`，补上再回
+// `400 session_id is required`，两个都补才 200 SSE。宿主那边是 OpenAI 形状、
+// 不带这两个 ⇒ `chat()` 自己补 uuid，**已有的不覆盖**（见 `withRequestIdentity`）。
 //
 // ## 未验证（不许当成已完成）
 //
-// · 端到端真登录：只验到「授权页接受 client/redirect/scope/PKCE」（302 → /signin），
-//   没有走过一次真实换 token。
-// · `refresh_token` 能否给这个 client 换新 token：未实测（走标准 OAuth 端点）。
-// · COSY 签名之外还要求 `Cosy-User` 与 token 所属 uid 一致 —— 没有真账号，
-//   只能验到「签名通过」这一关。
-// · **真机一条对话都没发过**：路由、签名、body 编码都只到「匿名探针验到签名这关
-//   过了」为止，没有任何一次带真 token 的成功响应。真机跑通前不许声称可用。
+// · **经由本渠道 `chat()` 的端到端还没跑过**：协议层已由群内在真机上验通 ——
+//   同一份凭据 + COSY 模块直打网关，补上两个字段后拿到 200 SSE（17 个 chunk、
+//   `X-Model-Name: qwen3.8-flash`）。但那是绕开本模块的探针，不是这里的代码跑出来的
+//   结果；真机跑通前不许声称可用（AGENTS §5）。
+// · SSE chunk 是否还要二次解码：未知 ⇒ chat **不碰响应正文**，原样透传给宿主。
+// · `deviceToken/poll` 的 200 响应体字段名（`access_token` / `accessToken`）与
+//   `deviceToken/refresh` 的响应形状：只核到状态码与「能换票」的结论，
+//   字段两种写法都认（见 `tokenOf`）。
 // · 国际站有没有签到/积分活动：未知，所以 `checkin` 是 inactive。
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
@@ -77,20 +82,30 @@ import {
 export const CHANNEL_ID = 'qwenwork-intl'
 export const DISPLAY_NAME = '千问办公 (国际版)'
 
-// ── 端点（OIDC discovery 实测）─────────────────────────────────────────────
+// ── 端点 ──────────────────────────────────────────────────────────────────
 
 const ISSUER = 'https://qwenwork.ai'
+/** Ory 的 authorize（302 的目标；也用作「拿不到 Location」时的兜底拼装）。 */
 const AUTHORIZE_URL = `${ISSUER}/oauth2/auth`
-const TOKEN_URL = `${ISSUER}/auth/oauth/token` // `/oauth2/token` 是 404
 const USERINFO_URL = `${ISSUER}/user/info`
-const CLIENT_ID = 'qwenwork-desktop-app' // 在 .ai 上有效；`wukong` 是 invalid_client
-const REDIRECT_URI = 'https://gateway.qwenwork.ai/oauth/callback' // 唯一被接受的
-const SCOPE = 'openid profile email offline_access qwen_work'
 
-/** 模型/API 主机（app.asar `GLOBAL_AUTHORITIES.qwenwork-global-prod`）。 */
-const API_BASE = 'https://openapi.qoder.sh'
-// 真实路径都在 /algo/* 且必须带 COSY 签名（见文件头「COSY 路线复核」）：
-// `/api/v1/*` 只认 Bearer，把完整签名信封打过去仍是 401 `User not authenticated`。
+/** 国际站网关：设备流、目录、对话、账号上下文都在这台。 */
+const GATEWAY = 'https://gateway.qwenwork.ai'
+const DEVICE_START_URL = `${GATEWAY}/device/selectAccounts`
+const DEVICE_POLL_URL = `${GATEWAY}/api/v1/deviceToken/poll`
+const DEVICE_REFRESH_URL = `${GATEWAY}/api/v1/deviceToken/refresh`
+const ACCOUNT_CONTEXT_URL = `${GATEWAY}/api/v1/adapter/user/account-context`
+
+const CLIENT_ID = 'qwenwork-desktop-app' // issuer 侧（302 之后 Ory 用的那个）
+const REDIRECT_URI = `${GATEWAY}/oauth/callback` // issuer 侧的注册回调
+const SCOPE = 'openid profile email offline_access qwen_work'
+/** 包装器（外层）client：设备流入口与 poll/refresh 只认它。 */
+const WRAPPER_CLIENT_ID = 'cc65e5fc-05bd-4f5d-a4e8-0df19aa3d75a'
+/** 包装器侧的 scheme（**裸 scheme**，`qwenwork-cn://` 是 CN 的）。 */
+const WRAPPER_REDIRECT_URI = 'qwenwork://'
+
+const API_BASE = GATEWAY
+// 真实路径都在 /algo/* 且必须带 COSY 签名（见文件头）：
 const MODELS_PATH = COSY_MODELS_PATH
 const CHAT_PATH = COSY_CHAT_PATH
 
@@ -105,6 +120,8 @@ const CLIENT_HEADERS = {
 }
 
 const LOGIN_TIMEOUT_MS = 15 * 60_000
+/** 轮询间隔：网关 pending 是 404，2s 一次既够快又不至于把登录窗口刷满。 */
+const POLL_INTERVAL_MS = 2_000
 const EXCHANGE_TIMEOUT_MS = 30_000
 /** 临期提前量：与其它渠道同口径（10 分钟）。 */
 const EXPIRY_LEAD_MS = 10 * 60 * 1000
@@ -217,7 +234,7 @@ export function expired(credential) {
   return at - EXPIRY_LEAD_MS <= Date.now()
 }
 
-// ── PKCE ──────────────────────────────────────────────────────────────────
+// ── PKCE / 授权 URL ───────────────────────────────────────────────────────
 
 /**
  * verifier = base64url(randomBytes(64)) → 86 字符（Ory 要求 43~128）。
@@ -230,8 +247,10 @@ export function createPkce() {
 }
 
 /**
+ * issuer 侧的 authorize URL。正常登录由包装器 302 给出（`startDeviceFlow` 读
+ * `Location`）；这里只在网关没回 `Location` 时兜底拼一条等价的。
+ *
  * Ory 拒短 state（实测 "state is missing or does not have enough characters"）。
- * `state`/`nonce` 用 dashed UUID，与上游一致。
  */
 export function buildAuthorizeUrl({ state, challenge, nonce, redirectUri = REDIRECT_URI, clientId = CLIENT_ID } = {}) {
   const query = new URLSearchParams({
@@ -247,99 +266,195 @@ export function buildAuthorizeUrl({ state, challenge, nonce, redirectUri = REDIR
   return `${AUTHORIZE_URL}?${query.toString()}`
 }
 
-// ── 粘贴串解析 ────────────────────────────────────────────────────────────
+// ── 包装器设备流：起流程 / 轮询 ───────────────────────────────────────────
 
-/**
- * 从用户粘回来的那一整条里取出 `code` / `state`。
- *
- * 实测可能出现的三种形态（都要认）：
- *   1. `qwenwork://oauth/callback?code=…&state=…`
- *   2. `https://gateway.qwenwork.ai/oauth/callback?code=…&state=…`
- *   3. 只贴了一串裸 code（没有 `?`）—— 当成 code 本身
- *
- * @returns {{ code?: string, state?: string, error?: string }}
- */
-export function parsePasted(input) {
-  const raw = typeof input === 'string' ? input.trim() : ''
-  if (raw === '') return { error: '粘贴内容为空' }
-  // 深链 / http(s) / 裸 code：URL 解析对 scheme 不敏感，统一按「?后面」取参
-  const queryStart = raw.indexOf('?')
-  if (queryStart < 0) {
-    // 裸 code：只接受看起来像 code 的串（避免用户把整段说明文字贴进来）
-    if (/^[\w.:-]{8,}$/.test(raw)) return { code: raw }
-    return { error: '这段里没有找到 ?code=（请粘贴浏览器地址栏的完整地址）' }
-  }
-  const params = new URLSearchParams(raw.slice(queryStart + 1))
-  const errorCode = params.get('error')
-  if (errorCode !== null && errorCode !== '') {
-    const description = params.get('error_description') ?? ''
-    return { error: `授权被拒绝：${errorCode}${description === '' ? '' : `（${description}）`}` }
-  }
-  const code = nonEmpty(params.get('code'))
-  if (code === undefined) return { error: '这条回调里没有 code（授权可能没完成，或复制的是旧地址）' }
-  return { code, state: nonEmpty(params.get('state')) }
+/** 设备流入口的 query（真机那次 302 的五个参数，一个都不能省）。 */
+export function buildStartQuery({ nonce, challenge, machineId }) {
+  return new URLSearchParams({
+    challenge,
+    challenge_method: 'S256',
+    nonce,
+    machine_id: machineId,
+    client_id: WRAPPER_CLIENT_ID,
+    redirect_uri: WRAPPER_REDIRECT_URI,
+  })
 }
 
-// ── 换 token / 读身份 ─────────────────────────────────────────────────────
-
 /**
- * 用一次性 code 换 token。失败一律返回 `{ ok:false, error }`，不抛 ——
- * 登录页要能把原因原样显示给用户。
+ * 起设备流：拿 302 的 `Location`（= issuer 的 authorize URL）。
+ *
+ * 方法：**GET**（探针三次复跑都是 302）。交办单里写的是 `POST` + query ——
+ * 两种都不带 body、参数全在 query，所以这里先 GET，遇 404/405 再退 POST，
+ * 不靠猜。
+ *
+ * `redirect: 'manual'` 必须给：否则 fetch 会跟到 `qwenwork.ai/oauth2/auth`，
+ * 那是给人看的登录页，在 node 里既拿不到 302 也没有意义。
+ *
+ * @returns {Promise<{ok:true, authorizeUrl, nonce, verifier, challenge, machineId} | {ok:false, error}>}
  */
-export async function exchangeCode({ code, verifier, redirectUri = REDIRECT_URI, clientId = CLIENT_ID, signal } = {}) {
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    code,
-    redirect_uri: redirectUri,
-    client_id: clientId,
-    code_verifier: verifier,
+export async function startDeviceFlow({ fetchImpl = fetch, signal } = {}) {
+  const pkce = createPkce()
+  const nonce = randomUUID()
+  const machineId = randomUUID()
+  const url = `${DEVICE_START_URL}?${buildStartQuery({ nonce, challenge: pkce.challenge, machineId })}`
+
+  const attempt = (method) => fetchImpl(url, {
+    method,
+    headers: { ...CLIENT_HEADERS, accept: '*/*' },
+    redirect: 'manual',
+    ...(signal !== undefined ? { signal } : {}),
   })
+
   let response
   try {
-    response = await fetch(TOKEN_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: body.toString(),
-      signal: signal ?? AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
+    response = await attempt('GET')
+    // 405 = 路由只认 POST；404 = 网关这一跳没挂 GET。两条都退 POST 再问一次。
+    if (response.status === 404 || response.status === 405) response = await attempt('POST')
+  } catch (error) {
+    return { ok: false, error: `设备流入口请求失败：${error?.message ?? error}` }
+  }
+
+  if (!(response.status >= 300 && response.status < 400)) {
+    // 400 INVALID_DEVICE_FLOW = 参数对不匹配（wrapper client / scheme 这一对是专属的）
+    const text = await response.text().catch(() => '')
+    return {
+      ok: false,
+      error: `设备流入口被拒（HTTP ${response.status}）：${text.slice(0, 200) || '（空响应体）'}`,
+    }
+  }
+
+  const location = nonEmpty(response.headers.get('location'))
+  return {
+    ok: true,
+    authorizeUrl: location ?? buildAuthorizeUrl({ state: nonce, challenge: pkce.challenge, nonce }),
+    nonce,
+    verifier: pkce.verifier,
+    challenge: pkce.challenge,
+    machineId,
+  }
+}
+
+/** 从 poll / refresh 的响应体里取 token（`data` 外壳与 camelCase 都认）。 */
+export function tokenOf(payload) {
+  const bare = typeof payload?.data === 'object' && payload.data !== null
+    ? { ...payload, ...payload.data }
+    : payload
+  const access = nonEmpty(bare?.access_token) ?? nonEmpty(bare?.accessToken)
+  if (access === undefined) return undefined
+  const refreshToken = nonEmpty(bare?.refresh_token) ?? nonEmpty(bare?.refreshToken)
+  const tokenType = nonEmpty(bare?.token_type) ?? nonEmpty(bare?.tokenType)
+  const expiresIn = Number(bare?.expires_in ?? bare?.expiresIn)
+  return {
+    access_token: access,
+    ...(refreshToken !== undefined ? { refresh_token: refreshToken } : {}),
+    ...(tokenType !== undefined ? { token_type: tokenType } : {}),
+    ...(Number.isFinite(expiresIn) && expiresIn > 0 ? { expires_at: Date.now() + expiresIn * 1000 } : {}),
+    ...(nonEmpty(bare?.scope) !== undefined ? { scope: bare.scope } : {}),
+  }
+}
+
+/**
+ * 轮询设备流。
+ *
+ * 契约（真机实测）：
+ *   · **404 + 空体 = 仍在等待**（不是失败 —— 把它当错误会让登录在用户扫码前就死掉）；
+ *   · 200 + token/refresh_token = 授权完成；
+ *   · 400 = 参数形态不对（多带了 `client_id` 之类），这是**硬错误**，轮询下去也没用。
+ *
+ * @returns {Promise<{state:'pending'} | {state:'granted', token} | {state:'error', message, fatal?:boolean, status?:number}>}
+ */
+export async function pollDeviceToken({ nonce, verifier, fetchImpl = fetch, signal } = {}) {
+  const query = new URLSearchParams({ nonce, verifier, challenge_method: 'S256' }) // 不许带 client_id
+  let response
+  try {
+    response = await fetchImpl(`${DEVICE_POLL_URL}?${query}`, {
+      method: 'GET',
+      headers: { ...CLIENT_HEADERS, accept: 'application/json' },
+      ...(signal !== undefined ? { signal } : {}),
     })
   } catch (error) {
-    return { ok: false, error: `换 token 请求失败：${error?.message ?? error}` }
+    // 网络抖动不算失败：调用方继续轮询
+    return { state: 'error', message: `轮询请求失败：${error?.message ?? error}` }
   }
+  if (response.status === 404) return { state: 'pending' }
+
   const text = await response.text().catch(() => '')
   let payload
   try {
-    payload = JSON.parse(text)
+    payload = text === '' ? undefined : JSON.parse(text)
   } catch {
     payload = undefined
   }
-  if (!response.ok) {
-    const code = nonEmpty(payload?.error)
-    const why = nonEmpty(payload?.error_description)
-    const detail = code !== undefined && why !== undefined
-      ? `${code}: ${why}`
-      : (code ?? why ?? text.slice(0, 200))
-    return { ok: false, error: `换 token 被拒（HTTP ${response.status}）：${detail}` }
+
+  if (response.ok) {
+    const token = tokenOf(payload)
+    if (token === undefined) {
+      return {
+        state: 'error',
+        status: response.status,
+        message: `授权响应里没有 access_token：${text.slice(0, 200)}`,
+      }
+    }
+    return { state: 'granted', token }
   }
-  const accessToken = nonEmpty(payload?.access_token)
-  if (accessToken === undefined) return { ok: false, error: '换 token 的响应里没有 access_token' }
+  return {
+    state: 'error',
+    status: response.status,
+    // 400 是「我们发错了」：client_id 多带一个就 400 not_allowed，继续轮询无意义
+    fatal: response.status === 400,
+    message: `轮询被拒（HTTP ${response.status}）：${text.slice(0, 200) || '（空响应体）'}`,
+  }
+}
+
+// ── 账号上下文 / 身份 ─────────────────────────────────────────────────────
+
+/**
+ * 账号上下文（真机 200）：`data.user` 是身份，`data.plan` / `data.quota` 是额度。
+ * 这是我们**唯一**能拿到 uid 的地方 —— COSY 的 `Cosy-User` 就要它。
+ */
+export async function fetchAccountContext(accessToken, { signal } = {}) {
+  let response
+  try {
+    response = await fetch(`${ACCOUNT_CONTEXT_URL}?include=user,plan,quota`, {
+      headers: { ...CLIENT_HEADERS, accept: 'application/json', authorization: `Bearer ${accessToken}` },
+      signal: signal ?? AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
+    })
+  } catch (error) {
+    return { ok: false, error: `读账号上下文失败：${error?.message ?? error}` }
+  }
+  if (!response.ok) return { ok: false, error: `读账号上下文失败（HTTP ${response.status}）` }
+  const payload = await response.json().catch(() => undefined)
+  if (typeof payload !== 'object' || payload === null) return { ok: true, identity: {} }
+  const user = typeof payload.data?.user === 'object' && payload.data.user !== null
+    ? payload.data.user
+    : (typeof payload.user === 'object' && payload.user !== null ? payload.user : {})
+  const nickname = nonEmpty(user.name) ?? nonEmpty(user.nickname) ?? nonEmpty(user.preferred_username)
+  const email = nonEmpty(user.email)
+  const uid = nonEmpty(user.id) ?? nonEmpty(user.sub) ?? nonEmpty(user.user_id) ?? nonEmpty(user.uid)
+  const quota = typeof payload.data?.quota === 'object' && payload.data.quota !== null ? payload.data.quota : undefined
   return {
     ok: true,
-    token: {
-      access_token: accessToken,
-      ...(nonEmpty(payload?.refresh_token) !== undefined ? { refresh_token: payload.refresh_token } : {}),
-      ...(nonEmpty(payload?.id_token) !== undefined ? { id_token: payload.id_token } : {}),
-      ...(nonEmpty(payload?.token_type) !== undefined ? { token_type: payload.token_type } : {}),
-      ...(Number.isFinite(payload?.expires_in) ? { expires_at: Date.now() + payload.expires_in * 1000 } : {}),
-      ...(nonEmpty(payload?.scope) !== undefined ? { scope: payload.scope } : {}),
+    identity: {
+      ...(nickname !== undefined ? { nickname } : {}),
+      ...(email !== undefined ? { email } : {}),
+      ...(uid !== undefined ? { subject: uid, uid } : {}),
     },
+    ...(quota !== undefined ? { quota } : {}),
   }
 }
 
 /**
- * 读身份（`/user/info`）。只取**稳定且人可读**的字段当账号显示名；
+ * 读身份：先账号上下文（真机 200 的那条路，能给 uid），拿不到再退 Ory 的
+ * `/user/info`（只认 OIDC token，claim 形状）。
+ *
  * 拿不到就返回空对象 —— 聚合层会退化成渠道显示名（AGENTS §6 已有兜底）。
  */
 export async function fetchIdentity(accessToken, { signal } = {}) {
+  const context = await fetchAccountContext(accessToken, { signal })
+  if (context.ok && Object.keys(context.identity).length > 0) {
+    return { ok: true, identity: context.identity, ...(context.quota !== undefined ? { quota: context.quota } : {}) }
+  }
+
   let response
   try {
     response = await fetch(USERINFO_URL, {
@@ -347,7 +462,7 @@ export async function fetchIdentity(accessToken, { signal } = {}) {
       signal: signal ?? AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
     })
   } catch (error) {
-    return { ok: false, error: `读用户信息失败：${error?.message ?? error}` }
+    return { ok: false, error: context.ok ? `读用户信息失败：${error?.message ?? error}` : context.error }
   }
   if (!response.ok) {
     return { ok: false, error: `读用户信息失败（HTTP ${response.status}）` }
@@ -358,12 +473,8 @@ export async function fetchIdentity(accessToken, { signal } = {}) {
   // 上游 0.3.0 的 `normalizeUser` 是 `(v?.data ?? v)?.user ?? (v?.data ?? v)`，照它剥壳。
   const bare = typeof info.data === 'object' && info.data !== null ? info.data : info
   const user = typeof bare.user === 'object' && bare.user !== null ? { ...bare, ...bare.user } : bare
-  // 常见 claim / 业务字段名，逐个试；都没有就不写（宁可少，不编）
   const nickname = nonEmpty(user.name) ?? nonEmpty(user.preferred_username) ?? nonEmpty(user.nickname)
   const email = nonEmpty(user.email)
-  // 上游拿不到 uid 就报「the sign-in named no user」——因为它的 COSY 请求头要
-  // `Cosy-User: uid`。这里不因此判登录失败（用户还能看到账号名），但把 uid
-  // 单独留在凭据上，供以后接签名对话时用。
   const uid = nonEmpty(user.sub) ?? nonEmpty(user.id) ?? nonEmpty(user.user_id) ?? nonEmpty(user.uid)
   return {
     ok: true,
@@ -375,13 +486,13 @@ export async function fetchIdentity(accessToken, { signal } = {}) {
   }
 }
 
-// ── 登录页（本地回环；两步都在同一个页面里）──────────────────────────────
+// ── 登录页（本地状态页；设备流不需要粘贴）─────────────────────────────────
 
 const escapeHtml = (text) => String(text)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
-function renderLoginPage({ authUrl, phase, message, state }) {
+function renderLoginPage({ authUrl, phase, message }) {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>登录千问办公（国际版）</title>
@@ -392,48 +503,26 @@ h2{margin-top:0;font-size:19px}
 ol{padding-left:20px;line-height:1.9;font-size:14px;color:#ddd}
 a.btn{display:inline-block;margin:8px 0 4px;padding:10px 16px;border-radius:6px;background:#3b82f6;
       color:#fff;text-decoration:none;font-size:14px}
-label{display:block;margin:16px 0 6px;font-size:13px;color:#aaa}
-textarea{width:100%;height:88px;padding:10px;box-sizing:border-box;border:1px solid #333;border-radius:6px;
-         background:#0d0d0d;color:#eee;font-family:ui-monospace,Consolas,monospace;font-size:12px}
-button{margin-top:12px;width:100%;padding:11px;border:0;border-radius:6px;background:#22c55e;
-       color:#06210f;font-size:15px;font-weight:600;cursor:pointer}
 #status{margin:14px 0;font-size:13px;min-height:20px;color:#9ca3af}
 .hint{font-size:12px;color:#777;line-height:1.7}
 </style></head><body>
 <h2>登录千问办公（国际版）</h2>
 <ol>
-  <li>点下面的按钮打开授权页，在页面里完成登录。</li>
-  <li>登录完成后浏览器会停在一个 <code>qwenwork://…</code> 深链或
-      <code>gateway.qwenwork.ai/oauth/callback?code=…</code> 地址上。</li>
-  <li>把 <strong>地址栏那一整条</strong> 复制下来，粘贴到下面的框里，点提交。</li>
+  <li>点下面的按钮打开授权页（已自动打开的话就用那个窗口）。</li>
+  <li>在页面里用你的国际站账号登录并同意授权。</li>
+  <li>完成后<strong>回到这一页</strong>即可 —— 插件在后台轮询，成功后会自动结束。</li>
 </ol>
-<a class="btn" href="${escapeHtml(authUrl)}" target="_blank" rel="noreferrer">① 打开授权页</a>
-<label for="paste">② 粘贴回调地址（含 code）</label>
-<textarea id="paste" data-state="${escapeHtml(state ?? '')}" placeholder="qwenwork://oauth/callback?code=…&state=…"></textarea>
-<button id="submit">提交</button>
+<a class="btn" href="${escapeHtml(authUrl)}" target="_blank" rel="noreferrer">打开授权页</a>
 <div id="status">${escapeHtml(message ?? '')}</div>
-<p class="hint">这条 code 是一次性的，用一次就失效，不是密码；插件只把它换成 token，
-不会保存你粘贴的原文。</p>
+<p class="hint">这条流程走的是国际版客户端的设备流：授权页由网关跳转到
+qwenwork.ai，回调落在网关，插件只轮询 token，不会读取你的密码，也不需要你复制任何地址。</p>
 <script>
 const status = document.getElementById('status')
-document.getElementById('submit').onclick = async () => {
-  const raw = document.getElementById('paste').value.trim()
-  if (!raw) { status.textContent = '请先粘贴回调地址'; return }
-  status.textContent = '正在换取 token…'
-  try {
-    const res = await fetch('/paste', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ raw }),
-    })
-    const data = await res.json()
-    status.textContent = data.ok ? '登录成功，可以关闭此页面了' : ('失败：' + (data.message ?? '未知原因'))
-  } catch (e) { status.textContent = '失败：' + e.message }
-}
-// 阶段轮询：后台换 token 的进度也显示出来
+let last = ${JSON.stringify(phase ?? '')}
 setInterval(async () => {
   try {
-    const r = await fetch('/status'); const d = await r.json()
-    if (d.message && d.phase !== '${escapeHtml(phase ?? '')}') { status.textContent = d.message }
+    const d = await (await fetch('/status')).json()
+    if (d.message && d.phase !== last) { status.textContent = d.message; last = d.phase }
   } catch {}
 }, 1500)
 </script></body></html>`
@@ -445,24 +534,36 @@ setInterval(async () => {
  * 登录载体（AGENTS §6）：本函数**立刻**返回 `{ url, result }`，
  * 真正等用户完成的是 `result`（magpie 的 `callback()` 里 await）。
  *
- * `openBrowser` 打开的是**本地页**：授权页与粘贴框在同一屏，用户不用在两个
- * 窗口之间找。本地只绑 127.0.0.1，不接受任何外部投递（粘贴必须发生在本地页）。
+ * `openBrowser` 打开的是 **issuer 的授权页**（网关 302 的目标），本地只留一张
+ * 状态页：用户在网页里登录，插件在后台轮询 `deviceToken/poll`。
+ * 设备流没有投递入口，所以这里**没有**粘贴框，也不接受任何外部 POST。
  */
 export async function beginLogin(openBrowser) {
-  const pkce = createPkce()
-  const state = randomUUID() // 上游 intlSignIn 的 state 也是 randomUUID()；Ory 拒短 state
-  const authUrl = buildAuthorizeUrl({ state, challenge: pkce.challenge })
+  const flow = await startDeviceFlow()
 
   let settleOk
   let settleFail
   const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
   result.catch(() => {}) // 防 unhandledRejection（magpie 未必回调 callback）
 
+  if (!flow.ok) {
+    // 起不动流程就没有可轮询的 nonce：把失败直接交给 result（宿主会报出来）
+    const failure = new Error(`千问办公（国际版）设备流无法启动：${flow.error}`)
+    settleFail(failure)
+    return {
+      url: AUTHORIZE_URL,
+      result,
+      cancel: () => {},
+      instructions: `设备流入口被拒：${flow.error}`,
+    }
+  }
+
   let settled = false
   let server
   let timer
-  let phase = 'waiting'
-  let message = '请按页面上的两步操作：先打开授权页登录，再把回调地址粘回来。'
+  let pollTimer
+  let phase = 'polling'
+  let message = '已打开授权页，请在浏览器里完成登录；插件会在后台自动完成。'
 
   const closeServer = () => new Promise((resolve) => {
     if (server === undefined) return resolve()
@@ -472,89 +573,104 @@ export async function beginLogin(openBrowser) {
     if (settled) return
     settled = true
     if (timer !== undefined) clearTimeout(timer)
+    if (pollTimer !== undefined) clearTimeout(pollTimer)
     void closeServer()
     ok ? settleOk(value) : settleFail(value)
   }
   const fail = (error) => settle(false, error instanceof Error ? error : new Error(String(error)))
   const setPhase = (p, m) => { phase = p; if (m !== undefined) message = m }
 
-  /** 粘贴 → 校验 state → 换 token → 读身份。 */
-  const completeFromPasted = async (raw) => {
-    const parsed = parsePasted(raw)
-    if (parsed.error !== undefined) return { ok: false, message: parsed.error }
-    // state 有就必须对上（防别的本地进程投一个别人的 code）；没有则放行并记一笔
-    if (parsed.state !== undefined && parsed.state !== state) {
-      debugLog(`qwenwork-intl: 粘贴的 state 不匹配（收到 ${parsed.state.slice(0, 8)}…）`)
-      return { ok: false, message: 'state 不匹配（这条回调不是本次登录发起的），请重新登录一次' }
-    }
-    if (parsed.state === undefined) debugLog('qwenwork-intl: 粘贴串里没有 state，按无校验放行')
-
-    setPhase('exchanging', '正在用 code 换 token…')
-    const exchanged = await exchangeCode({ code: parsed.code, verifier: pkce.verifier })
-    if (!exchanged.ok) {
-      setPhase('waiting', `换取失败：${exchanged.error}`)
-      return { ok: false, message: exchanged.error }
-    }
+  const complete = async (token) => {
     setPhase('identity', '已拿到 token，正在读取账号信息…')
-    const identity = await fetchIdentity(exchanged.token.access_token)
+    const identity = await fetchIdentity(token.access_token)
     if (!identity.ok) debugLog(`qwenwork-intl: ${identity.error}（不影响登录，用渠道显示名兜底）`)
-
     setPhase('done', '登录成功，可以关闭此页面')
-    // machineId 与上游 intlSignIn 同口径（randomUUID）：接 COSY 签名对话时要用它
-    settle(true, { ...exchanged.token, ...identity.identity, machineId: randomUUID(), channel: CHANNEL_ID })
+    // machineId 必须与起流程时那一个一致：COSY 的 `Cosy-MachineId` 要用它
+    settle(true, { ...token, ...identity.identity, machineId: flow.machineId, channel: CHANNEL_ID })
     return { ok: true }
   }
 
-  server = createServer(async (req, res) => {
+  const tick = async () => {
+    if (settled) return
+    const out = await pollDeviceToken({ nonce: flow.nonce, verifier: flow.verifier })
+    if (settled) return
+    if (out.state === 'granted') { await complete(out.token); return }
+    if (out.state === 'error' && out.fatal === true) { fail(new Error(out.message)); return }
+    if (out.state === 'error') debugLog(`qwenwork-intl: ${out.message}（继续轮询）`)
+    pollTimer = setTimeout(() => { void tick() }, POLL_INTERVAL_MS)
+    pollTimer.unref?.()
+  }
+
+  server = createServer((req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
-    const sendJson = (status, data) => {
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify(data))
+    if (pathname === '/' || pathname === '/login') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(renderLoginPage({ authUrl: flow.authorizeUrl, phase, message }))
+      return
     }
-    try {
-      if (pathname === '/' || pathname === '/login') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end(renderLoginPage({ authUrl, phase, message, state }))
-        return
-      }
-      if (pathname === '/status') return sendJson(200, { phase, message })
-      if (pathname === '/paste' && req.method === 'POST') {
-        const body = await new Response(req).json().catch(() => ({}))
-        const outcome = await completeFromPasted(String(body.raw ?? ''))
-        return sendJson(200, outcome)
-      }
-      res.writeHead(404); res.end('not found')
-    } catch (error) {
-      sendJson(200, { ok: false, message: error instanceof Error ? error.message : String(error) })
+    if (pathname === '/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ phase, message }))
+      return
     }
+    res.writeHead(404)
+    res.end('not found')
   })
 
-  timer = setTimeout(() => fail(new Error('千问办公（国际版）登录超时（15 分钟内未完成粘贴）')), LOGIN_TIMEOUT_MS)
+  timer = setTimeout(() => fail(new Error('千问办公（国际版）登录超时（15 分钟内未完成授权）')), LOGIN_TIMEOUT_MS)
   timer.unref?.()
 
   // ⚠️ 先挂 'error' 再 listen（EADDRINUSE 是异步事件，不挂会崩进程）。
   //    这一段只等端口绑定（毫秒级），不等用户 —— 契约禁的是后者。
-  const port = await new Promise((resolve, reject) => {
+  //    绑不上端口也**不抛**：beginLogin 必须返回，失败只能走 result。
+  const port = await new Promise((resolve) => {
     let done = false
-    server.once('error', (error) => { if (!done) { done = true; reject(error) } })
+    server.once('error', (error) => {
+      if (done) return
+      done = true
+      fail(new Error(`状态页端口无法监听（${error.message}）`))
+      resolve(undefined)
+    })
     server.listen(0, '127.0.0.1', () => {
+      if (done) return
       done = true
       server.unref()
       const addr = server.address()
       resolve(typeof addr === 'object' && addr !== null ? addr.port : 0)
     })
-  }).catch((error) => {
-    fail(new Error(`回调端口无法监听（${error.message}）`))
-    throw error
   })
+  if (port === undefined) {
+    // 端口没绑上：授权页仍然给用户（登录本身是浏览器那侧的事），只是没有本地状态页
+    let opened = false
+    if (openBrowser) {
+      try {
+        openBrowser(flow.authorizeUrl)
+        opened = true
+      } catch (error) {
+        debugLog(`qwenwork-intl: 打开浏览器失败（${error?.message ?? error}），改由宿主打开`)
+      }
+    }
+    return {
+      url: flow.authorizeUrl,
+      ...(opened ? { opened: true } : {}),
+      result,
+      cancel: (reason = '千问办公（国际版）登录已取消') => fail(new Error(reason)),
+      instructions: `本地状态页无法监听端口，直接在浏览器里完成授权：${flow.authorizeUrl}`,
+    }
+  }
+
+  // 第一次轮询立刻发（用户可能已经登录过），之后每 POLL_INTERVAL_MS 一次
+  pollTimer = setTimeout(() => { void tick() }, 0)
+  pollTimer.unref?.()
 
   const url = `http://127.0.0.1:${port}/login`
-  // ⚠️ 插件自己开了浏览器窗口（本地页）⇒ 必须回 `opened: true`，
+  // ⚠️ 插件自己开了浏览器窗口 ⇒ 必须回 `opened: true`，
   //    否则宿主会拿 url 再开一个系统默认浏览器窗口（AGENTS §6、marvis.mjs:2238 同款）。
+  //    这里打开的是**授权页**，不是本地状态页 —— 用户要登录的是 qwenwork.ai。
   let opened = false
   if (openBrowser) {
     try {
-      openBrowser(url)
+      openBrowser(flow.authorizeUrl)
       opened = true
     } catch (error) {
       debugLog(`qwenwork-intl: 打开浏览器失败（${error?.message ?? error}），改由宿主打开`)
@@ -565,55 +681,70 @@ export async function beginLogin(openBrowser) {
     ...(opened ? { opened: true } : {}),
     result,
     cancel: (reason = '千问办公（国际版）登录已取消') => fail(new Error(reason)),
-    instructions: `在打开的页面里点「打开授权页」登录 qwenwork.ai，登录后把浏览器地址栏那条`
-      + `（qwenwork://… 或含 ?code=…）复制回来粘到页面上。手动打开：${url}`,
+    instructions: `已打开 qwenwork.ai 授权页，登录完成后插件自动结束；`
+      + `若浏览器没打开，手动访问：${flow.authorizeUrl}（状态页：${url}）`,
   }
 }
 
 // ── 续期 ──────────────────────────────────────────────────────────────────
 
 /**
- * 用 refresh_token 换新 token。
+ * 用 refresh_token 续期 —— **网关的 deviceToken/refresh，只认包装器对**。
  *
- * ⚠️ **未实测**能否给这个 client 换（见文件头）。所以失败信息要如实，
- *    并且不把它当成「账号已死」—— 由聚合层的软续期吞掉、401 那条路兜底。
+ * 实测（假 token 的形状探针）：包装器对 → `401 INVALID_REFRESH_TOKEN`（形状接受，
+ * 只嫌 token 假）；issuer 对 / 混搭 → `400 INVALID_REFRESH_REQUEST`（形状被拒）。
+ * 所以这里绝不用 `/auth/oauth/token` 的 `grant_type=refresh_token`。
+ *
  * `persist` 只在拿到新 refresh_token（轮换）时被调，写回内存缓存。
  */
 export async function refresh(credential, persist) {
-  const refreshToken = nonEmpty(credential?.refresh_token)
+  const refreshToken = nonEmpty(credential?.refresh_token) ?? nonEmpty(credential?.refreshToken)
   if (refreshToken === undefined) throw new Error('没有 refresh_token：请重新登录')
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: CLIENT_ID,
-  })
-  const response = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body: body.toString(),
-    signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
-  })
+
+  let response
+  try {
+    response = await fetch(DEVICE_REFRESH_URL, {
+      method: 'POST',
+      headers: { ...CLIENT_HEADERS, 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({
+        refresh_token: refreshToken,
+        target: 'c',
+        client_id: WRAPPER_CLIENT_ID,
+        redirect_uri: WRAPPER_REDIRECT_URI,
+      }),
+      signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
+    })
+  } catch (error) {
+    throw new Error(`续期请求失败：${error?.message ?? error}`)
+  }
+
   const text = await response.text().catch(() => '')
   let payload
   try {
-    payload = JSON.parse(text)
+    payload = text === '' ? undefined : JSON.parse(text)
   } catch {
     payload = undefined
   }
   if (!response.ok) {
-    const detail = payload?.error_description ?? payload?.error ?? text.slice(0, 200)
-    throw new Error(`续期被拒（HTTP ${response.status}）：${detail}`)
+    const code = nonEmpty(payload?.errorCode) ?? nonEmpty(payload?.error) ?? nonEmpty(payload?.code)
+    const detail = nonEmpty(payload?.message) ?? nonEmpty(payload?.error_description)
+    const why = [code, detail].filter((v) => v !== undefined).join(': ') || text.slice(0, 200)
+    throw new Error(`续期被拒（HTTP ${response.status}）：${why}`)
   }
-  const accessToken = nonEmpty(payload?.access_token)
-  if (accessToken === undefined) throw new Error('续期响应里没有 access_token')
-  const next = {
-    ...credential,
-    access_token: accessToken,
-    ...(nonEmpty(payload?.refresh_token) !== undefined ? { refresh_token: payload.refresh_token } : {}),
-    ...(Number.isFinite(payload?.expires_in) ? { expires_at: Date.now() + payload.expires_in * 1000 } : {}),
+
+  const token = tokenOf(payload)
+  if (token === undefined) throw new Error('续期响应里没有 access_token')
+
+  const next = { ...credential, ...token }
+  // 设备身份与用户 id 不在续期响应里：`{...credential, ...token}` 已保留，
+  // 但显式确认一次 —— 丢了 uid 就打不了 /algo（COSY 的 Cosy-User 就是它）。
+  if (nonEmpty(credential?.uid) !== undefined && nonEmpty(next.uid) === undefined) next.uid = credential.uid
+  if (nonEmpty(credential?.machineId) !== undefined && nonEmpty(next.machineId) === undefined) {
+    next.machineId = credential.machineId
   }
+
   // 一次性 RT：换了就立刻写回内存，别让并发入口拿旧 RT 去打
-  if (nonEmpty(payload?.refresh_token) !== undefined && typeof persist === 'function') {
+  if (token.refresh_token !== undefined && typeof persist === 'function') {
     try {
       persist(next)
     } catch (error) {
@@ -771,6 +902,42 @@ export async function catalog(credential) {
 // ── chat ──────────────────────────────────────────────────────────────────
 
 /**
+ * 补上网关要求的两个业务字段：`request_id` / `session_id`（真机实测：缺 `request_id`
+ * → `400 request_id is required`，补上再缺 `session_id` → `400 session_id is required`，
+ * 两个都补才有 200 SSE）。
+ *
+ * 规则：**已有的不覆盖**（宿主/上层可能自己带，或是多轮对话里要复用的 session），
+ * 只补缺的。驼峰 `requestId` / `sessionId` 的**值会被搬到 snake_case 上**，而不是
+ * 丢掉：值是调用方给的、它靠这个对号，搬过去两边都满足；若只把驼峰当「已有」就
+ * 不生成 snake_case，网关只认 snake_case，会照样回 `400 request_id is required`
+ * —— 那是纯亏的静默失败。
+ *
+ * 生成的 uuid 用小写标准形态（`randomUUID()`），snake_case 键名。
+ *
+ * `session_id` **不是会话记忆**（真机实测：同一 `session_id` 连问两轮、第二轮 messages
+ * 里不带历史，它记不住第一轮说的数字；换新 session 结果一样）。上下文只由 `messages`
+ * 承载，服务端不按 session 聚合历史 —— 所以每轮生成新 uuid 无害。这两个字段纯粹是
+ * 网关的请求标识，缺了就是 400。
+ *
+ * @param {object} body 宿主给的请求体（OpenAI 形状，通常没有这两个字段）
+ * @returns {object} 同一个对象的浅拷贝（不改调用方的对象）
+ */
+export function withRequestIdentity(body) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return body
+  const next = { ...body }
+  // 先搬驼峰值（有值才搬，值本身不动），再从缺的里补 uuid。
+  if (nonEmpty(next.request_id) === undefined && nonEmpty(next.requestId) !== undefined) {
+    next.request_id = next.requestId
+  }
+  if (nonEmpty(next.request_id) === undefined) next.request_id = randomUUID()
+  if (nonEmpty(next.session_id) === undefined && nonEmpty(next.sessionId) !== undefined) {
+    next.session_id = next.sessionId
+  }
+  if (nonEmpty(next.session_id) === undefined) next.session_id = randomUUID()
+  return next
+}
+
+/**
  * 转发一次对话。
  *
  * 契约（AGENTS §5）：第二参是信封 `{ body, signal }`，请求体在 **`body`** 字段里；
@@ -781,10 +948,12 @@ export async function catalog(credential) {
  * 字母表编码成上线形态（`encodeBody`）。签名与 body 强绑定：发出去的串和签的串不同
  * ⇒ 403 `Signature invalid`（匿名探针复现过）。
  *
- * ⚠️ 这条渠道的 chat **没有真机验证过**：签名这关用假 token 过了（进到 token 校验），
- *    但没有任何一次带真 token 的成功对话。在有人真机发一条之前，任何「可用」的说法
- *    都是假设。SSE 里的 chunk 是否还要二次解码同样未验证 —— 所以**不碰响应正文**，
- *    原样交给宿主（猜错的解码会把整条流毁掉，而透传至少不会更坏）。
+ * ⚠️ **经由本函数的端到端仍未跑过**。协议层在真机上已验通（同一份凭据 + COSY 模块
+ *    直打网关：目录 200、补上 `request_id`/`session_id` 后 200 SSE、17 个 chunk、
+ *    `X-Model-Name: qwen3.8-flash`），但那是绕开本模块的探针，不是这段代码跑出来的
+ *    结果。在有人用 `hub-qwenwork-intl` 自己发一条之前，任何「可用」的说法都是假设。
+ *    SSE 里的 chunk 是否还要二次解码同样未验证 —— 所以**不碰响应正文**，原样交给
+ *    宿主（猜错的解码会把整条流毁掉，而透传至少不会更坏）。
  */
 export async function chat(credential, request = {}) {
   if (nonEmpty(credential?.access_token) === undefined) {
@@ -804,9 +973,28 @@ export async function chat(credential, request = {}) {
   if (account === undefined) return needsRelogin('缺 uid 或 machineId')
 
   const url = `${API_BASE}${CHAT_PATH}`
-  const json = typeof body === 'string' ? body : JSON.stringify(body)
+  // 网关要 request_id / session_id（见 withRequestIdentity）；宿主给的可能是对象，
+  // 也可能已是 JSON 串（透传场景），两种都要补。
+  let prepared = body
+  if (typeof body === 'string') {
+    try {
+      const parsed = JSON.parse(body)
+      const filled = withRequestIdentity(parsed)
+      if (filled !== parsed) prepared = JSON.stringify(filled)
+    } catch {
+      // 不是 JSON 就原样发：网关自己会回 400，比我们在这里猜格式更准确
+    }
+  } else {
+    prepared = withRequestIdentity(body)
+  }
+  const json = typeof prepared === 'string' ? prepared : JSON.stringify(prepared)
   const wire = encodeBody(json)
-  const modelKey = nonEmpty(body?.model)
+  // 模型键与 stream 从**补完字段的那份**取：body 是 JSON 串时 `body?.model` 恒为
+  // undefined（那会让 X-Model-Key 丢失、非流式被按 SSE 回包）。
+  const asObject = typeof prepared === 'string'
+    ? (() => { try { return JSON.parse(prepared) } catch { return undefined } })()
+    : prepared
+  const modelKey = nonEmpty(asObject?.model)
   let signed
   try {
     signed = chatHeaders(
@@ -816,7 +1004,7 @@ export async function chat(credential, request = {}) {
       {},
       {
         ...(modelKey !== undefined ? { key: modelKey } : {}),
-        ...(nonEmpty(body?.model_source) !== undefined ? { source: body.model_source } : {}),
+        ...(nonEmpty(asObject?.model_source) !== undefined ? { source: asObject.model_source } : {}),
       },
     )
   } catch (error) {
@@ -834,7 +1022,7 @@ export async function chat(credential, request = {}) {
       headers: {
         ...CLIENT_HEADERS,
         ...signed,
-        ...(body?.stream === true ? {} : { Accept: 'application/json' }),
+        ...(asObject?.stream === true ? {} : { Accept: 'application/json' }),
       },
       body: wire,
       ...(request?.signal !== undefined ? { signal: request.signal } : {}),
