@@ -240,12 +240,36 @@ if (!existsSync(MARVIS_URL)) {
     }
   })
 
-  test('错误分流：风控 4100404 → 503（可重试换 uskey）', async () => {
+  test('错误分流：风控 4100404 → 503，文案不编成因（#20）', async () => {
     const { impl } = recorder(() => json({ code: 4100404, msg: '风控拦截' }, 403))
     await withMockFetch(impl, async () => {
       const res = await marvisChannel.chat(ACCT, { body: { model: 'deepseek-v4-pro-external', messages: [] } })
       assert.equal(res.status, 503)
-      assert.equal((await res.json()).error.code, 'risk_blocked')
+      const error = (await res.json()).error
+      assert.equal(error.code, 'risk_blocked')
+      // #20 的教训：原文案写「通常是一次性 uskey 用完了，重试即可」，
+      // 而 uskey 每请求现签（src/marvis.mjs:104），不存在用完 —— 编出来的因果
+      // 让报障人一直重试。文案里不许再出现这句承诺。
+      assert.ok(!/重试即可/.test(error.message), '不得承诺「重试即可」')
+      assert.ok(!/uskey 用完/.test(error.message), '不得声称 uskey 用尽')
+      // 观察到的槽位要带出来，用户才能自查是不是该槽位未授权
+      assert.ok(error.message.includes('deepseek-v4-pro-external'), '文案应带出槽位名')
+      assert.ok(/guid 已随请求带/.test(error.message), '文案应带出 guid 状态')
+    })
+  })
+
+  test('guid 缺失不白打上游：直接 401 摘号重登，而不是 503 风控', async () => {
+    const { impl, calls } = recorder(() => json({ code: 4100404, msg: '风控拦截' }, 403))
+    await withMockFetch(impl, async () => {
+      const res = await marvisChannel.chat(
+        { ...ACCT, guid: '' },
+        { body: { model: 'deepseek-v4-pro-external', messages: [] } },
+      )
+      // acctOf() 要求 openid/accessToken/guid 三样齐全（src/marvis.mjs:337-339），
+      // 缺一样返回 undefined，再由 parseCredentialRaw 抛 → 401 + X-Magpie-Sign-In。
+      assert.equal(res.status, 401)
+      assert.equal(res.headers.get('x-magpie-sign-in'), 'expired')
+      assert.equal(calls.length, 0, 'guid 缺了就不该发请求到上游')
     })
   })
 

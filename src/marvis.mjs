@@ -518,7 +518,7 @@ function sanitizeChatBody(body) {
 // 上游业务错误放在响应体里，HTTP 可能仍是 200/4xx。magpie 只看状态码决定
 // 「换账号 / 重试 / 搁置模型」，所以必须按语义翻译：
 //   登录态过期 → 401 + X-Magpie-Sign-In: expired（摘号重登）
-//   风控       → 503（可重试，换新 uskey 就过）
+//   风控       → 503（让宿主能换账号试，但**不承诺重试有效** —— 见 L674 的说明）
 //   模型不可用 → 404（只搁置这个模型，不打死账号）
 
 const MODEL_ISSUE = /model.*not (found|exist|allowed|available)|no such model|不支持.*模型|模型.*(不存在|未开通|不可用)|4100402/i
@@ -672,10 +672,22 @@ async function chat(acct, request, opts = {}) {
     })
   }
   if (RISK_BLOCK.test(text)) {
+    // ⚠️ issue #20：早前这里写「通常是一次性 uskey 用完了，重试即可」，这是**未经验证的
+    //    因果**。uskey 由 `marvisExt()` 每请求现签（src/marvis.mjs:104），根本不存在
+    //    「用完」；而报障人的现象是「登录后测试模型即 4100404」，重试不会变。把编出来的
+    //    成因写进用户可见文案，会让人一直重试下去 —— 换成只报观察到的事实，并把能自己
+    //    核对的三项一起带出来（槽位 / guid 是否随请求带 / loginType）。
+    const slot = parsed?.model ?? '(未指定)'
+    const guidState = String(acct.guid ?? '') !== '' ? '已随请求带' : '**缺失**（上游按 -109 或风控处理）'
     return errorResponse(
       503,
       'risk_blocked',
-      `上游风控拦截（通常是一次性 uskey 用完了，重试即可）：${text.slice(0, 300)}`,
+      `上游风控拦截（4100404）：${text.slice(0, 200)}。`
+        + `服务端只回这条通用文案，没有给出具体成因，因此不能断定重试一定有效。`
+        + `已排除一项：不是 uskey 用尽（uskey 每次请求现签）。`
+        + `可自查：槽位 ${slot}、设备 guid ${guidState}、loginType ${acct.loginType ?? '1'}。`
+        + `该槽位自 2026-11-14 起就是本插件的默认上行槽位（所有用户同一个），`
+        + `所以更可能是这个账号或这台设备被上游拦，先换账号试；若换号也不行，再怀疑槽位授权。`,
     )
   }
   if (MODEL_ISSUE.test(text) || response.status === 404) {
