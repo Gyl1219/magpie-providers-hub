@@ -446,18 +446,61 @@ function dropEmptyTools(body) {
  *
  * 只认明确点名厂商/产品的身份句；认不出的一律不动 —— 静默改写别人的 system
  * 提示比 403 更难查。
+ *
+ * 2026-11-25 对照上游 `iJetLi/deepseek-harness-codearts` 的
+ * `src/marvis-identity.ts`（master，39 次真机）修掉三个洞：
+ *
+ * ① **厂商白名单认不出两族不带厂商名的身份句** —— 上游实测
+ *    `You are an AI coding assistant.` 与
+ *    `You are an AI agent powered by DeepSeek Harness.` 都是 403/4100406，
+ *    后者还是 DSH 自己的身份句。旧白名单里没有这两个词，整条漏改。
+ *    更要紧的是 `You are an AI coding assistant, powered by a large language model.`
+ *    也 403 —— 那是「共用登记表」的**替换产物**，即上一段管线自己改出来的句子
+ *    同样在名单里，漏改它等于把 403 留给下一跳。
+ * ② **必须带句末 `.`/`。`** 才命中 —— 无尾句点的裸句
+ *    `You are Claude Code, Anthropic's official CLI for Claude` 因此漏改，
+ *    而上游实测这句同样 403。
+ * ③ **整句替换到第一个句点为止** —— `You are Claude Code, and you must never
+ *    run git push.` 会被整句换成身份句，**同句里的硬约束被静默删除**。上游
+ *    两次审计（正向 P2-1 与对抗 P1-1）从相反方向打中同一处：`[^.\n]*\.?` 吞
+ *    终止符，改成「到句点为止」则吞整句约束。
+ *
+ * 修法（与上游同构）：只换**本体**这几个词，末尾用**不消费字符的前瞻**限定边界，
+ * 于是同位语（`, Anthropic's official CLI for Claude`）与后续约束原样保留。
+ * 前瞻同时挡住两类过宽：复数 `assistants.` 与名词短语 `assistant manager.`；
+ * 所有格 `Claude Code's successor` 由开头的否定前瞻挡掉（上游实测整句替换会把
+ * 它改成 `…coding agent's successor`）。
+ *
+ * 端到端效果（上游 13 格样本回放）：9 条 403 全改、2 条 200 不动、
+ * `never`/`must` 约束零丢失。
+ *
+ * ⚠️ 本机 2026-11-25 已无法复验：三个账号 × 三个槽位 × 三种请求头形态全部被
+ * 前置风控 4100404 拦下，连最简请求都过不去（龙娘实测）。此处依据是上游的 39 次
+ * 真机记录，不是本机实测。
  */
-const IDENTITY_SENTENCE = /^\s*(You are|You're|I am|This is)\s+(?=[^\n]{0,120}?(?:Claude|Codex|Anthropic|OpenAI|ChatGPT|GPT-\d|Gemini|Copilot|Cursor|Windsurf))[^\n]{0,160}?[.。](\s|$)/i
+const IDENTITY_SENTENCE = /(?:You\s+are|You['’]re|I\s+am|I['’]m|This\s+is)\s+(?!Claude\s+Code['’]s)([^,.;!?。！？；\n]{1,120})(?!['’]s)(?=\s*(?:,|[.:;!?。！？；]|$))/gi
 
-/** 替换成中性中文身份句（等价语义：终端里的编程助手），不引入厂商名。 */
-const NEUTRAL_IDENTITY = '你是运行在开发者终端里的编程助手。'
+/**
+ * 命中这些词才算身份句。两族固定短语（上游实测 403，无厂商名）+ 原有厂商白名单。
+ * 放行句 `You are an AI agent for coding work` 不在此表 ⇒ 不会被二次改写（幂等）。
+ */
+const IDENTITY_MARK = /claude|codex|anthropic|openai|chatgpt|gpt-\d|gemini|copilot|cursor|windsurf|deepseek\s+harness|ai\s+coding\s+assistant/i
+
+/**
+ * 替换成中性中文身份句（等价语义：终端里的编程助手），不引入厂商名。
+ * 不带句末标点：原句的 `, …` / `.` / `!` 留在原位，约束与语气一并保留。
+ */
+const NEUTRAL_IDENTITY = '你是运行在开发者终端里的编程助手'
 
 function rewriteIdentityText(text) {
-  if (typeof text !== 'string') return { text, changed: false }
-  const match = IDENTITY_SENTENCE.exec(text)
-  if (match === null) return { text, changed: false }
-  const rest = text.slice(match[0].length)
-  return { text: NEUTRAL_IDENTITY + (rest.length > 0 ? ' ' + rest.replace(/^\s+/, '') : ''), changed: true }
+  if (typeof text !== 'string' || text === '') return { text, changed: false }
+  let changed = false
+  const out = text.replace(IDENTITY_SENTENCE, (whole, head) => {
+    if (!IDENTITY_MARK.test(head)) return whole
+    changed = true
+    return NEUTRAL_IDENTITY
+  })
+  return { text: out, changed }
 }
 
 /** 内容可能是字符串，也可能是 `[{type:'text',text}]` 块数组（两种形态都要走）。 */
@@ -687,7 +730,9 @@ async function chat(acct, request, opts = {}) {
         + `已排除一项：不是 uskey 用尽（uskey 每次请求现签）。`
         + `可自查：槽位 ${slot}、设备 guid ${guidState}、loginType ${acct.loginType ?? '1'}。`
         + `该槽位自 2026-11-14 起就是本插件的默认上行槽位（所有用户同一个），`
-        + `所以更可能是这个账号或这台设备被上游拦，先换账号试；若换号也不行，再怀疑槽位授权。`,
+        + `单凭这条文案推不出是账号、设备还是槽位被拦；本机一次实测里换账号、换槽位、`
+        + `换请求头形态均无改善，所以别把重试当解法——继续拿真账号试只会消耗信任度，`
+        + `直接报故障等上游处理。`,
     )
   }
   if (MODEL_ISSUE.test(text) || response.status === 404) {

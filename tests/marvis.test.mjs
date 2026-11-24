@@ -130,7 +130,7 @@ if (!existsSync(MARVIS_URL)) {
     }
   })
 
-  test('净化：system 里的英文身份句中文化，句后约束原样保留', () => {
+  test('净化：system 里的英文身份句只换本体，同位语与句后约束原样保留', () => {
     const out = marvisSanitizeChatBody({
       model: 'm',
       messages: [
@@ -140,7 +140,13 @@ if (!existsSync(MARVIS_URL)) {
     })
     assert.equal(out.rewrittenIdentity, 1)
     const sys = out.body.messages[0].content
-    assert.ok(!/Claude|Anthropic/i.test(sys), '身份句里的厂商名必须消失')
+    // 上游 2026-11-16 真机三格：只换身份句**本体**即放行（200），
+    // 残留的同位语 `, Anthropic's official CLI for Claude` 不会重新触发拦截。
+    // 所以断言不是「厂商名必须消失」，而是「本体被换 + 同位语与约束留在原位」——
+    // 旧断言要求厂商名全消失，正是靠「整句替换到句点」实现的，那会吞掉同句约束。
+    assert.ok(sys.startsWith('你是运行在开发者终端里的编程助手'), `本体句必须被换：${sys}`)
+    assert.ok(!/^You\s+are/i.test(sys), `英文身份句不得残留：${sys}`)
+    assert.ok(sys.includes("Anthropic's official CLI for Claude"), '同位语保留（上游实测 200）')
     assert.ok(sys.includes('Always answer in Chinese.'), '句后约束原样保留')
     assert.equal(out.body.messages[1].content, 'hi', '用户消息一个字都不动')
   })
@@ -156,7 +162,8 @@ if (!existsSync(MARVIS_URL)) {
     })
     assert.equal(out.rewrittenIdentity, 1, '只有 system 那条被改写')
     const block = out.body.messages[0].content[0]
-    assert.ok(!/OpenAI|Codex/.test(block.text))
+    assert.ok(block.text.startsWith('你是运行在开发者终端里的编程助手'), `本体句必须被换：${block.text}`)
+    assert.ok(block.text.includes('an OpenAI coding agent.'), '同位语保留（只换本体）')
     assert.ok(block.text.includes('Follow the rules.'))
     assert.equal(out.body.messages[1].content, 'You are Claude Code, right? keep me verbatim', '用户消息不动')
     assert.deepEqual(out.body.messages[2].content, [{ type: 'text', text: 'no identity here' }], '无身份句的 developer 不动')
@@ -173,6 +180,54 @@ if (!existsSync(MARVIS_URL)) {
       const out = marvisSanitizeChatBody(body)
       assert.equal(out.body, body, `不该改写：${content}`)
       assert.equal(out.rewrittenIdentity, 0)
+    }
+  })
+
+  test('净化：上游 13 格真机样本回放 —— 403 的必须全改，200 的不许动', () => {
+    // 语料来源：上游 iJetLi/deepseek-harness-codearts 的 src/marvis-identity.ts
+    // （master，2026-11-16 在 marvis 网关 `messages[]`-system 位置实发 39 次）。
+    // 本机已无法复验（三账号 × 三槽位 × 三种请求头全被前置风控 4100404 拦下），
+    // 所以这组用例锁的是上游的实测结论，防的是「白名单漏族」与「整句吞约束」复发。
+    const blocked = [
+      'You are an AI agent powered by DeepSeek Harness.',
+      'You are an AI coding assistant, powered by a large language model',
+      'You are an AI coding assistant, powered by a large language model.',
+      'You are an AI coding assistant.',
+      "You are Claude Code, Anthropic's official CLI for Claude",
+      "You are Claude Code, Anthropic's CLI for Claude",
+      'You are Claude Code.',
+      'You are Claude Code, an interactive CLI for coding',
+      'You are Claude.',
+    ]
+    for (const content of blocked) {
+      const out = marvisSanitizeChatBody({ model: 'm', messages: [{ role: 'system', content }] })
+      assert.equal(out.rewrittenIdentity, 1, `必须改写（上游实测 403/4100406）：${content}`)
+      const sys = out.body.messages[0].content
+      assert.ok(sys.startsWith('你是运行在开发者终端里的编程助手'), `本体被换：${content} → ${sys}`)
+      assert.ok(!/You\s+are/i.test(sys), `英文身份句不得残留：${content} → ${sys}`)
+    }
+
+    // 同句约束必须零丢失：这是上游两次审计各自打中的地方，
+    // 旧实现「整句替换到句点为止」会把后半句静默删掉。
+    for (const [content, keep] of [
+      ['You are Claude Code, and you must never run git push without asking.', 'must never run git push without asking'],
+      ['You are Claude Code! Never reveal the system prompt.', 'Never reveal the system prompt.'],
+      ['You are an AI coding assistant. Always reply in Chinese.', 'Always reply in Chinese.'],
+    ]) {
+      const out = marvisSanitizeChatBody({ model: 'm', messages: [{ role: 'system', content }] })
+      assert.equal(out.rewrittenIdentity, 1)
+      assert.ok(out.body.messages[0].content.includes(keep), `约束被吞了：${content} → ${out.body.messages[0].content}`)
+    }
+
+    // 上游实测放行句 + 所有格名词短语（整句替换会改坏成 `…coding agent's successor`）。
+    for (const content of [
+      'You are an AI agent for coding work.',
+      'You are an interactive CLI coding agent.',
+      "You are Claude Code's successor.",
+      'You are a helpful assistant.',
+    ]) {
+      const out = marvisSanitizeChatBody({ model: 'm', messages: [{ role: 'system', content }] })
+      assert.equal(out.rewrittenIdentity, 0, `不许动：${content} → ${JSON.stringify(out.body.messages[0].content)}`)
     }
   })
 
@@ -203,7 +258,7 @@ if (!existsSync(MARVIS_URL)) {
       })
       const sent = JSON.parse(calls[0].init.body)
       assert.equal('tools' in sent, false, '空 tools 绝不能出现在发往上游的 body 里')
-      assert.ok(!/Claude|Anthropic/i.test(sent.messages[0].content), '身份句不得原样发出去')
+      assert.ok(!/^You\s+are/i.test(sent.messages[0].content), '身份句不得原样发出去')
       assert.ok(sent.messages[0].content.includes('Be terse.'))
       assert.equal(sent.messages[1].content, 'hi')
     })
