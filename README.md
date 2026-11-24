@@ -258,6 +258,27 @@ magpie plugin on  "<目录>"
 `magpie plugin options hub-astudio '{"snapshotRefreshMinutes":10}'`
 （`snapshotRefreshMinutes` 控制页面快照的刷新周期，默认 5 分钟，0 = 关闭）
 
+### 签到制渠道：记得打开 magpie 的自动签到
+
+MonkeyCode / MonkeyCode 国际站 / AStudio / 超级麦吉 / LobsterAI / Loomy / 百智云这些渠道的
+额度是**靠每日签到发放**的（一次 +100、+200 之类，各家不同）。magpie 的自动签到开关
+`pluginCheckins` **默认是关的**，而且只对 magpie 自己接管的四家渠道（WorkBuddy / Trae CN /
+MiniMax Code / Qoder）继承旧开关。插件没有账号槽时 magpie 根本不会调 `checkin()`，
+有账号槽但不打开开关也一样不会调。
+
+不打开的典型现象：**登录成功、模型列表也有，但一调用就 402 / 积分恒为 0，界面上没有任何
+提示**——这条渠道看起来「能登录不能用」。插件这边能做的只有提醒（登录成功的文案里已经
+带上了），真正的开关在 magpie 设置页：
+
+```text
+magpie 设置 → 插件 → 本渠道 → 自动签到（pluginCheckins）
+```
+
+本插件**不会**绕过这个开关偷偷签到（签到会产生真实积分、也算用户的账号行为，该由用户决定）。
+想知道某个渠道是否需要签到：对照上面「当前渠道」里各节是否写了签到端点；
+`checkin: () => ({ outcome: 'inactive' })` 的渠道（qiniu / marvis / autoclaw / qwenwork-intl）
+没有签到这回事，不用开。
+
 ## 为什么做这些
 
 选型原则：**只做社区 / ofm 还没有的渠道**，重复实现没有价值（这也是 v0.5.0 删掉

@@ -999,7 +999,9 @@ async function beginLoginFor(site, openBrowser) {
   return {
     url,
     result,
-    instructions: `已为你打开登录页与官方浏览器窗口：在官方页面完成登录即可自动换取凭据；也可以在登录页手动粘贴 API Key 与签名密钥。`,
+    instructions: `已为你打开登录页与官方浏览器窗口：在官方页面完成登录即可自动换取凭据；也可以在登录页手动粘贴 API Key 与签名密钥。`
+      + `\n⚠️ 本渠道的积分靠**每日签到**发放（一次 +100）。magpie 的自动签到开关默认关闭：`
+      + `请到 magpie 设置里打开本渠道的自动签到（pluginCheckins），否则额度会一直是 0、调用返回 402。`,
   }
 }
 

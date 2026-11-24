@@ -818,7 +818,14 @@ export const astudioChannel = {
   async beginLogin(openBrowser) {
     const flow = await startLoginFlow()
     if (openBrowser) openBrowser(flow.loginUrl)
-    return { url: flow.loginUrl, result: flow.result }
+    return {
+      url: flow.loginUrl,
+      result: flow.result,
+      // #19：本渠道的积分靠每日领 client-popups 奖励发放，而 magpie 的自动签到
+      // 开关默认关闭 —— 不打开就「登录成功、模型有、一调用 402，且没有任何提示」。
+      instructions: `登录完成后请到 magpie 设置里打开本渠道的自动签到（pluginCheckins）：`
+        + `AStudio 的积分靠每日领取奖励发放，开关不开则额度恒为 0、调用返回 402。`,
+    }
   },
 
   /**
