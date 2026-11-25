@@ -35,6 +35,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { notSignedIn, untilText, readMagpieAuthSlots, readOwnAuthEntries, debugLog } from './shared.mjs'
 
 import { astudioChannel } from './astudio.mjs'
@@ -1175,8 +1176,17 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
               const org = typeof credential?.organizationCode === 'string'
                 ? credential.organizationCode.trim()
                 : ''
-              if (org === '') return channel.displayName
-              return legacyIdsByOrg.get(org) ?? `${channel.displayName} #${org}`
+              if (org !== '') return legacyIdsByOrg.get(org) ?? `${channel.displayName} #${org}`
+              // ⚠️ 既无昵称也无组织码（Accio 的换码响应只有 token，ferock 报障
+              //    2026-11-25）：不能退化成渠道显示名 —— 每个账号都叫同一个名字，
+              //    magpie 按 accountId 认账号，第二个账号的登录会覆盖第一个。
+              //    改用本次登录拿到的 refresh/access token 的指纹：每次登录各成一个
+              //    账号；续期时 accountId 随旧槽合并保留（gatedRenew），不会漂。
+              const secret = [credential?.refresh_token, credential?.refresh, credential?.access_token,
+                credential?.access, credential?.token, credential?.cookie, credential?.key]
+                .find((v) => typeof v === 'string' && v !== '')
+              if (secret === undefined) return channel.displayName
+              return `${channel.displayName} #${createHash('sha256').update(secret).digest('hex').slice(0, 6)}`
             }
           /** 是否「重复登录一个仍然有效的账号」= 该弹「账号重复」且**不覆盖原槽**。 */
           const isHealthyDuplicate = (credential) => {
