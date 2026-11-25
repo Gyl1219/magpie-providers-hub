@@ -48,6 +48,7 @@ import {
   launchLoginBrowser,
   closeSession,
 } from './magicrew-browser.mjs'
+import { createLoginToken, hasLoginAuthorization, hasLoginToken, isSameOriginPost } from './login-security.mjs'
 import {
   buildAnthropicPayload,
   anthropicSseToOpenAi,
@@ -774,9 +775,11 @@ button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:6px;backgr
   <div id="msg" style="margin-top:10px;font-size:13px;min-height:20px;color:#9ca3af"></div>
 </div>
 <script>
+const token = new URLSearchParams(location.search).get('token') || '';
+const authHeaders = { authorization: 'Bearer ' + token };
 const poll = async () => {
   try {
-    const r = await fetch('/login/status');
+    const r = await fetch('/login/status', { headers: authHeaders });
     const j = await r.json();
     document.getElementById('status').textContent = j.message || j.phase || '';
     if (j.phase === 'done') return;
@@ -789,7 +792,7 @@ document.getElementById('go').onclick = async () => {
   if (!key) { document.getElementById('msg').textContent = '请先粘贴'; return }
   document.getElementById('msg').textContent = '验证中…';
   try {
-    const r = await fetch('/paste', { method: 'POST', headers: {'content-type':'application/json'},
+    const r = await fetch('/paste', { method: 'POST', headers: {'content-type':'application/json', ...authHeaders},
       body: JSON.stringify({ key }) });
     const j = await r.json();
     document.getElementById('msg').textContent = j.ok ? '登录成功，可以关闭此页面' : (j.message || '失败');
@@ -807,6 +810,7 @@ async function beginLogin(openBrowser) {
   const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
   result.catch(() => {})
   let server
+  let port = 0
   let closed = false
   let timer
   let session
@@ -829,21 +833,33 @@ async function beginLogin(openBrowser) {
 
   timer = setTimeout(() => settle(false, new Error('百智云登录超时（10 分钟内未完成）')), LOGIN_WINDOW_MS + KEY_GRACE_MS)
   timer.unref?.()
+  const loginToken = createLoginToken()
 
   server = createServer(async (req, res) => {
-    const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const pathname = url.pathname
     const sendJson = (status, data) => {
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(data))
     }
     try {
       if (pathname === '/' || pathname === '/login') {
+        if (!hasLoginToken(url.searchParams.get('token'), loginToken)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+          res.end('forbidden')
+          return
+        }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
         res.end(renderLoginPage(phaseMessage))
         return
       }
-      if (pathname === '/login/status') return sendJson(200, { phase, message: phaseMessage })
+      if (pathname === '/login/status') {
+        if (!hasLoginAuthorization(req, loginToken)) return sendJson(403, { ok: false, message: 'forbidden' })
+        return sendJson(200, { phase, message: phaseMessage })
+      }
       if (pathname === '/paste') {
+        if (!isSameOriginPost(req, port)) return sendJson(403, { ok: false, message: 'cross-origin request refused' })
+        if (!hasLoginAuthorization(req, loginToken)) return sendJson(403, { ok: false, message: 'forbidden' })
         const body = await new Response(req).json().catch(() => ({}))
         const raw = String(body.key ?? '').trim()
         if (raw.length === 0) return sendJson(200, { ok: false, message: '请粘贴凭据' })
@@ -856,7 +872,7 @@ async function beginLogin(openBrowser) {
     }
   })
 
-  const port = await new Promise((resolve, reject) => {
+  port = await new Promise((resolve, reject) => {
     let done = false
     server.once('error', (error) => { if (!done) { done = true; reject(error) } })
     server.listen(0, '127.0.0.1', () => {
@@ -870,7 +886,7 @@ async function beginLogin(openBrowser) {
     throw error
   })
 
-  const url = `http://127.0.0.1:${port}/login`
+  const url = `http://127.0.0.1:${port}/login?token=${encodeURIComponent(loginToken)}`
   if (openBrowser) openBrowser(url)
 
   // 后台登录循环：等两枚 cookie → 换 Key → settle（换不到 Key 时进宽限轮询）

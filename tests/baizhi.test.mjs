@@ -366,6 +366,43 @@ test('粘贴串归一：`sk-…|cookie` 直通积分面板（keyField: access_to
   } finally { stub.restore() }
 })
 
+test('beginLogin：粘贴入口只接受带 token 的同源 POST', async () => {
+  const started = await baizhiChannel.beginLogin()
+  const loginUrl = new URL(started.url)
+  assert.match(loginUrl.searchParams.get('token') ?? '', /^[A-Za-z0-9_-]{43}$/)
+  assert.match(await (await fetch(loginUrl)).text(), /登录百智云/)
+
+  const pasteUrl = new URL('/paste', loginUrl)
+  const body = JSON.stringify({ key: 'sk-REJECTED' })
+  const noToken = await fetch(pasteUrl, {
+    method: 'POST', headers: { 'content-type': 'application/json', origin: loginUrl.origin }, body,
+  })
+  assert.equal(noToken.status, 403)
+  const crossOrigin = await fetch(pasteUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${loginUrl.searchParams.get('token')}`,
+      origin: 'https://evil.example',
+    },
+    body,
+  })
+  assert.equal(crossOrigin.status, 403)
+
+  const accepted = await fetch(pasteUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${loginUrl.searchParams.get('token')}`,
+      origin: loginUrl.origin,
+    },
+    body: JSON.stringify({ key: 'sk-ACCEPTED' }),
+  })
+  assert.equal(accepted.status, 200)
+  assert.equal((await accepted.json()).ok, true)
+  assert.equal((await started.result).access_token, 'sk-ACCEPTED')
+})
+
 test('expired：静态 Key 恒不过期（「未知」≠「已过期」，401 能识别）', () => {
   assert.equal(baizhiChannel.expired({}), false)
   assert.equal(baizhiChannel.expired({ expires_at: String(Date.now() - 1000) }), false, '无续期语义，不凭 expires 判死')
