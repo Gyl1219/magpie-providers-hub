@@ -40,6 +40,7 @@
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { assignExpiryBands, debugLog, notSignedIn } from './shared.mjs'
+import { isTrustedLoopbackRequest } from './login-security.mjs'
 
 const PROVIDER = 'astudio'
 const DISPLAY = 'AStudio（讯飞）'
@@ -509,15 +510,18 @@ async function startLoginFlow() {
   const state = { wechatFd: undefined }
   let server
   let closed = false
+  let timer
   const closeServer = () => new Promise((resolve) => {
     if (closed || !server) return resolve()
     closed = true
+    clearTimeout(timer) // 主动关窗要连超时定时器一起撤，否则宿主被测进程被吊 5 分钟
     server.close(() => resolve())
   })
-  const timer = setTimeout(() => {
+  timer = setTimeout(() => {
     settleFail(new Error('AStudio 登录超时（超过 5 分钟无操作）'))
     void closeServer()
   }, LOGIN_TIMEOUT_MS)
+  timer.unref?.() // 不吊住宿主退出（与 loomy 同样处理）
 
   const sendJson = (res, status, data) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -535,9 +539,21 @@ async function startLoginFlow() {
     return text.length === 0 ? {} : JSON.parse(text)
   }
 
+  // ⚠ 先声明再在 listen 决议后赋值：handler 里要读它做同源校验，而
+  //   `server.listen()` 在 promise 决议前就已在收连接 —— 用 `const port`
+  //   会让早到的请求撞 TDZ 抛错。初值 0 走到 loginOrigin(0) 只会失败关闭。
+  let port = 0
   server = createServer(async (req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
     try {
+      // 任意网页都能往 127.0.0.1 的登录端点 POST（CSRF）：浏览器对 POST 必带
+      // Origin，所以非本页源的请求在路由之前就挡掉 —— 否则攻击者能拿**自己的**
+      // 账号密码打 /password/login，把用户的 magpie 静默绑到攻击者的账号上。
+      if (!isTrustedLoopbackRequest(req, port)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('forbidden')
+        return
+      }
       if (pathname === '/' || pathname === '/login') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
         res.end(renderLoginPage())
@@ -738,13 +754,14 @@ async function startLoginFlow() {
     }
   })
 
-  const port = await new Promise((resolve, reject) => {
+  port = await new Promise((resolve, reject) => {
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address()
       typeof addr === 'object' && addr !== null ? resolve(addr.port) : reject(new Error('无法获取端口'))
     })
     server.on('error', reject)
   })
+  server.unref() // 登录窗口是独立用户流程，不该吊住宿主的退出
 
   return { loginUrl: `http://127.0.0.1:${port}/login`, result: result.finally(() => { clearTimeout(timer) }), close: closeServer }
 }

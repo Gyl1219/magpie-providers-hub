@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { assignExpiryBands, debugLog } from './shared.mjs'
+import { isTrustedLoopbackRequest } from './login-security.mjs'
 
 const REQUEST_TIMEOUT_MS = 30_000
 /** api_key 只活 2 小时，提前 10 分钟续。 */
@@ -604,9 +605,18 @@ $('go-jwt').addEventListener('click', async () => {
     let activeBrowserSession
     const markDefaultBound = () => { if (activeBrowserSession) activeBrowserSession.defaultProfileBound = true }
 
+    // ⚠ 先声明再在 listen 决议后赋值（同 astudio）：handler 要读它做同源校验。
+    let port = 0
     server = createServer(async (req, res) => {
       const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
       try {
+        // 这四个 /api/* 都改登录状态（登录、JWT 登录、浏览器登录、Google 交接），
+        // 任意网页都能往 127.0.0.1 打；浏览器对 POST 必带 Origin，非本页源即为跨站。
+        if (!isTrustedLoopbackRequest(req, port)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end('forbidden')
+          return
+        }
         if (pathname === '/' || pathname === '/login') {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
           res.end(renderLoginPage())
@@ -704,7 +714,7 @@ $('go-jwt').addEventListener('click', async () => {
       }
     })
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = server.address().port
+    port = server.address().port
     const url = `http://127.0.0.1:${port}/login`
     try { openBrowser?.(url) } catch { /* ignore */ }
     return { url, result }

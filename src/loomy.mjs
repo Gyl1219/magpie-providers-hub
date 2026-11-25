@@ -38,6 +38,7 @@
 
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
+import { isTrustedLoopbackRequest } from './login-security.mjs'
 
 export const CHANNEL_ID = 'loomy'
 export const DISPLAY_NAME = 'Loomy (讯飞)'
@@ -906,6 +907,9 @@ async function beginLogin(openBrowser) {
   timer = setTimeout(() => settle(false, new Error('Loomy 登录超时（超过 10 分钟无操作）')), LOGIN_WINDOW_MS)
   timer.unref?.() // 不吊住宿主退出（与 server.unref 同理）
 
+  // ⚠ 先声明再在 listen 决议后赋值（同 astudio）：handler 要读它做同源校验，
+//   用 `const port` 会让 listen 已开始收连接后早到的请求撞 TDZ。
+  let port = 0
   server = createServer(async (req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
     const sendJson = (status, data) => {
@@ -913,6 +917,13 @@ async function beginLogin(openBrowser) {
       res.end(JSON.stringify(data))
     }
     try {
+      // 跨站 POST 一律挡在路由之前：/sms/login、/wechat/complete 都改登录状态，
+      // 任意网页都能打，浏览器对 POST 必带 Origin，非本页源即为跨站。
+      if (!isTrustedLoopbackRequest(req, port)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('forbidden')
+        return
+      }
       if (pathname === '/' || pathname === '/login') {
         // 页面加载时取二维码（uuid 在 beginLogin 开始时已取好）
         const qrDataUrl = await fetchLoomyWechatQrImage(state.uuid)
@@ -986,7 +997,7 @@ async function beginLogin(openBrowser) {
     }
   })
 
-  const port = await new Promise((resolve, reject) => {
+  port = await new Promise((resolve, reject) => {
     let settled = false
     server.once('error', (error) => {
       if (settled) return

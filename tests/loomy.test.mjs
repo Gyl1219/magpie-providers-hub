@@ -169,12 +169,12 @@ test('微信扫码：bind=0（未绑手机号）→ 页面走绑定表单完成�
     const pollRes = await (await fetch(started.url.replace('/login', '/wechat/poll'))).json()
     assert.equal(pollRes.status, 'need_phone', '未绑手机号 → 页面显示绑定表单')
     const send = await (await fetch(started.url.replace('/login', '/wechat/complete'), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: { 'content-type': 'application/json', origin: new URL(started.url).origin },
       body: JSON.stringify({ action: 'send_sms', phone: '13800000000' }),
     })).json()
     assert.equal(send.ok, true)
     const done = await (await fetch(started.url.replace('/login', '/wechat/complete'), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: { 'content-type': 'application/json', origin: new URL(started.url).origin },
       body: JSON.stringify({ action: 'verify_sms', phone: '13800000000', code: '123456' }),
     })).json()
     assert.equal(done.ok, true)
@@ -196,12 +196,12 @@ test('短信登录：三步流走本地页（send → msgid → login → settle
   try {
     const started = await loomyChannel.beginLogin()
     const send = await (await fetch(started.url.replace('/login', '/sms/send'), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: { 'content-type': 'application/json', origin: new URL(started.url).origin },
       body: JSON.stringify({ mobile: '13900000000' }),
     })).json()
     assert.equal(send.msgid, 'MSG1')
     await fetch(started.url.replace('/login', '/sms/login'), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: { 'content-type': 'application/json', origin: new URL(started.url).origin },
       body: JSON.stringify({ mobile: '13900000000', code: '654321', msgid: send.msgid }),
     })
     const credential = await started.result
