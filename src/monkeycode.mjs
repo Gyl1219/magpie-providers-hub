@@ -46,6 +46,7 @@ import {
   monkeycodeSigningPrompt,
 } from './monkeycode-bridge.mjs'
 import { findBrowser, newProfileDir, sweepProfiles, launchLoginBrowser, closeSession } from './magicrew-browser.mjs'
+import { createLoginToken, hasLoginAuthorization, hasLoginToken, isSameOriginPost } from './login-security.mjs'
 
 export const CHANNEL_ID = 'monkeycode'
 export const DISPLAY_NAME = 'MonkeyCode'
@@ -809,6 +810,8 @@ details{margin-top:8px;font-size:12px;color:#666}
 <details><summary>没有 Key？</summary>在官方网页登录后，平台会自动签发（本插件浏览器登录即走此路）；手动路径适合已有 Key 的高级用户。</details>
 <script>
 const msg = (t) => { document.getElementById('msg').textContent = t };
+const token = new URLSearchParams(location.search).get('token') || '';
+const authHeaders = { authorization: 'Bearer ' + token };
 document.getElementById('go').onclick = async () => {
   const key = document.getElementById('key').value.trim();
   const secret = document.getElementById('secret').value.trim();
@@ -816,7 +819,7 @@ document.getElementById('go').onclick = async () => {
   if (!key || !secret) return msg('API Key 与签名密钥必填');
   msg('保存中…');
   try {
-    const r = await fetch('/paste', { method: 'POST', headers: {'content-type':'application/json'},
+    const r = await fetch('/paste', { method: 'POST', headers: {'content-type':'application/json', ...authHeaders},
       body: JSON.stringify({ key, secret, cookie }) });
     const j = await r.json();
     msg(j.ok ? '登录成功，可以关闭此页面' : (j.message || '失败'));
@@ -826,7 +829,7 @@ document.getElementById('go').onclick = async () => {
   const el = document.getElementById('status');
   while (true) {
     try {
-      const r = await fetch('/login/status');
+      const r = await fetch('/login/status', { headers: authHeaders });
       const j = await r.json();
       if (j.phase === 'waiting-cookie') el.textContent = '浏览器已打开 —— 请在官方页面完成登录（等待会话…）';
       else if (j.phase === 'exchanging') el.textContent = '已读到会话，正在换取网关 Key…';
@@ -859,6 +862,7 @@ async function beginLoginFor(site, openBrowser) {
   const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
   result.catch(() => {})
   let server
+  let port = 0
   let closed = false
   let timer
   const closeServer = () => new Promise((resolve) => {
@@ -888,23 +892,33 @@ async function beginLoginFor(site, openBrowser) {
 
   timer = setTimeout(() => settle(false, new Error(`${site.displayName} 登录超时（15 分钟内未完成）`)), LOGIN_WINDOW_MS)
   timer.unref?.()
+  const loginToken = createLoginToken()
 
   server = createServer(async (req, res) => {
-    const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const pathname = url.pathname
     const sendJson = (status, data) => {
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(data))
     }
     try {
       if (pathname === '/' || pathname === '/login') {
+        if (!hasLoginToken(url.searchParams.get('token'), loginToken)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+          res.end('forbidden')
+          return
+        }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
         res.end(renderLoginPage(site))
         return
       }
       if (pathname === '/login/status') {
+        if (!hasLoginAuthorization(req, loginToken)) return sendJson(403, { ok: false, message: 'forbidden' })
         return sendJson(200, { phase, ...(phaseMessage !== '' ? { message: phaseMessage } : {}) })
       }
       if (pathname === '/paste') {
+        if (!isSameOriginPost(req, port)) return sendJson(403, { ok: false, message: 'cross-origin request refused' })
+        if (!hasLoginAuthorization(req, loginToken)) return sendJson(403, { ok: false, message: 'forbidden' })
         const body = await new Response(req).json().catch(() => ({}))
         const key = String(body.key ?? '').trim()
         const secret = String(body.secret ?? '').trim()
@@ -925,7 +939,7 @@ async function beginLoginFor(site, openBrowser) {
     }
   })
 
-  const port = await new Promise((resolve, reject) => {
+  port = await new Promise((resolve, reject) => {
     let settled = false
     server.once('error', (error) => {
       if (settled) return
@@ -994,7 +1008,7 @@ async function beginLoginFor(site, openBrowser) {
     }
   })()
 
-  const url = `http://127.0.0.1:${port}/login`
+  const url = `http://127.0.0.1:${port}/login?token=${encodeURIComponent(loginToken)}`
   if (openBrowser) openBrowser(url)
   return {
     url,

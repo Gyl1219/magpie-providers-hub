@@ -315,14 +315,29 @@ test('beginLogin：本地页渲染（浏览器状态区 + 粘贴表单）+ 粘�
   // 浏览器登录路会真的拉浏览器 —— stub 掉 findBrowser 不可行（内部 import）；
   // 用「不触发」断言：beginLogin 的浏览器循环独立跑，粘贴路不依赖它
   const started = await monkeycodeChannel.beginLogin()
-  assert.match(started.url, /^http:\/\/127\.0\.0\.1:\d+\/login$/)
+  assert.match(started.url, /^http:\/\/127\.0\.0\.1:\d+\/login\?token=[A-Za-z0-9_-]{43}$/)
   const page = await (await fetch(started.url)).text()
   assert.match(page, /浏览器登录/)
   assert.match(page, /API Key/)
   assert.match(page, /signing_secret/)
-  // 粘贴路 settle
-  const paste = await (await fetch(started.url.replace('/login', '/paste'), {
+  const loginUrl = new URL(started.url)
+  const token = loginUrl.searchParams.get('token')
+  const pasteUrl = new URL('/paste', loginUrl)
+  const forbidden = await fetch(pasteUrl, {
     method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ key: 'oma_BAD', secret: 'BAD' }),
+  })
+  assert.equal(forbidden.status, 403)
+  const crossOrigin = await fetch(pasteUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, origin: 'https://evil.example' },
+    body: JSON.stringify({ key: 'oma_BAD', secret: 'BAD' }),
+  })
+  assert.equal(crossOrigin.status, 403)
+  // 粘贴路 settle
+  const paste = await (await fetch(pasteUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, origin: loginUrl.origin },
     body: JSON.stringify({ key: 'oma_P', secret: 'S48', cookie: 'monkeycode_ai_session=CV' }),
   })).json()
   assert.equal(paste.ok, true)
