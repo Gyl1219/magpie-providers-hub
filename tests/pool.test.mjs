@@ -422,3 +422,68 @@ test('authorize 立刻返回（不 await 用户登录 → 不会双向死锁）'
     }
   })
 })
+
+// ── 登录：既无昵称也无组织码（Accio）─────────────────────────────────────
+//
+// 报障（ferock，2026-11-25）：Accio 登录第二个账号只会覆盖第一个。Accio 的换码
+// 响应只有 accessToken/refreshToken/expiresAt，accountId 退化成渠道显示名
+// 「Accio (阿里)」，两个账号同名 ⇒ magpie 按 accountId 认成同一个账号。
+
+const accioLoginHarness = async ({ mod, client, refresh }) => {
+  const channel = mod.REGISTERED_CHANNELS.find((c) => c.id === 'accio')
+  const original = channel.beginLogin
+  channel.beginLogin = async () => ({
+    url: 'https://auth.example/authorize',
+    result: Promise.resolve({
+      access_token: `AT-${refresh}`,
+      refresh_token: refresh,
+      expires_at: Date.now() + 3600_000,
+      region: 'cn',
+    }),
+  })
+  const plugin = await mod.makeHubPlugin(channel)({ client }, { notify: false })
+  await plugin.config({})
+  return { plugin, restore: () => { channel.beginLogin = original } }
+}
+
+test('无昵称无组织码：两个 Accio 账号各有各的 accountId（不再互相覆盖）', async () => {
+  await isolated(async ({ mod }) => {
+    const ids = []
+    for (const refresh of ['RT-ONE', 'RT-TWO']) {
+      const t = toastClient()
+      const h = await accioLoginHarness({ mod, client: t.client, refresh })
+      try {
+        const auth = await (await h.plugin.auth.methods[0].authorize()).callback()
+        ids.push(auth.accountId)
+      } finally {
+        h.restore()
+      }
+    }
+    assert.notEqual(ids[0], ids[1], `两个账号撞了同一个 accountId：${ids.join(' / ')}`)
+    for (const id of ids) assert.match(id, /^Accio \(阿里\) #[0-9a-f]{6}$/)
+  })
+})
+
+test('无昵称无组织码：已有旧槽（accountId=渠道名）时，另一个账号仍新增一个槽', async () => {
+  await isolated(async ({ mod, sandbox }) => {
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    mkdirSync(join(sandbox, '.config', 'magpie'), { recursive: true })
+    writeFileSync(process.env.DSH_HUB_AUTH_PATH, JSON.stringify({
+      'hub-accio': {
+        type: 'success', channel: 'accio', accountId: 'Accio (阿里)',
+        access_token: 'AT-OLD', refresh_token: 'RT-OLD', expires: Date.now() + 3600_000,
+      },
+    }), 'utf8')
+    const t = toastClient()
+    const h = await accioLoginHarness({ mod, client: t.client, refresh: 'RT-NEW' })
+    try {
+      const auth = await (await h.plugin.auth.methods[0].authorize()).callback()
+      await new Promise((r) => setTimeout(r, 50))
+      assert.equal(t.saved.length, 1, '第二个账号必须落自己的槽')
+      assert.notEqual(auth.accountId, 'Accio (阿里)')
+      assert.ok(t.toasts.some((m) => /新增账号/.test(m)), `应提示新增账号，实际：${t.toasts.join(' | ')}`)
+    } finally {
+      h.restore()
+    }
+  })
+})
