@@ -47,13 +47,12 @@ test('登录入口：oauth 在前、粘贴型在后（灵犀两条，marvis 三�
   for (const [exportName, makePlugin] of Object.entries(HUB_PLUGINS)) {
     const plugin = await makePlugin({}, {})
     const methods = plugin.auth.methods
-    // ⚠ 上限从 2 放宽到 3：marvis 有三条登录路（QQ / 微信 / 本机导入），
-    //   按 codearts 的形态**没有**粘贴兜底；其余渠道仍是 1-2 条。
-    assert.ok(methods.length >= 1 && methods.length <= 3, `${exportName} 入口数异常：${methods.length}`)
+    // LobsterAI 的登录 + 手动导入 + 文件导入 = 3；marvis 的 QQ / 微信 / 本机导入 = 3。
+    assert.ok(methods.length >= 1 && methods.length <= 5, `${exportName} 入口数异常：${methods.length}`)
     const apiIndexes = methods.map((m, i) => (m.type === 'api' ? i : -1)).filter((i) => i >= 0)
     const oauthMethods = methods.filter((m) => m.type === 'oauth')
     // oauth 入口必须在前（主路径），粘贴型入口在后（兜底）
-    for (const i of apiIndexes) assert.equal(i, methods.length - 1, `${exportName}: 粘贴型入口必须在最后`)
+    for (const i of apiIndexes) assert.ok(i >= oauthMethods.length, `${exportName}: api 入口必须在 oauth 之后`)
     for (const m of oauthMethods) {
       // 默认文案是「登录 <显示名>」；渠道可用 loginMethods 自定义（灵犀写成「浏览器登录…」）
       assert.ok(typeof m.label === 'string' && m.label.length > 0, `${exportName}: oauth 入口要有标签`)
@@ -61,7 +60,12 @@ test('登录入口：oauth 在前、粘贴型在后（灵犀两条，marvis 三�
     }
     for (const m of methods.filter((x) => x.type === 'api')) {
       assert.ok(typeof m.label === 'string' && m.label.length > 0, `${exportName}: api 入口要有标签`)
-      assert.equal(m.authorize, undefined, 'api 入口不该有 authorize（不是 oauth 流程）')
+      if (m.keyless) {
+        assert.equal(typeof m.authorize, 'function', `${exportName}: keyless 导入入口要有 authorize`)
+        assert.ok(Array.isArray(m.prompts) && m.prompts.length > 0, `${exportName}: keyless 导入入口缺 prompts`)
+      } else {
+        assert.equal(m.authorize, undefined, '普通 api 入口不该有 authorize（不是 oauth 流程）')
+      }
     }
   }
 })

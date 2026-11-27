@@ -43,6 +43,15 @@ const build = async (channel) => {
   return plugin
 }
 
+// 导入账号入口（手动 / 文件）也是 auth.methods 的一项，但它不是 OAuth 登录：
+// 它是 magpie 原生表单（type:'api' + keyless + prompts），不调 beginLogin、
+// 不接受 stub 的 FAKE 凭据、也不走 authorize()/callback() 双段握手。
+const importCountOf = (channel) => (channel.importCredential === undefined ? 0 : 2)
+const loginMethodsOf = (plugin, channel) => {
+  const extra = importCountOf(channel)
+  return extra === 0 ? plugin.auth.methods : plugin.auth.methods.slice(0, -extra)
+}
+
 test('每个注册渠道都实现了 beginLogin', async () => {
   assert.ok(REGISTERED_CHANNELS.length >= 7, `至少七条，实际：${REGISTERED_CHANNELS.length}`)
   for (const id of ['astudio', 'accio', 'lobsterai', 'magicrew', 'magicrew-intl', 'autoclaw', 'autoclaw-cn']) {
@@ -67,9 +76,9 @@ test('authorize 立刻返回（不 await 用户登录）', async () => {
   for (const channel of REGISTERED_CHANNELS) {
     if (channel.apiAuth !== undefined) continue // api 型没有 authorize，另有断言
     const plugin = await build(channel)
-    assert.equal(plugin.auth.methods.length, channel.loginMethods?.length ?? 1,
-      `${channel.id}: 登录入口数应与 loginMethods 声明一致`)
-    for (const method of plugin.auth.methods) {
+    assert.equal(plugin.auth.methods.length, (channel.loginMethods?.length ?? 1) + importCountOf(channel),
+      `${channel.id}: 登录入口数应与 loginMethods 声明一致（+ 导入入口）`)
+    for (const method of loginMethodsOf(plugin, channel)) {
       const started = Date.now()
       const handle = await method.authorize()
       const elapsed = Date.now() - started
@@ -87,7 +96,7 @@ test('callback 兑现凭据：success + channel 归属 + 进内存缓存', async
   for (const channel of REGISTERED_CHANNELS) {
     if (channel.apiAuth !== undefined) continue // api 型没有 callback，凭据由 magpie 直接存
     const plugin = await build(channel)
-    for (const method of plugin.auth.methods) {
+    for (const method of loginMethodsOf(plugin, channel)) {
       const handle = await method.authorize()
       const outcome = await handle.callback()
       assert.equal(outcome.type, 'success')
@@ -99,6 +108,30 @@ test('callback 兑现凭据：success + channel 归属 + 进内存缓存', async
       assert.notEqual(_internal.cachedCredentialOf(channel), undefined, `${outcome.channel}: 登录后应进内存缓存`)
       // FAKE 凭据字段被完整带进账号槽（magpie 存的就是这个对象）
       assert.equal(outcome.fake, true, `${method.label}: 凭据字段未随账号槽存储`)
+    }
+  }
+})
+
+test('导入账号入口：挂在登录方式末尾，是 magpie 原生表单（api + keyless）', async () => {
+  for (const channel of REGISTERED_CHANNELS) {
+    const plugin = await build(channel)
+    const extra = importCountOf(channel)
+    const tail = extra === 0 ? [] : plugin.auth.methods.slice(-extra)
+    assert.equal(tail.length, extra, `${channel.id}: 导入入口数`)
+    const expected = channel.importCredential === undefined
+      ? []
+      : [channel.importCredential.manualLabel, channel.importCredential.fileLabel]
+    assert.deepEqual(tail.map((method) => method.label), expected, `${channel.id}: 导入入口标题`)
+    for (const method of tail) {
+      assert.equal(method.type, 'api')
+      assert.equal(method.keyless, true, `${method.label}: 导入不该让用户填 API key`)
+      assert.ok(Array.isArray(method.prompts) && method.prompts.length > 0, `${method.label}: 缺 prompts`)
+      for (const prompt of method.prompts) {
+        assert.equal(typeof prompt.key, 'string')
+        assert.ok(['text', 'password', 'select'].includes(prompt.type), `${method.label}: prompt 类型`)
+        assert.equal(typeof prompt.message, 'string')
+      }
+      assert.equal(typeof method.authorize, 'function')
     }
   }
 })
