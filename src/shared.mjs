@@ -31,6 +31,59 @@ export function debugLog(line) {
 }
 
 /**
+ * OAuth loopback 回调的显式覆盖配置。
+ *
+ * 默认仍是 `127.0.0.1:0`，桌面端行为不变。Headless Linux 需要让另一台机器
+ * 的浏览器把回调送到服务器时，可配置公网 origin、监听地址与固定端口。
+ * 公网 origin 只允许 http/https，不允许内嵌账号、query 或 hash。
+ */
+export function oauthCallbackConfig(options = {}) {
+  const rawPort = options?.oauthCallbackPort
+  const port = rawPort === undefined || rawPort === null || rawPort === ''
+    ? 0
+    : Number(rawPort)
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error('oauthCallbackPort 必须是 0-65535 的整数')
+  }
+  const rawHost = typeof options?.oauthCallbackBindHost === 'string'
+    ? options.oauthCallbackBindHost.trim()
+    : ''
+  const bindHost = rawHost === '' ? '127.0.0.1' : rawHost
+  const rawBase = typeof options?.oauthCallbackBaseUrl === 'string'
+    ? options.oauthCallbackBaseUrl.trim()
+    : ''
+  let baseUrl
+  if (rawBase !== '') {
+    try {
+      baseUrl = new URL(rawBase)
+    } catch {
+      throw new Error('oauthCallbackBaseUrl 必须是完整的 http/https URL')
+    }
+    if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') {
+      throw new Error('oauthCallbackBaseUrl 只允许 http 或 https')
+    }
+    if (baseUrl.username !== '' || baseUrl.password !== '') {
+      throw new Error('oauthCallbackBaseUrl 不能包含账号或密码')
+    }
+    if (baseUrl.search !== '' || baseUrl.hash !== '') {
+      throw new Error('oauthCallbackBaseUrl 不能包含 query 或 hash')
+    }
+  }
+  return { bindHost, port, baseUrl }
+}
+
+/** 把固定回调路径接到默认 loopback 或显式公网 origin 后面。 */
+export function oauthCallbackUrl(config, actualPort, callbackPath) {
+  const path = callbackPath.startsWith('/') ? callbackPath : `/${callbackPath}`
+  if (config?.baseUrl) {
+    const url = new URL(config.baseUrl.toString())
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}${path}`
+    return url.toString()
+  }
+  return `http://127.0.0.1:${actualPort}${path}`
+}
+
+/**
  * magpie 的账号槽存储（plugin-auth.json）—— 供「每渠道账号数」统计与旧槽迁移用。
  * ⚠️ 只读，绝不写（那是 magpie 的地盘）；路径可用 env 重定向（测试）。
  */
