@@ -30,7 +30,7 @@
 
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { untilText } from './shared.mjs'
+import { untilText, oauthCallbackConfig, oauthCallbackUrl } from './shared.mjs'
 import { createImporter } from './lobsterai-import.mjs'
 
 export const CHANNEL_ID = 'lobsterai'
@@ -147,7 +147,8 @@ async function clientVersion() {
 // ── 登录：本地回调 + authCode 换 token ──────────────────────────────────
 
 /** 起本地回调服务，立刻返回 loginUrl + result（result 稍后 settle）。 */
-async function beginLogin(openBrowser) {
+async function beginLogin(openBrowser, opts = {}) {
+  const callback = oauthCallbackConfig(opts.options)
   let settleOk, settleFail
   const result = new Promise((resolve, reject) => { settleOk = resolve; settleFail = reject })
   result.catch(() => {})
@@ -210,7 +211,8 @@ async function beginLogin(openBrowser) {
       settled = true
       reject(error)
     })
-    server.listen(0, '127.0.0.1', () => {
+    // 默认只绑回环；只有用户显式配置 oauthCallbackBindHost 才扩大监听范围。
+    server.listen(callback.port, callback.bindHost, () => {
       settled = true
       server.on('error', () => {})
       const addr = server.address()
@@ -221,7 +223,7 @@ async function beginLogin(openBrowser) {
     throw error
   })
 
-  const redirectUri = `http://127.0.0.1:${port}${CALLBACK_PATH}`
+  const redirectUri = oauthCallbackUrl(callback, port, CALLBACK_PATH)
   const query = new URLSearchParams({ source: 'electron', redirect_uri: redirectUri, state })
   const url = `${PORTAL_BASE}/portal#/login?${query.toString()}`
   if (openBrowser) openBrowser(url)

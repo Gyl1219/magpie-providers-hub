@@ -28,7 +28,7 @@
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
-import { fetchWithRetry } from './shared.mjs'
+import { fetchWithRetry, oauthCallbackConfig, oauthCallbackUrl } from './shared.mjs'
 
 export const CHANNEL_ID = 'accio'
 export const DISPLAY_NAME = 'Accio (阿里)'
@@ -237,6 +237,7 @@ export async function refreshCredential(current) {
  */
 async function beginLogin(openBrowser, opts = {}) {
   const region = opts.arg === 'global' ? 'global' : 'cn'
+  const callback = oauthCallbackConfig(opts.options)
   const pkce = createPkce()
   const state = randomBytes(32).toString('hex')
   let settleOk, settleFail
@@ -318,8 +319,9 @@ async function beginLogin(openBrowser, opts = {}) {
       settledListen = true
       reject(error)
     })
-    // 只绑回环：绑全网卡会让同局域网机器也能投伪造的 ?code=。
-    server.listen(0, '127.0.0.1', () => {
+    // 默认只绑回环；只有用户显式配置 oauthCallbackBindHost 才扩大监听范围。
+    // 回调仍必须通过一次性 state 校验，伪造 ?code= 不会落进账号。
+    server.listen(callback.port, callback.bindHost, () => {
       settledListen = true
       server.on('error', () => {})
       const addr = server.address()
@@ -330,7 +332,7 @@ async function beginLogin(openBrowser, opts = {}) {
     throw error
   })
 
-  const redirectUri = `http://127.0.0.1:${port}${CALLBACK_PATH}`
+  const redirectUri = oauthCallbackUrl(callback, port, CALLBACK_PATH)
   const loginUrl = buildAuthUrl({ region, redirectUri, state, codeChallenge: pkce.challenge })
   if (openBrowser) openBrowser(loginUrl)
   return {

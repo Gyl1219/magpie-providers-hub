@@ -1179,10 +1179,13 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
     }
   }
 
-  /** 每个待导入账号挑一个槽 key：同账号 → 覆盖原槽；否则本体槽位空闲就用本体。 */
-  const slotKeysForImport = (accountIds) => {
+  /** 每个待导入账号挑一个槽 key：同账号 → 覆盖原槽；否则本体槽位空闲就用本体。
+   *  `reserveProviderKey`：第 0 个账号由宿主 settle 写进本体槽，故 `start > 0` 时
+   *  本体对第 2..N 个并不空闲 —— 不预占就会两个账号互相覆盖、只剩一个。 */
+  const slotKeysForImport = (accountIds, reserveProviderKey = false) => {
     const slots = readMagpieAuthSlots(PROVIDER).filter((s) => s.channel === channel.id)
     const taken = new Set()
+    if (reserveProviderKey) taken.add(PROVIDER)
     return accountIds.map((accountId) => {
       const existing = slots.find((s) => s.accountId === accountId)
       if (existing !== undefined) return existing.key
@@ -1202,7 +1205,7 @@ export const makeHubPlugin = (channel) => async (input, options = {}) => {
   /** 把第 `start` 个之后的账号写进账号槽（第 0 个交回宿主写）。 */
   const commitImportedAccounts = async (accounts, start = 0) => {
     const rest = accounts.slice(start)
-    const keys = slotKeysForImport(rest.map(importAccountId))
+    const keys = slotKeysForImport(rest.map(importAccountId), start > 0)
     const written = []
     for (let i = 0; i < rest.length; i += 1) {
       const credential = rest[i]

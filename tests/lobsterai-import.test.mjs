@@ -18,10 +18,11 @@ import { join } from 'node:path'
 
 import { parseImportPayload, createImporter } from '../src/lobsterai-import.mjs'
 import { lobsteraiChannel } from '../src/lobsterai.mjs'
-import { makeHubPlugin } from '../src/aggregate.mjs'
+import { makeHubPlugin, providerIdOf } from '../src/aggregate.mjs'
 
 const TOKEN = 'a'.repeat(48)
 const REFRESH = 'r'.repeat(48)
+const PROVIDER_ID = providerIdOf(lobsteraiChannel) // 本体槽 key，如 hub-lobsterai
 
 // 官方客户端导出的形状（C:\Users\h2147\Desktop\lobsterai-1.json 实测）
 const OFFICIAL = {
@@ -253,6 +254,7 @@ test('手动导入：结果带 refresh（宿主认的 oauth 形状），只有�
 
     // 第 1 个交给宿主 settle（插件不写），其余自己写 —— 且不覆盖同一个槽
     assert.equal(writes.length, 1)
+    assert.ok(writes[0].key.startsWith(PROVIDER_ID + '#'), 'account #2 must use ' + PROVIDER_ID + '#xxx slot, not the base slot')
     assert.equal(writes[0].body.accountId, '小号 B')
     assert.equal(writes[0].body.channel, 'lobsterai')
     assert.equal(writes[0].body.access_token, 'b'.repeat(48))
@@ -262,6 +264,29 @@ test('手动导入：结果带 refresh（宿主认的 oauth 形状），只有�
     assert.ok(toasts.some((toast) => String(toast.message).includes('已导入 2 个账号（小号 A、小号 B）')),
       '应弹出导入结果提示')
     assert.ok(toasts.some((toast) => String(toast.message).includes('已跳过')), '解析告警也要提示')
+  })
+})
+
+test('空账号槽 + 一次导入 2 个账号：第 2 个不得占用本体槽（否则与宿主写的第 1 个互相覆盖）', async () => {
+  // 真机事故形态：全新安装、一个槽都没有，第一次就导入两个号。
+  // 宿主 settle 会把第 1 个账号写进本体槽 hub-lobsterai；插件若把第 2 个也写进本体槽，
+  // 两者互相覆盖 ⇒ 只剩一个账号，用户无任何提示。
+  await withImporter({
+    submit: async () => ({
+      accounts: [
+        { nickname: '甲', access_token: TOKEN, refresh_token: REFRESH },
+        { nickname: '乙', access_token: 'b'.repeat(48) },
+      ],
+      warnings: [],
+    }),
+  }, async () => {
+    const { plugin, writes } = await build()
+    const out = await plugin.auth.methods[1].authorize({ token: TOKEN, note: '' })
+    assert.equal(out.accountId, '甲')
+    assert.equal(writes.length, 1)
+    assert.notEqual(writes[0].key, 'hub-lobsterai', '本体槽由宿主写给第 1 个，插件不能占')
+    assert.ok(writes[0].key.startsWith(PROVIDER_ID + '#'), 'accounts 2..N must use ' + PROVIDER_ID + '#xxx slot')
+    assert.equal(writes[0].body.accountId, '乙')
   })
 })
 
